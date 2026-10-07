@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use sqlx::Row;
 use std::{
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -8,7 +9,8 @@ use std::{
 use scoplen_store::{
     RelationalStore, SqliteStore,
     sync::{
-        ObjectWrite, SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
+        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS,
+        VERSION_RETENTION_DAYS, VaultKind,
     },
 };
 
@@ -53,6 +55,80 @@ fn now_ms() -> i64 {
         SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after epoch").as_millis(),
     )
     .expect("current timestamp fits SQLite integer")
+}
+
+#[tokio::test]
+async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [11; 16];
+    let account = [12; 16];
+    store.create_shared_sync_vault(vault, account, &[1, 2, 3]).await.expect("create shared vault");
+
+    let member = sqlx::query(
+        "SELECT role, key_epoch, wrapped_vault_key FROM sync_vault_members
+         WHERE vault_id = ? AND account_id = ?",
+    )
+    .bind(vault.as_slice())
+    .bind(account.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("initial member");
+    assert_eq!(member.get::<String, _>("role"), "admin");
+    assert_eq!(member.get::<i64, _>("key_epoch"), 1);
+    assert_eq!(member.get::<Vec<u8>, _>("wrapped_vault_key"), vec![1, 2, 3]);
+
+    assert!(matches!(
+        store.create_shared_sync_vault(vault, [13; 16], &[9]).await,
+        Err(SyncStoreError::VaultAlreadyExists)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ?")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("member count"),
+        1
+    );
+    assert!(matches!(
+        store.create_shared_sync_vault([14; 16], account, &[]).await,
+        Err(SyncStoreError::EmptyVaultKey)
+    ));
+    assert!(matches!(
+        store
+            .create_shared_sync_vault([15; 16], account, &vec![0; MAX_SHARED_VAULT_KEY_BYTES + 1])
+            .await,
+        Err(SyncStoreError::VaultKeyTooLarge)
+    ));
+
+    sqlx::query(
+        "CREATE TRIGGER reject_sync_vault_member BEFORE INSERT ON sync_vault_members
+         BEGIN SELECT RAISE(ABORT, 'injected member failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("install failure trigger");
+    let rolled_back_vault = [16; 16];
+    assert!(matches!(
+        store.create_shared_sync_vault(rolled_back_vault, account, &[4]).await,
+        Err(SyncStoreError::Constraint(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_vaults WHERE vault_id = ?")
+            .bind(rolled_back_vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("rolled back vault count"),
+        0
+    );
+    sqlx::query("DROP TRIGGER reject_sync_vault_member")
+        .execute(store.pool())
+        .await
+        .expect("remove failure trigger");
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
 }
 
 #[tokio::test]

@@ -8,6 +8,16 @@ CREATE TABLE sync_vaults (
     CHECK (purge_horizon <= current_seq)
 );
 
+CREATE TABLE sync_vault_members (
+    vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
+    account_id BLOB NOT NULL CHECK (length(account_id) = 16),
+    role TEXT NOT NULL CHECK (role IN ('admin', 'member')),
+    key_epoch INTEGER NOT NULL CHECK (key_epoch > 0),
+    wrapped_vault_key BLOB NOT NULL CHECK (length(wrapped_vault_key) > 0 AND length(wrapped_vault_key) <= 65536),
+    PRIMARY KEY (vault_id, account_id),
+    FOREIGN KEY (vault_id) REFERENCES sync_vaults (vault_id) ON DELETE CASCADE
+);
+
 CREATE TABLE sync_objects (
     vault_id BLOB NOT NULL,
     object_id BLOB NOT NULL CHECK (length(object_id) = 16),
@@ -45,3 +55,4 @@ CREATE TABLE sync_acks (
 
 CREATE INDEX sync_objects_by_vault_sequence ON sync_objects (vault_id, sequence);
 CREATE INDEX sync_versions_by_vault_sequence ON sync_object_versions (vault_id, sequence);
+CREATE INDEX sync_vault_members_by_account ON sync_vault_members (account_id, vault_id);

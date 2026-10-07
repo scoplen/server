@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection `POST /sync/v1/vaults` shared-vault creation with deterministic
+  CBOR decoding, UUIDv7 and bounded-wrap validation, duplicate conflict mapping, and a response
+  descriptor fixed to epoch one. SQLite persists the creator's admin/member row and opaque key wrap
+  atomically; migration parity and storage rollback tests cover the durable boundary.
 - Added an authenticated-injection `/sync/v1/notify` WebSocket adapter with bounded first-message
   credentials, fail-closed device authorization, per-device local fan-out, deterministic CBOR event
   delivery, lag handling, and route-level success and rejection tests. Multi-instance delivery and

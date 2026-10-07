@@ -87,6 +87,46 @@ const SYNC_VAULTS: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const SYNC_VAULT_MEMBERS: TableSpec = TableSpec {
+    name: "sync_vault_members",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "role", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "key_epoch",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "wrapped_vault_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "vault_id",
+        target_table: "sync_vaults",
+        target_column: "vault_id",
+    }],
+    indexes: &[IndexSpec {
+        name: "sync_vault_members_by_account",
+        columns: &["account_id", "vault_id"],
+    }],
+};
+
 const SYNC_OBJECTS: TableSpec = TableSpec {
     name: "sync_objects",
     columns: &[
@@ -430,6 +470,7 @@ const JOBS: TableSpec = TableSpec {
 const TABLES: &[TableSpec] = &[
     ORGANIZATIONS,
     SYNC_VAULTS,
+    SYNC_VAULT_MEMBERS,
     SYNC_OBJECTS,
     SYNC_OBJECT_VERSIONS,
     SYNC_ACKS,

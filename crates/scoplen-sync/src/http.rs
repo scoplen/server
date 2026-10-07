@@ -38,6 +38,8 @@ const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The operation requested from the authenticator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncOperation {
+    /// Create a shared vault owned by the authenticated account.
+    CreateVault,
     /// Read the current change feed.
     Read,
     /// Read a full reconciliation snapshot.
@@ -252,6 +254,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
     Router::new()
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
         .route("/sync/v1/notify", get(notify::<A>))
+        .route("/sync/v1/vaults", post(create_vault::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -344,6 +347,53 @@ fn notification_authentication_required() -> AuthFailure {
         false,
     )
     .expect("static notification authentication failure is valid")
+}
+
+async fn create_vault<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    require_cbor(&headers, &instance)?;
+    let identity = state
+        .authenticator
+        .authenticate(&method, &uri, &headers)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let request = api::SyncCreateVaultRequest::from_cbor(&body).map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("invalid shared-vault creation request: {error}"))
+    })?;
+    let vault = request.vault_id.into_bytes();
+    state
+        .authenticator
+        .authorize(identity, vault, SyncOperation::CreateVault)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let account_id = state
+        .authenticator
+        .account_id(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    state
+        .store
+        .create_shared_sync_vault(vault, account_id, &request.wrapped_vault_key)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncCreateVaultResponse {
+        vault: api::SessionVault {
+            id: request.vault_id,
+            kind: api::VaultKind::Shared,
+            seq: 0,
+            key_epoch: 1,
+            rotation_pending: false,
+        },
+    };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(
+            &instance,
+            format!("could not encode shared-vault response: {error}"),
+        )
+    })?))
 }
 
 async fn keys_get<A: SyncAuthenticator>(
@@ -764,6 +814,15 @@ impl SyncHttpError {
 
     fn from_store(error: storage::SyncStoreError, instance: &str) -> Box<Self> {
         match error {
+            storage::SyncStoreError::VaultAlreadyExists => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync vault already exists",
+                "The requested vault identifier is already present; no data changed and retrying with the same identifier will not help.",
+                false,
+                false,
+            ),
             storage::SyncStoreError::VaultNotFound | storage::SyncStoreError::ObjectNotFound => {
                 Self::known(
                     instance,
@@ -817,6 +876,10 @@ impl SyncHttpError {
             | storage::SyncStoreError::InvalidPageSize
             | storage::SyncStoreError::InvalidRetentionTime => {
                 Self::invalid(instance, error.to_string())
+            }
+            storage::SyncStoreError::EmptyVaultKey => Self::invalid(instance, error.to_string()),
+            storage::SyncStoreError::VaultKeyTooLarge => {
+                Self::too_large(instance, error.to_string())
             }
             storage::SyncStoreError::Constraint(_)
             | storage::SyncStoreError::SequenceExhausted
@@ -1183,6 +1246,77 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    #[tokio::test]
+    async fn shared_vault_creation_round_trips_and_rejects_duplicates() {
+        let (store, _vault, device) = test_store().await;
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let vault = Uuid::now_v7();
+        let body =
+            api::SyncCreateVaultRequest { vault_id: vault, wrapped_vault_key: vec![1, 2, 3] }
+                .to_cbor()
+                .expect("create request");
+        let make_request = || {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync/v1/vaults")
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body.clone()))
+            .expect("create request builder")
+        };
+
+        let response = app.clone().oneshot(make_request()).await.expect("create response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("create response body");
+        let created =
+            api::SyncCreateVaultResponse::from_cbor(&response_body).expect("create response cbor");
+        assert_eq!(created.vault.id, vault);
+        assert_eq!(created.vault.kind, api::VaultKind::Shared);
+        assert_eq!(created.vault.seq, 0);
+        assert_eq!(created.vault.key_epoch, 1);
+        assert!(!created.vault.rotation_pending);
+
+        let response = app.clone().oneshot(make_request()).await.expect("duplicate response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("duplicate body");
+        let problem = ProblemDetails::from_cbor(&response_body).expect("duplicate problem");
+        assert_eq!(problem.code.as_str(), "sync.conflict");
+        assert!(!problem.changed);
+        assert!(!problem.retryable);
+    }
+
+    #[tokio::test]
+    async fn shared_vault_creation_preserves_auth_and_request_boundaries() {
+        let (store, _vault, device) = test_store().await;
+        let request = || {
+            Request::builder()
+                .method("POST")
+                .uri("/sync/v1/vaults")
+                .header(header::CONTENT_TYPE, "application/cbor")
+        };
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let response = app
+            .clone()
+            .oneshot(request().body(Body::from(vec![0xf6])).expect("malformed request"))
+            .await
+            .expect("malformed response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body =
+            api::SyncCreateVaultRequest { vault_id: Uuid::now_v7(), wrapped_vault_key: vec![1] }
+                .to_cbor()
+                .expect("valid request");
+        let denied = router(store, TestAuthenticator::new(device, false));
+        let response = denied
+            .oneshot(request_headers(request()).body(Body::from(body)).expect("denied request"))
+            .await
+            .expect("denied response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     fn key_update(device_ids: [storage::DeviceId; 2]) -> api::SyncAccountKeyBundleUpdate {

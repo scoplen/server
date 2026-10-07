@@ -14,7 +14,7 @@ use std::{
 use sqlx::{Row, Sqlite, Transaction};
 use thiserror::Error;
 
-use crate::{RelationalStore, SqliteStore};
+use crate::{RelationalStore, SqliteStore, account_keys::AccountId};
 
 /// Maximum envelope size from the sync protocol's default limits.
 pub const MAX_ENVELOPE_BYTES: usize = 260 * 1024;
@@ -30,6 +30,8 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 pub const VERSION_RETENTION_DAYS: i64 = 30;
 /// Tombstones are eligible for time-based purging after this many days.
 pub const TOMBSTONE_PURGE_AFTER_DAYS: i64 = 180;
+/// Maximum size of the opaque wrapped epoch-1 shared-vault key.
+pub const MAX_SHARED_VAULT_KEY_BYTES: usize = 64 * 1024;
 
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
@@ -146,6 +148,15 @@ pub enum SyncStoreError {
     /// The requested vault is not present.
     #[error("sync vault does not exist")]
     VaultNotFound,
+    /// A shared vault with this identifier is already present.
+    #[error("sync vault already exists")]
+    VaultAlreadyExists,
+    /// The initial shared-vault key wrap is empty.
+    #[error("shared-vault key wrap must not be empty")]
+    EmptyVaultKey,
+    /// The initial shared-vault key wrap exceeds the protocol bound.
+    #[error("shared-vault key wrap exceeds {MAX_SHARED_VAULT_KEY_BYTES} bytes")]
+    VaultKeyTooLarge,
     /// A vault with this identifier already exists or another schema constraint was violated.
     #[error("sync storage constraint failed: {0}")]
     Constraint(#[source] sqlx::Error),
@@ -217,6 +228,58 @@ impl SqliteStore {
                 sqlx::Error::Database(_) => SyncStoreError::Constraint(error),
                 other => SyncStoreError::Database(other),
             })
+    }
+
+    /// Atomically create a shared vault and its initial admin/member key wrap.
+    ///
+    /// The account identifier is supplied by the authenticated service boundary. The store keeps
+    /// the wrapped key opaque and records it at epoch one without decrypting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultAlreadyExists`] without changing state when the identifier
+    /// is already present, validation errors for an invalid wrap, and a storage error when either
+    /// row cannot be committed.
+    pub async fn create_shared_sync_vault(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+        wrapped_vault_key: &[u8],
+    ) -> Result<(), SyncStoreError> {
+        if wrapped_vault_key.is_empty() {
+            return Err(SyncStoreError::EmptyVaultKey);
+        }
+        if wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
+            return Err(SyncStoreError::VaultKeyTooLarge);
+        }
+
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM sync_vaults WHERE vault_id = ?")
+            .bind(vault_id.as_slice())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        if exists.is_some() {
+            return Err(SyncStoreError::VaultAlreadyExists);
+        }
+
+        sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES (?, 'shared')")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_members
+             (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+             VALUES (?, ?, 'admin', 1, ?)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Return the kind of one sync vault for service-level authorization checks.
@@ -709,6 +772,13 @@ fn validate_batch(writes: &[ObjectWrite]) -> Result<(), SyncStoreError> {
         return Err(SyncStoreError::BatchByteLimit);
     }
     Ok(())
+}
+
+fn map_constraint(error: sqlx::Error) -> SyncStoreError {
+    match error {
+        sqlx::Error::Database(_) => SyncStoreError::Constraint(error),
+        other => SyncStoreError::Database(other),
+    }
 }
 
 fn change_from_row(
