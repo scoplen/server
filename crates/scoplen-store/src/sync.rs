@@ -185,6 +185,12 @@ pub enum SyncStoreError {
     /// The supplied member wraps do not cover the current epoch set.
     #[error("sync vault member epochs do not match current epochs")]
     MemberEpochMismatch,
+    /// The requested account is not a current member of the vault.
+    #[error("sync vault member does not exist")]
+    MemberNotFound,
+    /// Removing this account would leave the shared vault without an admin.
+    #[error("sync vault cannot remove its last admin")]
+    LastAdmin,
     /// The epoch wrap list is empty, oversized, unsorted, or duplicated.
     #[error("sync vault epoch wraps are invalid")]
     InvalidEpochWraps,
@@ -442,6 +448,10 @@ impl SqliteStore {
             .execute(&mut *transaction)
             .await?;
         }
+        sqlx::query("UPDATE sync_vaults SET rotation_pending = 0 WHERE vault_id = ?")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -512,6 +522,56 @@ impl SqliteStore {
             .await
             .map_err(map_constraint)?;
         }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically remove a shared-vault member and mark the vault for re-keying.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::MemberNotFound`] when the account is not a current member,
+    /// [`SyncStoreError::LastAdmin`] when removal would leave no admin, and a storage error when
+    /// the membership, historical wraps, or pending marker cannot be committed together.
+    pub async fn remove_shared_sync_vault_member(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+    ) -> Result<(), SyncStoreError> {
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        lock_vault(&mut transaction, vault_id).await?;
+        let role = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM sync_vault_members WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(SyncStoreError::MemberNotFound)?;
+        if role == "admin" {
+            let admin_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ? AND role = 'admin'",
+            )
+            .bind(vault_id.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if admin_count <= 1 {
+                return Err(SyncStoreError::LastAdmin);
+            }
+        }
+        let deleted =
+            sqlx::query("DELETE FROM sync_vault_members WHERE vault_id = ? AND account_id = ?")
+                .bind(vault_id.as_slice())
+                .bind(account_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(SyncStoreError::MemberNotFound);
+        }
+        sqlx::query("UPDATE sync_vaults SET rotation_pending = 1 WHERE vault_id = ?")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
         Ok(())
     }

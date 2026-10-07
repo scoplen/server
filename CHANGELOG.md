@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection `DELETE /sync/v1/vaults/{vault}/members/{account}` with
+  last-admin protection, atomic member and wrap removal, and a durable rotation-pending marker.
+  Successful next-epoch publication clears the marker. The identity service remains responsible
+  for immediately denying removed devices' vault operations.
 - Added authenticated-injection `POST /sync/v1/vaults/{vault}/members` with bounded sorted epoch
   wraps, exact current-epoch coverage, duplicate-member conflict mapping, and atomic membership
   plus historical-wrap persistence. Route and storage tests cover missing epochs and rollback.

@@ -259,6 +259,122 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn shared_vault_member_removal_cascades_and_marks_rotation() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [31; 16];
+    let admin = [32; 16];
+    let member = [33; 16];
+    store.create_shared_sync_vault(vault, admin, &[1, 2]).await.expect("create shared vault");
+    store
+        .add_shared_sync_vault_member(
+            vault,
+            member,
+            &[SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3, 4] }],
+        )
+        .await
+        .expect("add member");
+
+    store.remove_shared_sync_vault_member(vault, member).await.expect("remove member");
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT rotation_pending FROM sync_vaults WHERE vault_id = ?",
+        )
+        .bind(vault.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("pending marker"),
+        1
+    );
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, member).await,
+        Err(SyncStoreError::MemberNotFound)
+    ));
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, admin).await,
+        Err(SyncStoreError::LastAdmin)
+    ));
+
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![5, 6] }],
+        )
+        .await
+        .expect("publish replacement epoch");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT rotation_pending FROM sync_vaults WHERE vault_id = ?",
+        )
+        .bind(vault.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("cleared pending marker"),
+        0
+    );
+
+    let second_member = [34; 16];
+    store
+        .add_shared_sync_vault_member(
+            vault,
+            second_member,
+            &[
+                SharedVaultKey { epoch: 1, wrapped_vault_key: vec![7] },
+                SharedVaultKey { epoch: 2, wrapped_vault_key: vec![8] },
+            ],
+        )
+        .await
+        .expect("add second member");
+    sqlx::query(
+        "CREATE TRIGGER reject_sync_vault_pending BEFORE UPDATE OF rotation_pending ON sync_vaults
+         BEGIN SELECT RAISE(ABORT, 'injected pending marker failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("install pending marker failure trigger");
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, second_member).await,
+        Err(SyncStoreError::Database(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault.as_slice())
+        .bind(second_member.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("rolled-back member"),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_member_keys WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault.as_slice())
+        .bind(second_member.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("rolled-back member keys"),
+        2
+    );
+    sqlx::query("DROP TRIGGER reject_sync_vault_pending")
+        .execute(store.pool())
+        .await
+        .expect("remove pending marker failure trigger");
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
 async fn writes_and_pages_return_only_current_versions() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");

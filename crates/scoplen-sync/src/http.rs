@@ -18,7 +18,7 @@ use axum::{
     extract::{Path, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
 use scoplen_model::cbor::{self, Value};
@@ -44,6 +44,8 @@ pub enum SyncOperation {
     PublishVaultEpoch,
     /// Add a member to a shared vault.
     AddVaultMember,
+    /// Remove a member from a shared vault.
+    RemoveVaultMember,
     /// Read the current change feed.
     Read,
     /// Read a full reconciliation snapshot.
@@ -262,6 +264,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/epochs", post(publish_vault_epoch::<A>))
         .route("/sync/v1/vaults/{vault}/members", post(add_vault_member::<A>))
+        .route("/sync/v1/vaults/{vault}/members/{account}", delete(remove_vault_member::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -523,6 +526,49 @@ async fn add_vault_member<A: SyncAuthenticator>(
         SyncHttpError::invalid(
             &instance,
             format!("could not encode shared-vault member response: {error}"),
+        )
+    })?))
+}
+
+async fn remove_vault_member<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    Path((vault, account)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    let vault = parse_uuid(&vault, "vault", &instance)?;
+    let account_id = parse_uuid(&account, "account", &instance)?;
+    let _identity = authorize(
+        &state,
+        &method,
+        &uri,
+        &headers,
+        vault,
+        SyncOperation::RemoveVaultMember,
+        &instance,
+    )?;
+    if !body.is_empty() {
+        return Err(SyncHttpError::invalid(
+            &instance,
+            "shared-vault member removal does not accept a request body",
+        ));
+    }
+    state
+        .store
+        .remove_shared_sync_vault_member(vault, account_id)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncRemoveVaultMemberResponse {
+        account_id: Uuid::from_bytes(account_id),
+        rotation_pending: true,
+    };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(
+            &instance,
+            format!("could not encode shared-vault member removal response: {error}"),
         )
     })?))
 }
@@ -975,20 +1021,19 @@ impl SyncHttpError {
             }
             error @ (storage::SyncStoreError::MemberAlreadyExists
             | storage::SyncStoreError::MemberEpochMismatch
-            | storage::SyncStoreError::InvalidMemberWraps) => {
-                Self::from_member_store(&error, instance)
-            }
-            storage::SyncStoreError::VaultNotFound | storage::SyncStoreError::ObjectNotFound => {
-                Self::known(
-                    instance,
-                    StatusCode::NOT_FOUND,
-                    "sync.object_not_found",
-                    "Sync object not found",
-                    "The requested sync resource does not exist; no data changed and retrying will not help.",
-                    false,
-                    false,
-                )
-            }
+            | storage::SyncStoreError::InvalidMemberWraps
+            | storage::SyncStoreError::LastAdmin) => Self::from_member_store(&error, instance),
+            storage::SyncStoreError::VaultNotFound
+            | storage::SyncStoreError::MemberNotFound
+            | storage::SyncStoreError::ObjectNotFound => Self::known(
+                instance,
+                StatusCode::NOT_FOUND,
+                "sync.object_not_found",
+                "Sync object not found",
+                "The requested sync resource does not exist; no data changed and retrying will not help.",
+                false,
+                false,
+            ),
             storage::SyncStoreError::CursorExpired { purge_horizon } => Self::known(
                 instance,
                 StatusCode::GONE,
@@ -1041,7 +1086,7 @@ impl SyncHttpError {
             | storage::SyncStoreError::CorruptRow(_)
             | storage::SyncStoreError::Database(_) => Self::known(
                 instance,
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "sync.storage_unavailable",
                 "Sync service unavailable",
                 "The server could not complete the sync request; no data changed and retrying may help.",
@@ -1069,6 +1114,15 @@ impl SyncHttpError {
             storage::SyncStoreError::InvalidMemberWraps => {
                 Self::invalid(instance, "shared-vault member wraps are invalid")
             }
+            storage::SyncStoreError::LastAdmin => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync vault must retain an administrator",
+                "The last vault administrator cannot be removed; no data changed and retrying will not help.",
+                false,
+                false,
+            ),
             _ => unreachable!("non-member storage error passed to member mapper"),
         }
     }
@@ -1636,6 +1690,123 @@ mod tests {
             ProblemDetails::from_cbor(&response_body).expect("missing epoch problem").code.as_str(),
             "sync.invalid_request"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn shared_vault_member_removal_routes_and_marks_rotation() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let admin = TestAuthenticator::account_id();
+        let member = Uuid::now_v7();
+        store
+            .create_shared_sync_vault(vault.into_bytes(), admin, &[1, 2, 3])
+            .await
+            .expect("create shared vault");
+        store
+            .add_shared_sync_vault_member(
+                vault.into_bytes(),
+                member.into_bytes(),
+                &[storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![4, 5] }],
+            )
+            .await
+            .expect("add member");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let removal_request = || {
+            request_headers(Request::builder().method("DELETE").uri(format!(
+                "/sync/v1/vaults/{}/members/{}",
+                path(vault.into_bytes()),
+                member
+            )))
+            .body(Body::empty())
+            .expect("removal request builder")
+        };
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sync/v1/vaults/{}/members/{}", path(vault.into_bytes()), member))
+                    .body(Body::from(vec![1]))
+                    .expect("unauthenticated removal request"),
+            )
+            .await
+            .expect("unauthenticated removal response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let denied = router(store.clone(), TestAuthenticator::new(device, false));
+        let response = denied.oneshot(removal_request()).await.expect("denied removal response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app.clone().oneshot(removal_request()).await.expect("removal response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("removal response body");
+        assert_eq!(
+            api::SyncRemoveVaultMemberResponse::from_cbor(&response_body)
+                .expect("removal response cbor"),
+            api::SyncRemoveVaultMemberResponse { account_id: member, rotation_pending: true }
+        );
+        let response = app.clone().oneshot(removal_request()).await.expect("missing removal");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("missing removal body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&response_body)
+                .expect("missing removal problem")
+                .code
+                .as_str(),
+            "sync.object_not_found"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                request_headers(Request::builder().method("DELETE").uri(format!(
+                    "/sync/v1/vaults/{}/members/{}",
+                    path(vault.into_bytes()),
+                    Uuid::from_bytes(admin)
+                )))
+                .body(Body::empty())
+                .expect("last admin request builder"),
+            )
+            .await
+            .expect("last admin response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("last admin body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&response_body).expect("last admin problem").code.as_str(),
+            "sync.conflict"
+        );
+
+        let response = app
+            .clone()
+            .oneshot(
+                request_headers(Request::builder().method("DELETE").uri(format!(
+                    "/sync/v1/vaults/{}/members/{}",
+                    path(vault.into_bytes()),
+                    Uuid::now_v7()
+                )))
+                .body(Body::from(vec![1]))
+                .expect("body request builder"),
+            )
+            .await
+            .expect("body response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(
+                request_headers(Request::builder().method("DELETE").uri(format!(
+                    "/sync/v1/vaults/{}/members/not-a-uuid",
+                    path(vault.into_bytes())
+                )))
+                .body(Body::empty())
+                .expect("malformed account request builder"),
+            )
+            .await
+            .expect("malformed account response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

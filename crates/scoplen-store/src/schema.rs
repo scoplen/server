@@ -82,6 +82,12 @@ const SYNC_VAULTS: TableSpec = TableSpec {
             nullable: false,
             primary_key: false,
         },
+        ColumnSpec {
+            name: "rotation_pending",
+            kind: LogicalType::Boolean,
+            nullable: false,
+            primary_key: false,
+        },
     ],
     foreign_keys: &[],
     indexes: &[],
@@ -560,9 +566,8 @@ type SchemaShape = BTreeMap<String, TableShape>;
 fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType, String> {
     let declared = declared.trim().to_ascii_uppercase();
     match (table, column, declared.as_str()) {
-        ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER") => {
-            Ok(LogicalType::Boolean)
-        }
+        ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER")
+        | ("sync_vaults", "rotation_pending", "INTEGER") => Ok(LogicalType::Boolean),
         (_, _, "BLOB") => Ok(LogicalType::Bytes),
         (_, _, "TEXT") => Ok(LogicalType::Text),
         (_, _, "INTEGER") => Ok(LogicalType::Integer),
@@ -573,9 +578,8 @@ fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType,
 #[cfg(feature = "postgres-integration")]
 fn postgres_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType, String> {
     match (table, column, declared) {
-        ("sync_objects" | "sync_object_versions", "tombstone", "boolean") => {
-            Ok(LogicalType::Boolean)
-        }
+        ("sync_objects" | "sync_object_versions", "tombstone", "boolean")
+        | ("sync_vaults", "rotation_pending", "boolean") => Ok(LogicalType::Boolean),
         (_, _, "bytea") => Ok(LogicalType::Bytes),
         (_, _, "text") => Ok(LogicalType::Text),
         (_, _, "bigint") => Ok(LogicalType::Integer),
@@ -806,9 +810,17 @@ fn validate_migration_source(source: &str, postgres: bool) -> Result<(), String>
     for table in TABLES {
         let body = table_source(source, table.name)?;
         for column in table.columns {
-            let line = body.lines().find(|line| {
-                line.trim_start().to_ascii_lowercase().starts_with(&format!("{} ", column.name))
-            });
+            let line = body
+                .lines()
+                .find(|line| {
+                    line.trim_start().to_ascii_lowercase().starts_with(&format!("{} ", column.name))
+                })
+                .or_else(|| {
+                    let marker = format!("alter table {} add column {}", table.name, column.name);
+                    source
+                        .lines()
+                        .find(|line| line.trim_start().to_ascii_lowercase().starts_with(&marker))
+                });
             let line =
                 line.ok_or_else(|| format!("{} is missing from {}", column.name, table.name))?;
             let normalized = line.to_ascii_lowercase();
@@ -851,12 +863,16 @@ mod tests {
     const SQLITE_ORGANIZATIONS: &str =
         include_str!("../migrations/sqlite/20261007000000_organizations.sql");
     const SQLITE_SYNC: &str = include_str!("../migrations/sqlite/20261007010000_sync.sql");
+    const SQLITE_MEMBER_REMOVAL: &str =
+        include_str!("../migrations/sqlite/20261008000000_shared_vault_member_removal.sql");
     const SQLITE_KEYS: &str =
         include_str!("../migrations/sqlite/20261007020000_account_key_bundles.sql");
     const SQLITE_JOBS: &str = include_str!("../migrations/sqlite/20261007030000_jobs.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_SYNC: &str = include_str!("../migrations/postgres/20261007010000_sync.sql");
+    const POSTGRES_MEMBER_REMOVAL: &str =
+        include_str!("../migrations/postgres/20261008000000_shared_vault_member_removal.sql");
     const POSTGRES_KEYS: &str =
         include_str!("../migrations/postgres/20261007020000_account_key_bundles.sql");
     const POSTGRES_JOBS: &str = include_str!("../migrations/postgres/20261007030000_jobs.sql");
@@ -881,8 +897,15 @@ mod tests {
 
     #[test]
     fn migration_pairs_match_the_logical_schema() {
-        let sqlite = [SQLITE_ORGANIZATIONS, SQLITE_SYNC, SQLITE_KEYS, SQLITE_JOBS];
-        let postgres = [POSTGRES_ORGANIZATIONS, POSTGRES_SYNC, POSTGRES_KEYS, POSTGRES_JOBS];
+        let sqlite =
+            [SQLITE_ORGANIZATIONS, SQLITE_SYNC, SQLITE_KEYS, SQLITE_JOBS, SQLITE_MEMBER_REMOVAL];
+        let postgres = [
+            POSTGRES_ORGANIZATIONS,
+            POSTGRES_SYNC,
+            POSTGRES_KEYS,
+            POSTGRES_JOBS,
+            POSTGRES_MEMBER_REMOVAL,
+        ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
         validate_migration_source(&postgres.join("\n"), true)
@@ -930,7 +953,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 4);
+        assert_eq!(migration_count, 5);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -939,7 +962,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 4);
+        assert_eq!(replay_count, 5);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
