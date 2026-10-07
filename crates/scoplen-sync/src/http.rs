@@ -354,13 +354,17 @@ async fn session<A: SyncAuthenticator>(
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let vaults = state
         .store
-        .list_shared_sync_vaults_for_account(account_id)
+        .list_sync_vaults_for_account(account_id)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?
         .into_iter()
         .map(|vault| api::SessionVault {
             id: Uuid::from_bytes(vault.vault_id),
-            kind: api::VaultKind::Shared,
+            kind: match vault.kind {
+                storage::VaultKind::Personal => api::VaultKind::Personal,
+                storage::VaultKind::Shared => api::VaultKind::Shared,
+                storage::VaultKind::Organization => api::VaultKind::Organization,
+            },
             seq: vault.sequence,
             key_epoch: vault.key_epoch,
             rotation_pending: vault.rotation_pending,
@@ -1601,6 +1605,51 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    #[tokio::test]
+    async fn session_lists_only_authenticated_accounts_personal_vault() {
+        let (store, _fixture, device) = test_store().await;
+        let owner = TestAuthenticator::account_id();
+        let personal = Uuid::now_v7();
+        let outsider = Uuid::now_v7();
+        store
+            .create_personal_sync_vault(personal.into_bytes(), owner, &[1, 2])
+            .await
+            .expect("owner personal vault");
+        store
+            .create_personal_sync_vault(outsider.into_bytes(), Uuid::now_v7().into_bytes(), &[3])
+            .await
+            .expect("other personal vault");
+        let body = api::SyncSessionRequest {
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            model_version: CURRENT_SCHEMA_VERSION,
+            device_id: Uuid::from_bytes(device),
+        }
+        .to_cbor()
+        .expect("session body");
+        let response = router(store, TestAuthenticator::new(device, true))
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/sync/v1/session")
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(body))
+                .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("session bytes");
+        let session = api::SyncSessionResponse::from_cbor(&bytes).expect("session cbor");
+        assert_eq!(session.vaults.len(), 1);
+        assert_eq!(session.vaults[0].id, personal);
+        assert_eq!(session.vaults[0].kind, api::VaultKind::Personal);
+        assert_eq!(session.vaults[0].seq, 0);
+        assert_eq!(session.vaults[0].key_epoch, 1);
+        assert!(!session.vaults[0].rotation_pending);
     }
 
     #[tokio::test]
