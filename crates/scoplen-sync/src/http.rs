@@ -21,7 +21,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
-use scoplen_model::cbor::{self, Value};
+use scoplen_model::{
+    CURRENT_SCHEMA_VERSION,
+    cbor::{self, Value},
+};
 use scoplen_store::{SqliteStore, account_keys as key_storage, sync as storage};
 use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
@@ -32,6 +35,8 @@ pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 
 /// Maximum size of the first WebSocket message handed to the notification authenticator.
 pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
+/// Maximum encoded session handshake request size.
+pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
 
 const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -177,6 +182,13 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         identity: AuthenticatedDevice,
     ) -> Result<key_storage::AccountId, AuthFailure>;
 
+    /// Authorize an enrolled device to list the vaults of its own account.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication or policy failure if the device may not start sync.
+    fn authorize_session(&self, identity: AuthenticatedDevice) -> Result<(), AuthFailure>;
+
     /// Authorize an account-key operation after `DPoP` authentication.
     ///
     /// # Errors
@@ -258,6 +270,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
 ) -> Router {
     let state = SyncHttpState { store, authenticator, notifications };
     Router::new()
+        .route("/sync/v1/session", post(session::<A>))
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
         .route("/sync/v1/notify", get(notify::<A>))
         .route("/sync/v1/vaults", post(create_vault::<A>))
@@ -279,6 +292,98 @@ struct SyncHttpState<A> {
     store: Arc<SqliteStore>,
     authenticator: A,
     notifications: NotificationHub,
+}
+
+async fn session<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    require_cbor(&headers, &instance)?;
+    let identity = state
+        .authenticator
+        .authenticate(&method, &uri, &headers)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    if body.len() > MAX_SESSION_REQUEST_BYTES {
+        return Err(SyncHttpError::too_large(&instance, "sync session request is too large"));
+    }
+    let request = api::SyncSessionRequest::from_cbor(&body).map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("invalid session request: {error}"))
+    })?;
+    if request.device_id.as_bytes() != &identity.device_id {
+        return Err(SyncHttpError::known(
+            &instance,
+            StatusCode::UNAUTHORIZED,
+            "auth.authentication_required",
+            "Authentication required",
+            "The session device does not match the authenticated device; no data changed and authenticate again.",
+            false,
+            false,
+        ));
+    }
+    let client_version = semver::Version::parse(&request.client_version).map_err(|_| {
+        SyncHttpError::invalid(&instance, "client_version must be a semantic release version")
+    })?;
+    let server_version =
+        semver::Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semantic");
+    if client_version.major != server_version.major
+        || client_version.minor > server_version.minor
+        || server_version.minor - client_version.minor > 2
+        || request.model_version > CURRENT_SCHEMA_VERSION
+    {
+        return Err(SyncHttpError::known(
+            &instance,
+            StatusCode::UPGRADE_REQUIRED,
+            "sync.client_unsupported",
+            "Client version unsupported",
+            "The client or object-model version is outside this server's compatibility window; no data changed and update the client before syncing.",
+            false,
+            false,
+        ));
+    }
+    state
+        .authenticator
+        .authorize_session(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let account_id = state
+        .authenticator
+        .account_id(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let vaults = state
+        .store
+        .list_shared_sync_vaults_for_account(account_id)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?
+        .into_iter()
+        .map(|vault| api::SessionVault {
+            id: Uuid::from_bytes(vault.vault_id),
+            kind: api::VaultKind::Shared,
+            seq: vault.sequence,
+            key_epoch: vault.key_epoch,
+            rotation_pending: vault.rotation_pending,
+        })
+        .collect();
+    let response = api::SyncSessionResponse {
+        server_version: server_version.to_string(),
+        max_model_version: CURRENT_SCHEMA_VERSION,
+        limits: api::SyncLimits {
+            max_envelope_bytes: storage::MAX_ENVELOPE_BYTES as u64,
+            max_batch_objects: storage::MAX_BATCH_OBJECTS as u64,
+            max_batch_bytes: storage::MAX_BATCH_BYTES as u64,
+            max_objects_per_vault: 100_000,
+            max_shared_vaults_per_account: 1_000,
+            max_members_per_shared_vault: 1_000,
+            write_requests_per_second: 50,
+            write_burst: 200,
+        },
+        vaults,
+    };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("could not encode sync session: {error}"))
+    })?))
 }
 
 async fn notify<A: SyncAuthenticator>(
@@ -1388,6 +1493,21 @@ mod tests {
             Ok(Self::account_id())
         }
 
+        fn authorize_session(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
+            if self.allowed {
+                Ok(())
+            } else {
+                Err(AuthFailure::new(
+                    StatusCode::FORBIDDEN,
+                    "policy.denied",
+                    "Sync session denied",
+                    "The device cannot start a sync session; no data changed and contact the operator.",
+                    false,
+                )
+                .expect("test session policy failure"))
+            }
+        }
+
         fn authorize_keys(
             &self,
             _identity: AuthenticatedDevice,
@@ -1481,6 +1601,175 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    #[tokio::test]
+    async fn session_reports_shared_vault_rotation_to_current_members() {
+        let (store, _personal, device) = test_store().await;
+        let admin = TestAuthenticator::account_id();
+        let vault = Uuid::now_v7();
+        let removed = Uuid::now_v7();
+        store
+            .create_shared_sync_vault(vault.into_bytes(), admin, &[1])
+            .await
+            .expect("create shared vault");
+        store
+            .add_shared_sync_vault_member(
+                vault.into_bytes(),
+                removed.into_bytes(),
+                &[storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![2] }],
+            )
+            .await
+            .expect("add member");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let body = api::SyncSessionRequest {
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            model_version: CURRENT_SCHEMA_VERSION,
+            device_id: Uuid::from_bytes(device),
+        }
+        .to_cbor()
+        .expect("session body");
+        let request = || {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync/v1/session")
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body.clone()))
+            .expect("session request")
+        };
+        let response = app.clone().oneshot(request()).await.expect("session response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("session bytes");
+        let session = api::SyncSessionResponse::from_cbor(&bytes).expect("session cbor");
+        assert_eq!(session.server_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(session.max_model_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(session.vaults.len(), 1);
+        assert_eq!(session.vaults[0].id, vault);
+        assert_eq!(session.vaults[0].kind, api::VaultKind::Shared);
+        assert!(!session.vaults[0].rotation_pending);
+
+        store
+            .remove_shared_sync_vault_member(vault.into_bytes(), removed.into_bytes())
+            .await
+            .expect("remove member");
+        let response = app.clone().oneshot(request()).await.expect("pending session");
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("pending bytes");
+        let session = api::SyncSessionResponse::from_cbor(&bytes).expect("pending cbor");
+        assert!(session.vaults[0].rotation_pending);
+        store
+            .publish_shared_sync_vault_epoch(
+                vault.into_bytes(),
+                2,
+                &[storage::SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![3] }],
+            )
+            .await
+            .expect("rotate epoch");
+        let response = app.oneshot(request()).await.expect("rotated session");
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("rotated bytes");
+        let session = api::SyncSessionResponse::from_cbor(&bytes).expect("rotated cbor");
+        assert_eq!(session.vaults[0].key_epoch, 2);
+        assert!(!session.vaults[0].rotation_pending);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_bad_identity_version_and_body() {
+        let (store, _vault, device) = test_store().await;
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let session_request = |client_version: &str, model_version: u64, device_id: Uuid| {
+            api::SyncSessionRequest {
+                client_version: client_version.into(),
+                model_version,
+                device_id,
+            }
+            .to_cbor()
+            .expect("session body")
+        };
+        let send = |body: Vec<u8>| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    request_headers(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/sync/v1/session")
+                            .header(header::CONTENT_TYPE, "application/cbor"),
+                    )
+                    .body(Body::from(body))
+                    .expect("session request"),
+                )
+                .await
+                .expect("session response")
+            }
+        };
+        for (body, expected_status, expected_code) in [
+            (
+                session_request("0.1.0", 1, Uuid::now_v7()),
+                StatusCode::UNAUTHORIZED,
+                "auth.authentication_required",
+            ),
+            (
+                session_request("0.2.0", 1, Uuid::from_bytes(device)),
+                StatusCode::UPGRADE_REQUIRED,
+                "sync.client_unsupported",
+            ),
+            (
+                session_request("0.1.0", CURRENT_SCHEMA_VERSION + 1, Uuid::from_bytes(device)),
+                StatusCode::UPGRADE_REQUIRED,
+                "sync.client_unsupported",
+            ),
+            (
+                session_request("bad-version", 1, Uuid::from_bytes(device)),
+                StatusCode::BAD_REQUEST,
+                "sync.invalid_request",
+            ),
+            (vec![0xff], StatusCode::BAD_REQUEST, "sync.invalid_request"),
+            (
+                vec![0; MAX_SESSION_REQUEST_BYTES + 1],
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "sync.invalid_request",
+            ),
+        ] {
+            let response = send(body).await;
+            assert_eq!(response.status(), expected_status);
+            let bytes =
+                to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem bytes");
+            assert_eq!(
+                ProblemDetails::from_cbor(&bytes).expect("problem cbor").code.as_str(),
+                expected_code
+            );
+        }
+
+        let valid = session_request("0.1.0", 1, Uuid::from_bytes(device));
+        let unauthenticated = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync/v1/session")
+                    .header(header::CONTENT_TYPE, "application/cbor")
+                    .body(Body::from(valid.clone()))
+                    .expect("unauthenticated request"),
+            )
+            .await
+            .expect("unauthenticated response");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let denied_app = router(store, TestAuthenticator::new(device, false));
+        let denied = denied_app
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/sync/v1/session")
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(valid))
+                .expect("denied request"),
+            )
+            .await
+            .expect("denied response");
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

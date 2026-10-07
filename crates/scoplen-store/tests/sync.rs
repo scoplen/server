@@ -32,6 +32,67 @@ async fn remove_test_directory(path: PathBuf) {
     }
 }
 
+#[tokio::test]
+async fn shared_session_descriptors_follow_current_membership_and_rotation() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let first = [11; 16];
+    let second = [12; 16];
+    let admin = [21; 16];
+    let member = [22; 16];
+    let outsider = [23; 16];
+    store.create_shared_sync_vault(second, admin, &[1]).await.expect("second vault");
+    store.create_shared_sync_vault(first, admin, &[2]).await.expect("first vault");
+    store
+        .add_shared_sync_vault_member(
+            first,
+            member,
+            &[SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] }],
+        )
+        .await
+        .expect("add member");
+    store.write_sync_batch(first, &[write(31, None, 4)]).await.expect("advance sequence");
+
+    let listed = store.list_shared_sync_vaults_for_account(admin).await.expect("admin vaults");
+    assert_eq!(listed.iter().map(|vault| vault.vault_id).collect::<Vec<_>>(), vec![first, second]);
+    assert_eq!(listed[0].sequence, 1);
+    assert_eq!(listed[0].key_epoch, 1);
+    assert!(!listed[0].rotation_pending);
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(member).await.expect("member vaults").len(),
+        1
+    );
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(outsider).await.expect("outsider vaults"),
+        Vec::new()
+    );
+
+    store.remove_shared_sync_vault_member(first, member).await.expect("remove member");
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(member).await.expect("removed member vaults"),
+        Vec::new()
+    );
+    assert!(
+        store.list_shared_sync_vaults_for_account(admin).await.expect("pending vaults")[0]
+            .rotation_pending
+    );
+    store
+        .publish_shared_sync_vault_epoch(
+            first,
+            2,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![5] }],
+        )
+        .await
+        .expect("publish epoch");
+    let current = store.list_shared_sync_vaults_for_account(admin).await.expect("current vaults");
+    assert_eq!(current[0].key_epoch, 2);
+    assert!(!current[0].rotation_pending);
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
 fn write(object_id: u8, base_sequence: Option<u64>, envelope: u8) -> ObjectWrite {
     ObjectWrite {
         object_id: [object_id; 16],

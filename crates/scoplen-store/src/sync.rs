@@ -44,6 +44,15 @@ pub type ObjectId = [u8; 16];
 /// A 16-byte enrolled device identifier.
 pub type DeviceId = [u8; 16];
 
+/// Shared-vault metadata visible to one current account member.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SharedVaultDescriptor {
+    pub vault_id: VaultId,
+    pub sequence: u64,
+    pub key_epoch: u64,
+    pub rotation_pending: bool,
+}
+
 /// The vault classes currently defined by the sync protocol.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum VaultKind {
@@ -251,6 +260,40 @@ pub enum SyncStoreError {
 }
 
 impl SqliteStore {
+    /// List shared vaults for a current account member in stable vault-id order.
+    ///
+    /// Removed members have no row and cannot see the vault or its rotation state. Personal and
+    /// organization vault ownership is supplied by later identity and organization storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error if metadata cannot be read safely.
+    pub async fn list_shared_sync_vaults_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<SharedVaultDescriptor>, SyncStoreError> {
+        let rows = sqlx::query(
+            "SELECT v.vault_id, v.current_seq, m.key_epoch, v.rotation_pending
+             FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = ? AND v.kind = 'shared'
+             ORDER BY v.vault_id ASC",
+        )
+        .bind(account_id.as_slice())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(SharedVaultDescriptor {
+                    vault_id: id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id")?,
+                    sequence: sequence_from_sql(row.try_get("current_seq")?)?,
+                    key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
+                    rotation_pending: bool_from_sql(row.try_get("rotation_pending")?)?,
+                })
+            })
+            .collect()
+    }
+
     /// Create an empty sync vault with sequence and purge horizon set to zero.
     ///
     /// This method does not perform account or membership authorization.

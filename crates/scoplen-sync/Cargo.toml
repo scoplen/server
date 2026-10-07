@@ -11,6 +11,7 @@ axum.workspace = true
 scoplen-api = { git = "https://github.com/plystra/scoplen-proto.git", rev = "42a9cbe" }
 scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "42a9cbe" }
 scoplen-store = { path = "../scoplen-store" }
+semver.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 

@@ -2613,6 +2613,7 @@ dependencies = [
  "scoplen-api",
  "scoplen-model",
  "scoplen-store",
+ "semver",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tower",

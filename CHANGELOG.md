@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added the injected-authenticator `POST /sync/v1/session` handshake with account-scoped shared-vault
+  descriptors, device binding, compatibility checks, and the persisted rotation-pending state.
+  Personal and organization vault ownership, production identity, and full quota enforcement remain
+  open; the baseline listener does not mount this router.
 - Added authenticated-injection `DELETE /sync/v1/vaults/{vault}/members/{account}` with
   last-admin protection, atomic member and wrap removal, and a durable rotation-pending marker.
   Successful next-epoch publication clears the marker. The identity service remains responsible
