@@ -9,7 +9,7 @@ mod roles;
 mod runtime;
 
 pub use config::{
-    Config, ConfigError, ObjectStorageSettings, SecretValue, StorageSettings, TlsMode,
+    Config, ConfigError, KmsSettings, ObjectStorageSettings, SecretValue, StorageSettings, TlsMode,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};

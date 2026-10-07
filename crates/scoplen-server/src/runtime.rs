@@ -124,7 +124,8 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
     let bootstrap = bootstrap(config)?;
-    let key_management = Some(LocalKeyFile::load(config.server.data_dir.join("deployment.key"))?);
+    let key_management =
+        Some(LocalKeyFile::load(config.storage.kms_key_file(&config.server.data_dir)?)?);
     Ok(PreparedRoles {
         store: Some(store),
         object_storage: Some(object_storage),

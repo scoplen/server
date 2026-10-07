@@ -7,7 +7,8 @@ Changes are recorded here for released or reviewable repository outcomes.
 - Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
   hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
   coverage. Database-backed role preparation now loads this backend before startup. Cloud
-  KMS/PKCS#11 adapters and application-level column encryption remain open.
+  KMS/PKCS#11 adapters and application-level column encryption remain open. TOML and
+  `SPL_STORAGE_KMS_*` overrides select the local key-file path.
 - Added bounded audit-chain primitives and SQLite persistence: canonical event SHA-256 chaining,
   same-transaction append helpers, checkpoint payload construction, idempotent signed-checkpoint
   storage, and chain verification with failure-path tests. Control-plane event producers and

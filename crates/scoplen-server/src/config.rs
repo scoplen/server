@@ -119,6 +119,12 @@ impl Config {
                 )
             })?;
         }
+        if let Some(value) = env_value("SPL_STORAGE_KMS_BACKEND") {
+            self.storage.kms.backend = value;
+        }
+        if let Some(value) = env_value("SPL_STORAGE_KMS_KEY_FILE") {
+            self.storage.kms.key_file = Some(PathBuf::from(value));
+        }
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -176,6 +182,7 @@ impl Config {
             TlsMode::Plain => {}
         }
         self.storage.object.validate()?;
+        self.storage.kms.validate()?;
         Ok(())
     }
 
@@ -313,11 +320,17 @@ pub struct StorageSettings {
     pub backend: String,
     /// Object storage backend used by recordings, exports, large envelopes, and backups.
     pub object: ObjectStorageSettings,
+    /// Key-management backend used for deployment and application data keys.
+    pub kms: KmsSettings,
 }
 
 impl Default for StorageSettings {
     fn default() -> Self {
-        Self { backend: "sqlite".into(), object: ObjectStorageSettings::default() }
+        Self {
+            backend: "sqlite".into(),
+            object: ObjectStorageSettings::default(),
+            kms: KmsSettings::default(),
+        }
     }
 }
 
@@ -352,6 +365,46 @@ impl StorageSettings {
                 "storage.object.backend must be filesystem or s3, got {backend:?}"
             ))),
         }
+    }
+
+    /// Resolve the local KMS key-file path against the deployment data directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when a non-local backend is selected or the path is empty.
+    pub fn kms_key_file(&self, data_dir: &Path) -> Result<PathBuf, ConfigError> {
+        self.kms.validate()?;
+        Ok(self.kms.key_file.clone().unwrap_or_else(|| data_dir.join("deployment.key")))
+    }
+}
+
+/// Key-management backend settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct KmsSettings {
+    /// Backend name. Only `local` is available in the current server baseline.
+    pub backend: String,
+    /// Optional local deployment-key file path.
+    pub key_file: Option<PathBuf>,
+}
+
+impl Default for KmsSettings {
+    fn default() -> Self {
+        Self { backend: "local".into(), key_file: None }
+    }
+}
+
+impl KmsSettings {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if !self.backend.eq_ignore_ascii_case("local") {
+            return Err(ConfigError::Invalid(
+                "storage.kms.backend must be local until cloud and PKCS#11 adapters are implemented".into(),
+            ));
+        }
+        if self.key_file.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+            return Err(ConfigError::Invalid("storage.kms.key_file must not be empty".into()));
+        }
+        Ok(())
     }
 }
 
@@ -537,6 +590,19 @@ mod tests {
             scoplen_store::ObjectStorageConfig::Filesystem { root }
                 if root == data_dir.join("objects")
         ));
+    }
+
+    #[test]
+    fn local_kms_defaults_to_the_deployment_key_and_rejects_other_backends() {
+        let config = Config::default();
+        let data_dir = PathBuf::from("/var/lib/scoplen");
+        assert_eq!(
+            config.storage.kms_key_file(&data_dir).expect("default local KMS"),
+            data_dir.join("deployment.key")
+        );
+        let mut unsupported = config;
+        unsupported.storage.kms.backend = "aws-kms".into();
+        assert!(unsupported.validate().is_err());
     }
 
     #[test]

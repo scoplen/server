@@ -46,4 +46,5 @@ backend and runtime role selection, application-level column encryption, control
 producers, checkpoint signing, and other worker jobs remain roadmap work. The storage boundary
 defines a redacted local deployment-key-file backend behind a KMS trait; cloud adapters, column
 encryption, and external KMS readiness remain open. Database-backed role preparation loads and
-validates the local backend before startup.
+validates the local backend before startup; `storage.kms.backend` and `storage.kms.key_file` are
+also available through the documented TOML and environment configuration.

@@ -21,6 +21,11 @@ names = ["all"]
 # SQLite is required by api, worker, and edge. The file is data_dir/scoplen.sqlite.
 backend = "sqlite"
 
+[storage.kms]
+# The local backend reads data_dir/deployment.key unless an explicit file is configured.
+backend = "local"
+# key_file = "./data/deployment.key"
+
 [storage.object]
 # Object storage is initialized for database-backed roles. The filesystem default stores below
 # data_dir/objects; use "s3" for an S3-compatible bucket.
