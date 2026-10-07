@@ -599,11 +599,38 @@ async fn vault_keys<A: SyncAuthenticator>(
         .authenticator
         .account_id(identity)
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    let keys = state
+    let keys = match state
         .store
-        .get_shared_sync_vault_keys(vault, account_id)
+        .sync_vault_kind(vault)
         .await
-        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?
+    {
+        storage::VaultKind::Shared => state
+            .store
+            .get_shared_sync_vault_keys(vault, account_id)
+            .await
+            .map_err(|error| SyncHttpError::from_store(error, &instance))?,
+        storage::VaultKind::Personal => {
+            let (owned_vault, wrapped_vault_key) = state
+                .store
+                .get_personal_sync_vault_key(account_id)
+                .await
+                .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+            if owned_vault != vault {
+                return Err(SyncHttpError::from_store(
+                    storage::SyncStoreError::VaultNotFound,
+                    &instance,
+                ));
+            }
+            vec![storage::SharedVaultKey { epoch: 1, wrapped_vault_key }]
+        }
+        storage::VaultKind::Organization => {
+            return Err(SyncHttpError::from_store(
+                storage::SyncStoreError::VaultNotFound,
+                &instance,
+            ));
+        }
+    };
     let response = api::SyncVaultKeysResponse {
         keys: keys
             .into_iter()
@@ -614,7 +641,7 @@ async fn vault_keys<A: SyncAuthenticator>(
             .collect(),
     };
     Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode shared-vault keys: {error}"))
+        SyncHttpError::invalid(&instance, format!("could not encode vault keys: {error}"))
     })?))
 }
 
@@ -1986,6 +2013,63 @@ mod tests {
             .await
             .expect("denied response");
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn personal_vault_keys_are_owner_scoped_and_use_shared_response_shape() {
+        let (store, unrelated_personal, device) = test_store().await;
+        let owner = TestAuthenticator::account_id();
+        let personal = Uuid::now_v7();
+        let other_owner = Uuid::now_v7();
+        store
+            .create_personal_sync_vault(personal.into_bytes(), owner, &[7, 8, 9])
+            .await
+            .expect("owner personal vault");
+        store
+            .create_personal_sync_vault(other_owner.into_bytes(), Uuid::now_v7().into_bytes(), &[1])
+            .await
+            .expect("other personal vault");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request = |vault: Uuid| {
+            request_headers(
+                Request::builder()
+                    .uri(format!("/sync/v1/vaults/{}/keys", path(vault.into_bytes()))),
+            )
+            .body(Body::empty())
+            .expect("vault keys request")
+        };
+        let response = app.clone().oneshot(request(personal)).await.expect("personal keys");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("key body");
+        let keys = api::SyncVaultKeysResponse::from_cbor(&body).expect("key response");
+        assert_eq!(
+            keys.keys,
+            vec![api::SyncVaultKey { epoch: 1, wrapped_vault_key: vec![7, 8, 9] }]
+        );
+
+        let response =
+            app.clone().oneshot(request(other_owner)).await.expect("other personal keys");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("not-found body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&body).expect("not-found problem").code.as_str(),
+            "sync.object_not_found"
+        );
+
+        let response = app
+            .oneshot(request(Uuid::from_bytes(unrelated_personal)))
+            .await
+            .expect("unowned personal keys");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("unowned body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&body).expect("unowned problem").code.as_str(),
+            "sync.object_not_found"
+        );
+        assert_eq!(
+            store.get_personal_sync_vault_key(owner).await.expect("owner key remains").1,
+            vec![7, 8, 9]
+        );
     }
 
     #[tokio::test]

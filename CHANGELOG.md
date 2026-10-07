@@ -31,8 +31,9 @@ Changes are recorded here for released or reviewable repository outcomes.
   conflict and malformed-request problem mapping. SQLite/PostgreSQL schema parity and route/store
   failure-path tests cover the all-or-nothing rotation boundary.
 - Added authenticated-injection `GET /sync/v1/vaults/{vault}/keys` with bounded ascending epoch
-  wraps, account-scoped durable lookup, not-found mapping, and route failure-path coverage. The
-  initial creation flow returns the epoch-1 opaque wrap; rotation remains a later endpoint.
+  wraps, account-scoped durable lookup for shared members and personal owners, not-found mapping,
+  and route failure-path coverage. Shared-vault creation and personal provisioning return the
+  epoch-1 opaque wrap; rotation remains a later endpoint.
 - Added authenticated-injection `POST /sync/v1/vaults` shared-vault creation with deterministic
   CBOR decoding, UUIDv7 and bounded-wrap validation, duplicate conflict mapping, and a response
   descriptor fixed to epoch one. SQLite persists the creator's admin/member row and opaque key wrap

@@ -47,8 +47,10 @@ with a burst of 200; an exhausted authenticated device bucket returns `429 sync.
 `Retry-After`. Deployment-configurable limits and multi-instance rate admission remain roadmap
 work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
-ARK-wrapped initial key; the enrollment service and the K-4 route for delivering or rotating that
-key are not implemented yet. A session lists a personal vault only after that provision succeeds.
+ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
+owner using the shared `{keys}` response shape. Enrollment wiring, production identity, and
+personal-key rotation remain open. A session lists a personal vault only after provisioning
+succeeds.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
 against the SQLite set. The server roles remain SQLite-only until their storage queries and
 readiness wiring are implemented for PostgreSQL.
