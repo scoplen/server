@@ -16,6 +16,7 @@ futures-util.workspace = true
 object_store.workspace = true
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros"] }
 thiserror.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

@@ -40,7 +40,9 @@ deployment-configurable quota enforcement, control, gateway, and console behavio
 roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
 hashing, same-transaction append helpers, checkpoint payload construction, durable checkpoints,
 and chain verification; control-plane event producers, deployment-key signing, and retention
-export wiring remain open.
+export wiring remain open. The storage crate also validates and redacts a local 32-byte deployment
+key-file backend behind the `KeyManagementService` trait; cloud KMS, PKCS#11, column encryption,
+and runtime KMS wiring remain open.
 The SQLite sync store enforces the default 100,000 current objects per vault (including
 tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
 the mutation transaction. The session advertises those same limits, and the HTTP adapter returns

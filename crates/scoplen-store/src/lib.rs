@@ -6,6 +6,7 @@
 pub mod account_keys;
 pub mod audit;
 pub mod jobs;
+pub mod kms;
 pub mod object_storage;
 #[cfg(test)]
 mod schema;

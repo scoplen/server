@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
+  hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
+  coverage. Cloud KMS/PKCS#11 adapters, application-level column encryption, and runtime wiring
+  remain open.
 - Added bounded audit-chain primitives and SQLite persistence: canonical event SHA-256 chaining,
   same-transaction append helpers, checkpoint payload construction, idempotent signed-checkpoint
   storage, and chain verification with failure-path tests. Control-plane event producers and
