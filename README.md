@@ -55,6 +55,12 @@ The storage crate also carries a parallel PostgreSQL migration set and a logical
 against the SQLite set. The server roles remain SQLite-only until their storage queries and
 readiness wiring are implemented for PostgreSQL.
 
+Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
+`POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
+markers, keeps validated key epochs on object history, removes retired wraps atomically, and
+rejects writes that reference a retired epoch. Retirement is idempotent and refuses the newest
+served epoch or any epoch still referenced by a current object.
+
 ## Repository shape
 
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.

@@ -110,6 +110,8 @@ pub enum SyncOperation {
     AddVaultMember,
     /// Remove a member from a shared vault.
     RemoveVaultMember,
+    /// Retire a previously served shared-vault key epoch.
+    RetireVaultEpoch,
     /// Read the current change feed.
     Read,
     /// Read a full reconciliation snapshot.
@@ -225,7 +227,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         identity: AuthenticatedDevice,
         vault: storage::VaultId,
         writes: &[api::SyncWrite],
-    ) -> Result<(), AuthFailure>;
+    ) -> Result<Vec<u64>, AuthFailure>;
 
     /// Resolve the account that owns an authenticated device.
     ///
@@ -346,6 +348,7 @@ fn router_with_write_rate<A: SyncAuthenticator>(
         .route("/sync/v1/vaults/{vault}/epochs", post(publish_vault_epoch::<A>))
         .route("/sync/v1/vaults/{vault}/members", post(add_vault_member::<A>))
         .route("/sync/v1/vaults/{vault}/members/{account}", delete(remove_vault_member::<A>))
+        .route("/sync/v1/vaults/{vault}/epochs/{epoch}/retire", post(retire_vault_epoch::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -690,6 +693,46 @@ async fn publish_vault_epoch<A: SyncAuthenticator>(
     })?))
 }
 
+async fn retire_vault_epoch<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    Path((vault, epoch)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    let vault = parse_uuid(&vault, "vault", &instance)?;
+    let epoch = parse_epoch(&epoch, &instance)?;
+    let _identity = authorize(
+        &state,
+        &method,
+        &uri,
+        &headers,
+        vault,
+        SyncOperation::RetireVaultEpoch,
+        &instance,
+    )?;
+    if !body.is_empty() {
+        return Err(SyncHttpError::invalid(
+            &instance,
+            "shared-vault epoch retirement does not accept a request body",
+        ));
+    }
+    state
+        .store
+        .retire_shared_sync_vault_epoch(vault, epoch)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncRetireVaultEpochResponse { epoch };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(
+            &instance,
+            format!("could not encode shared-vault epoch retirement response: {error}"),
+        )
+    })?))
+}
+
 async fn add_vault_member<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
@@ -1009,17 +1052,30 @@ async fn objects<A: SyncAuthenticator>(
     if total_bytes.is_none_or(|total| total > storage::MAX_BATCH_BYTES) {
         return Err(SyncHttpError::invalid(&instance, "write envelopes exceed the sync limits"));
     }
-    state
+    let key_epochs = state
         .authenticator
         .validate_write(identity, vault, &batch.writes)
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    if key_epochs.len() != batch.writes.len() || key_epochs.contains(&0) {
+        return Err(SyncHttpError::known(
+            &instance,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync.storage_unavailable",
+            "Sync service unavailable",
+            "The envelope validator returned an invalid key-epoch set; no data changed and retrying may help.",
+            false,
+            true,
+        ));
+    }
     let writes = batch
         .writes
         .iter()
-        .map(|write| storage::ObjectWrite {
+        .zip(key_epochs)
+        .map(|(write, key_epoch)| storage::ObjectWrite {
             object_id: write.object_id.into_bytes(),
             base_sequence: write.base_seq,
             envelope: write.payload.clone(),
+            key_epoch,
             tombstone: write.tombstone,
             signer_device_id: Some(identity.device_id),
         })
@@ -1111,6 +1167,15 @@ fn parse_uuid(value: &str, field: &str, instance: &str) -> SyncResult<storage::V
         ));
     }
     Ok(*id.as_bytes())
+}
+
+fn parse_epoch(value: &str, instance: &str) -> SyncResult<u64> {
+    if value.is_empty() || value == "0" || (value.starts_with('0') && value.len() > 1) {
+        return Err(SyncHttpError::invalid(instance, "epoch must be a canonical positive integer"));
+    }
+    value
+        .parse::<u64>()
+        .map_err(|_| SyncHttpError::invalid(instance, "epoch must be a canonical positive integer"))
 }
 
 fn require_cbor(headers: &HeaderMap, instance: &str) -> SyncResult<()> {
@@ -1222,6 +1287,29 @@ impl SyncHttpError {
                 ),
                 false,
                 true,
+            ),
+            storage::SyncStoreError::EpochNotFound { .. }
+            | storage::SyncStoreError::UnsupportedVaultKind => Self::known(
+                instance,
+                StatusCode::NOT_FOUND,
+                "sync.object_not_found",
+                "Sync epoch not found",
+                "The requested shared-vault epoch is not available; no data changed and retrying will not help.",
+                false,
+                false,
+            ),
+            storage::SyncStoreError::EpochNewest { epoch }
+            | storage::SyncStoreError::EpochInUse { epoch }
+            | storage::SyncStoreError::EpochRetired { epoch } => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync vault epoch cannot be retired",
+                format!(
+                    "The shared-vault epoch {epoch} is still required; no data changed and re-encrypt objects or publish a newer epoch before retrying."
+                ),
+                false,
+                false,
             ),
             storage::SyncStoreError::MemberSetMismatch => Self::invalid(
                 instance,
@@ -1603,8 +1691,8 @@ mod tests {
             &self,
             _identity: AuthenticatedDevice,
             _vault: storage::VaultId,
-            _writes: &[api::SyncWrite],
-        ) -> Result<(), AuthFailure> {
+            writes: &[api::SyncWrite],
+        ) -> Result<Vec<u64>, AuthFailure> {
             if self.reject_writes {
                 Err(AuthFailure::new(
                     StatusCode::BAD_REQUEST,
@@ -1615,7 +1703,7 @@ mod tests {
                 )
                 .expect("test envelope failure"))
             } else {
-                Ok(())
+                Ok(vec![1; writes.len()])
             }
         }
 
@@ -2217,6 +2305,69 @@ mod tests {
             store.sync_vault_kind(rejected.into_bytes()).await,
             Err(storage::SyncStoreError::VaultNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn shared_vault_epoch_retirement_routes_success_and_conflicts() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let account = TestAuthenticator::account_id();
+        store
+            .create_shared_sync_vault(vault.into_bytes(), account, &[1])
+            .await
+            .expect("create shared vault");
+        store
+            .publish_shared_sync_vault_epoch(
+                vault.into_bytes(),
+                2,
+                &[storage::SharedVaultEpochWrap {
+                    account_id: account,
+                    wrapped_vault_key: vec![2],
+                }],
+            )
+            .await
+            .expect("publish epoch two");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request =
+            |epoch: &str, body: Body| {
+                request_headers(Request::builder().method("POST").uri(format!(
+                    "/sync/v1/vaults/{}/epochs/{epoch}/retire",
+                    path(vault.into_bytes())
+                )))
+                .body(body)
+                .expect("retirement request")
+            };
+
+        let response =
+            app.clone().oneshot(request("01", Body::empty())).await.expect("invalid epoch");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response =
+            app.clone().oneshot(request("3", Body::empty())).await.expect("unknown epoch");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response =
+            app.clone().oneshot(request("2", Body::empty())).await.expect("newest epoch");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response =
+            app.clone().oneshot(request("1", Body::empty())).await.expect("retire epoch");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("retire response body");
+        assert_eq!(
+            api::SyncRetireVaultEpochResponse::from_cbor(&response_body)
+                .expect("retire response cbor")
+                .epoch,
+            1
+        );
+        let response =
+            app.clone().oneshot(request("1", Body::empty())).await.expect("repeat retire");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response =
+            app.oneshot(request("1", Body::from(vec![1]))).await.expect("body rejection");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let keys =
+            store.get_shared_sync_vault_keys(vault.into_bytes(), account).await.expect("keys");
+        assert_eq!(keys, vec![storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![2] }]);
     }
 
     #[tokio::test]

@@ -170,6 +170,7 @@ fn write(object_id: u8, base_sequence: Option<u64>, envelope: u8) -> ObjectWrite
         object_id: [object_id; 16],
         base_sequence,
         envelope: vec![envelope, envelope + 1],
+        key_epoch: 1,
         tombstone: false,
         signer_device_id: Some([9; 16]),
     }
@@ -386,6 +387,69 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
         .await
         .expect("remove failure trigger");
 
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn shared_vault_epoch_retirement_is_safe_and_idempotent() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [41; 16];
+    let account = [42; 16];
+    store.create_shared_sync_vault(vault, account, &[1]).await.expect("create vault");
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: account, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("publish epoch two");
+    store.write_sync_batch(vault, &[write(1, None, 3)]).await.expect("write epoch one");
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 1).await,
+        Err(SyncStoreError::EpochInUse { epoch: 1 })
+    ));
+
+    let mut rewritten = write(1, Some(1), 4);
+    rewritten.key_epoch = 2;
+    store.write_sync_batch(vault, &[rewritten]).await.expect("rewrite epoch two");
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("retire epoch one");
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("repeat retirement");
+    let mut stale = write(2, None, 5);
+    stale.key_epoch = 1;
+    assert!(matches!(
+        store.write_sync_batch(vault, &[stale]).await,
+        Err(SyncStoreError::EpochRetired { epoch: 1 })
+    ));
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, account).await.expect("remaining key"),
+        vec![SharedVaultKey { epoch: 2, wrapped_vault_key: vec![2] }]
+    );
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 2).await,
+        Err(SyncStoreError::EpochNewest { epoch: 2 })
+    ));
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 3).await,
+        Err(SyncStoreError::EpochNotFound { epoch: 3 })
+    ));
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch([43; 16], 1).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    let personal = [44; 16];
+    store.create_personal_sync_vault(personal, account, &[5]).await.expect("personal vault");
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(personal, 1).await,
+        Err(SyncStoreError::UnsupportedVaultKind)
+    ));
+
+    let history = store.sync_versions(vault, [1; 16]).await.expect("history");
+    assert_eq!(history[0].key_epoch, 1);
+    assert_eq!(history[1].key_epoch, 2);
     store.pool().close().await;
     drop(store);
     remove_test_directory(directory).await;

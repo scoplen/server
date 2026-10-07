@@ -215,6 +215,33 @@ const SYNC_VAULT_MEMBER_KEYS: TableSpec = TableSpec {
     }],
 };
 
+const SYNC_VAULT_RETIRED_EPOCHS: TableSpec = TableSpec {
+    name: "sync_vault_retired_epochs",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "epoch",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "vault_id",
+        target_table: "sync_vaults",
+        target_column: "vault_id",
+    }],
+    indexes: &[IndexSpec {
+        name: "sync_vault_retired_epochs_by_vault",
+        columns: &["vault_id", "epoch"],
+    }],
+};
+
 const SYNC_OBJECTS: TableSpec = TableSpec {
     name: "sync_objects",
     columns: &[
@@ -252,6 +279,12 @@ const SYNC_OBJECTS: TableSpec = TableSpec {
             name: "signer_device_id",
             kind: LogicalType::Bytes,
             nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "key_epoch",
+            kind: LogicalType::Integer,
+            nullable: false,
             primary_key: false,
         },
         ColumnSpec {
@@ -309,6 +342,12 @@ const SYNC_OBJECT_VERSIONS: TableSpec = TableSpec {
             name: "signer_device_id",
             kind: LogicalType::Bytes,
             nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "key_epoch",
+            kind: LogicalType::Integer,
+            nullable: false,
             primary_key: false,
         },
         ColumnSpec {
@@ -561,6 +600,7 @@ const TABLES: &[TableSpec] = &[
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
     SYNC_VAULT_MEMBER_KEYS,
+    SYNC_VAULT_RETIRED_EPOCHS,
     SYNC_OBJECTS,
     SYNC_OBJECT_VERSIONS,
     SYNC_ACKS,
@@ -904,6 +944,8 @@ mod tests {
         include_str!("../migrations/sqlite/20261008000000_shared_vault_member_removal.sql");
     const SQLITE_PERSONAL_VAULTS: &str =
         include_str!("../migrations/sqlite/20261008010000_personal_vaults.sql");
+    const SQLITE_EPOCH_RETIREMENT: &str =
+        include_str!("../migrations/sqlite/20261008020000_shared_vault_epoch_retirement.sql");
     const SQLITE_KEYS: &str =
         include_str!("../migrations/sqlite/20261007020000_account_key_bundles.sql");
     const SQLITE_JOBS: &str = include_str!("../migrations/sqlite/20261007030000_jobs.sql");
@@ -914,6 +956,8 @@ mod tests {
         include_str!("../migrations/postgres/20261008000000_shared_vault_member_removal.sql");
     const POSTGRES_PERSONAL_VAULTS: &str =
         include_str!("../migrations/postgres/20261008010000_personal_vaults.sql");
+    const POSTGRES_EPOCH_RETIREMENT: &str =
+        include_str!("../migrations/postgres/20261008020000_shared_vault_epoch_retirement.sql");
     const POSTGRES_KEYS: &str =
         include_str!("../migrations/postgres/20261007020000_account_key_bundles.sql");
     const POSTGRES_JOBS: &str = include_str!("../migrations/postgres/20261007030000_jobs.sql");
@@ -945,6 +989,7 @@ mod tests {
             SQLITE_JOBS,
             SQLITE_MEMBER_REMOVAL,
             SQLITE_PERSONAL_VAULTS,
+            SQLITE_EPOCH_RETIREMENT,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -953,6 +998,7 @@ mod tests {
             POSTGRES_JOBS,
             POSTGRES_MEMBER_REMOVAL,
             POSTGRES_PERSONAL_VAULTS,
+            POSTGRES_EPOCH_RETIREMENT,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

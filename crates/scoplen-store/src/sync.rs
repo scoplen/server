@@ -117,6 +117,8 @@ pub struct ObjectWrite {
     pub base_sequence: Option<u64>,
     /// Encrypted envelope bytes. The store never interprets these bytes.
     pub envelope: Vec<u8>,
+    /// Validated vault-key epoch supplied by the protocol authentication boundary.
+    pub key_epoch: u64,
     /// Whether this write is a tombstone.
     pub tombstone: bool,
     /// Device that signed the envelope, when the caller has supplied the verified identity.
@@ -132,6 +134,8 @@ pub struct SyncChange {
     pub sequence: u64,
     /// Opaque envelope bytes.
     pub envelope: Vec<u8>,
+    /// Vault-key epoch used by this version.
+    pub key_epoch: u64,
     /// Tombstone marker supplied by the writer.
     pub tombstone: bool,
     /// Verified signer device identifier, if one was supplied.
@@ -201,6 +205,21 @@ pub enum SyncStoreError {
     /// The requested epoch does not immediately follow the current epoch.
     #[error("sync vault epoch conflicts with current epoch {current_epoch}")]
     EpochConflict { current_epoch: u64 },
+    /// The requested epoch is not currently served by the vault.
+    #[error("sync vault epoch does not exist: {epoch}")]
+    EpochNotFound { epoch: u64 },
+    /// The newest served epoch cannot be retired.
+    #[error("sync vault epoch is the newest served epoch: {epoch}")]
+    EpochNewest { epoch: u64 },
+    /// A current object still references the epoch.
+    #[error("sync vault epoch is still referenced by current objects: {epoch}")]
+    EpochInUse { epoch: u64 },
+    /// A write references an epoch that has already been retired.
+    #[error("sync vault epoch has been retired: {epoch}")]
+    EpochRetired { epoch: u64 },
+    /// Epoch retirement is only supported for shared vaults.
+    #[error("sync vault epoch retirement is only supported for shared vaults")]
+    UnsupportedVaultKind,
     /// The supplied wraps do not exactly match the current member set.
     #[error("sync vault epoch member set does not match current members")]
     MemberSetMismatch,
@@ -581,7 +600,12 @@ impl SqliteStore {
     ) -> Result<Vec<SharedVaultKey>, SyncStoreError> {
         let rows = sqlx::query(
             "SELECT epoch, wrapped_vault_key FROM sync_vault_member_keys
-             WHERE vault_id = ? AND account_id = ? ORDER BY epoch ASC",
+             WHERE vault_id = ? AND account_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_vault_retired_epochs AS r
+                 WHERE r.vault_id = sync_vault_member_keys.vault_id AND r.epoch = sync_vault_member_keys.epoch
+               )
+             ORDER BY epoch ASC",
         )
         .bind(vault_id.as_slice())
         .bind(account_id.as_slice())
@@ -621,7 +645,11 @@ impl SqliteStore {
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
         lock_vault(&mut transaction, vault_id).await?;
         let current_epoch = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT MAX(epoch) FROM sync_vault_member_keys WHERE vault_id = ?",
+            "SELECT MAX(k.epoch) FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = ? AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )",
         )
         .bind(vault_id.as_slice())
         .fetch_one(&mut *transaction)
@@ -732,7 +760,12 @@ impl SqliteStore {
             return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
         }
         let epoch_rows = sqlx::query(
-            "SELECT DISTINCT epoch FROM sync_vault_member_keys WHERE vault_id = ? ORDER BY epoch ASC",
+            "SELECT DISTINCT k.epoch FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = ? AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )
+             ORDER BY k.epoch ASC",
         )
         .bind(vault_id.as_slice())
         .fetch_all(&mut *transaction)
@@ -771,6 +804,105 @@ impl SqliteStore {
             .await
             .map_err(map_constraint)?;
         }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically retire a previously served shared-vault epoch after re-encryption.
+    ///
+    /// Retirement is idempotent. The newest served epoch and epochs referenced by current
+    /// objects remain available until a newer epoch is published and all objects are rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::EpochNotFound`] for an unknown epoch,
+    /// [`SyncStoreError::EpochNewest`] for the newest served epoch,
+    /// [`SyncStoreError::EpochInUse`] when current objects still reference it, and
+    /// [`SyncStoreError::UnsupportedVaultKind`] for personal or organization vaults.
+    pub async fn retire_shared_sync_vault_epoch(
+        &self,
+        vault_id: VaultId,
+        epoch: u64,
+    ) -> Result<(), SyncStoreError> {
+        if epoch == 0 {
+            return Err(SyncStoreError::EpochNotFound { epoch });
+        }
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        lock_vault(&mut transaction, vault_id).await?;
+        let kind =
+            sqlx::query_scalar::<_, String>("SELECT kind FROM sync_vaults WHERE vault_id = ?")
+                .bind(vault_id.as_slice())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if kind != "shared" {
+            return Err(SyncStoreError::UnsupportedVaultKind);
+        }
+        let already_retired = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sync_vault_retired_epochs WHERE vault_id = ? AND epoch = ?",
+        )
+        .bind(vault_id.as_slice())
+        .bind(sequence_to_sql(epoch)?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if already_retired {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let served = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = ? AND k.epoch = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_vault_retired_epochs AS r
+                 WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+               )
+             LIMIT 1",
+        )
+        .bind(vault_id.as_slice())
+        .bind(sequence_to_sql(epoch)?)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if !served {
+            return Err(SyncStoreError::EpochNotFound { epoch });
+        }
+        let newest = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(k.epoch) FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = ? AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?
+        .map(epoch_from_sql)
+        .transpose()?
+        .ok_or(SyncStoreError::EpochNotFound { epoch })?;
+        if epoch == newest {
+            return Err(SyncStoreError::EpochNewest { epoch });
+        }
+        let references = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_objects WHERE vault_id = ? AND key_epoch = ?",
+        )
+        .bind(vault_id.as_slice())
+        .bind(sequence_to_sql(epoch)?)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if references != 0 {
+            return Err(SyncStoreError::EpochInUse { epoch });
+        }
+        sqlx::query("DELETE FROM sync_vault_member_keys WHERE vault_id = ? AND epoch = ?")
+            .bind(vault_id.as_slice())
+            .bind(sequence_to_sql(epoch)?)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO sync_vault_retired_epochs (vault_id, epoch) VALUES (?, ?)")
+            .bind(vault_id.as_slice())
+            .bind(sequence_to_sql(epoch)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
         transaction.commit().await?;
         Ok(())
     }
@@ -866,11 +998,24 @@ impl SqliteStore {
         let mut transaction = self.pool().begin().await?;
         lock_vault(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state(&mut transaction, vault_id).await?;
+        for write in writes {
+            let retired = sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM sync_vault_retired_epochs WHERE vault_id = ? AND epoch = ?",
+            )
+            .bind(vault_id.as_slice())
+            .bind(sequence_to_sql(write.key_epoch)?)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if retired {
+                return Err(SyncStoreError::EpochRetired { epoch: write.key_epoch });
+            }
+        }
 
         let mut current = HashMap::with_capacity(writes.len());
         for write in writes {
             let row = sqlx::query(
-                "SELECT sequence, envelope, tombstone, signer_device_id FROM sync_objects \
+                "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch FROM sync_objects \
                  WHERE vault_id = ? AND object_id = ?",
             )
             .bind(vault_id.as_slice())
@@ -937,17 +1082,19 @@ impl SqliteStore {
                 object_id: write.object_id,
                 sequence,
                 envelope: write.envelope.clone(),
+                key_epoch: write.key_epoch,
                 tombstone: write.tombstone,
                 signer_device_id: write.signer_device_id,
             };
             insert_version(&mut transaction, vault_id, &change, written_at_ms).await?;
             sqlx::query(
                 "INSERT INTO sync_objects \
-                 (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, written_at_ms) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, key_epoch, written_at_ms) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (vault_id, object_id) DO UPDATE SET \
                    sequence = excluded.sequence, envelope = excluded.envelope, \
                    tombstone = excluded.tombstone, signer_device_id = excluded.signer_device_id, \
+                   key_epoch = excluded.key_epoch, \
                    written_at_ms = excluded.written_at_ms",
             )
             .bind(vault_id.as_slice())
@@ -956,6 +1103,7 @@ impl SqliteStore {
             .bind(&write.envelope)
             .bind(i64::from(write.tombstone))
             .bind(write.signer_device_id.as_ref().map(<DeviceId>::as_slice))
+            .bind(sequence_to_sql(write.key_epoch)?)
             .bind(written_at_ms)
             .execute(&mut *transaction)
             .await?;
@@ -1034,7 +1182,7 @@ impl SqliteStore {
         let mut transaction = self.pool().begin().await?;
         vault_state(&mut transaction, vault_id).await?;
         let rows = sqlx::query(
-            "SELECT sequence, envelope, tombstone, signer_device_id \
+            "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch \
              FROM sync_object_versions WHERE vault_id = ? AND object_id = ? \
              ORDER BY sequence DESC LIMIT 21",
         )
@@ -1236,7 +1384,7 @@ async fn read_current_page(
     }
 
     let rows = sqlx::query(
-        "SELECT object_id, sequence, envelope, tombstone, signer_device_id \
+        "SELECT object_id, sequence, envelope, tombstone, signer_device_id, key_epoch \
          FROM sync_objects WHERE vault_id = ? AND sequence > ? \
          ORDER BY sequence ASC LIMIT ?",
     )
@@ -1298,8 +1446,8 @@ async fn insert_version(
 ) -> Result<(), SyncStoreError> {
     sqlx::query(
         "INSERT INTO sync_object_versions \
-         (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, written_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, key_epoch, written_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(vault_id.as_slice())
     .bind(change.object_id.as_slice())
@@ -1307,6 +1455,7 @@ async fn insert_version(
     .bind(&change.envelope)
     .bind(i64::from(change.tombstone))
     .bind(change.signer_device_id.as_ref().map(<DeviceId>::as_slice))
+    .bind(sequence_to_sql(change.key_epoch)?)
     .bind(written_at_ms)
     .execute(&mut **transaction)
     .await?;
@@ -1323,6 +1472,9 @@ fn validate_batch(writes: &[ObjectWrite]) -> Result<(), SyncStoreError> {
     let mut ids = HashSet::with_capacity(writes.len());
     let mut total_bytes = 0_usize;
     for write in writes {
+        if write.key_epoch == 0 {
+            return Err(SyncStoreError::InvalidEnvelope);
+        }
         if !ids.insert(write.object_id) {
             return Err(SyncStoreError::DuplicateObject);
         }
@@ -1392,6 +1544,7 @@ fn change_from_row(
         object_id,
         sequence: sequence_from_sql(row.try_get("sequence")?)?,
         envelope: row.try_get("envelope")?,
+        key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
         tombstone: bool_from_sql(row.try_get("tombstone")?)?,
         signer_device_id: row
             .try_get::<Option<Vec<u8>>, _>("signer_device_id")?

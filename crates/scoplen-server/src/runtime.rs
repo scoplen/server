@@ -266,15 +266,22 @@ async fn worker_retention_pass_at(
             Ok(purge) => purge.await,
             Err(_) => Err(SyncStoreError::CorruptRow("retention payload")),
         };
+        let transition_now = now.max(job.created_at_ms);
         match result {
             Ok(_) => store
-                .complete_job(job.id, RETENTION_WORKER_OWNER, now)
+                .complete_job(job.id, RETENTION_WORKER_OWNER, transition_now)
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?,
             Err(error) => {
-                let retry_at = now.saturating_add(RETENTION_RETRY_MS);
+                let retry_at = transition_now.saturating_add(RETENTION_RETRY_MS);
                 store
-                    .fail_job(job.id, RETENTION_WORKER_OWNER, now, retry_at, &error.to_string())
+                    .fail_job(
+                        job.id,
+                        RETENTION_WORKER_OWNER,
+                        transition_now,
+                        retry_at,
+                        &error.to_string(),
+                    )
                     .await
                     .map_err(|error| ServerError::Task(error.to_string()))?;
             }
@@ -643,6 +650,7 @@ mod tests {
                     object_id: [62; 16],
                     base_sequence: None,
                     envelope: vec![1, 2, 3],
+                    key_epoch: 1,
                     tombstone: false,
                     signer_device_id: Some([63; 16]),
                 }],
@@ -656,6 +664,7 @@ mod tests {
                     object_id: [62; 16],
                     base_sequence: Some(1),
                     envelope: vec![4, 5, 6],
+                    key_epoch: 1,
                     tombstone: true,
                     signer_device_id: Some([63; 16]),
                 }],

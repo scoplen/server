@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added shared-vault epoch retirement with durable markers, per-object key-epoch tracking, an
+  authenticated idempotent route, newest/in-use checks, and rejection of writes using retired
+  epochs. Personal and organization vaults remain outside this operation.
 - Connected the worker role to bounded sync-retention scheduling: vault ids are deduplicated in the
   durable queue, claimed by kind, purged atomically with the existing retention primitive, and
   retried after malformed or failed jobs. The worker passes no acknowledgement floor until device
