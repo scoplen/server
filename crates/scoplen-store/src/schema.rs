@@ -1193,6 +1193,48 @@ mod tests {
         .execute(reopened.pool())
         .await;
         assert!(invalid_job.is_err(), "the job payload limit must hold");
+
+        let organization = uuid::Uuid::new_v4().into_bytes();
+        sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
+            .bind(organization.as_slice())
+            .bind("PostgreSQL parity")
+            .bind(1_i64)
+            .execute(reopened.pool())
+            .await
+            .expect("insert PostgreSQL audit organization");
+        let audit = reopened
+            .append_audit_event(organization, b"postgres event", 1)
+            .await
+            .expect("append PostgreSQL audit event");
+        assert_eq!(
+            reopened.verify_audit_chain(organization).await.expect("verify audit"),
+            audit.event_hash
+        );
+        let checkpoint = crate::AuditCheckpoint {
+            organization_id: organization,
+            sequence: audit.sequence,
+            head_hash: audit.event_hash,
+            signature: [4; 64],
+            signed_at_ms: 2,
+        };
+        reopened.write_audit_checkpoint(&checkpoint).await.expect("write PostgreSQL checkpoint");
+        let job_id = uuid::Uuid::new_v4().into_bytes();
+        reopened
+            .enqueue_job(job_id, "postgres-parity", b"payload", 0)
+            .await
+            .expect("enqueue PostgreSQL job");
+        let claimed = reopened
+            .claim_job("postgres-worker", 1, 1_000)
+            .await
+            .expect("claim PostgreSQL job")
+            .expect("PostgreSQL job is available");
+        assert_eq!(claimed.id, job_id);
+        reopened.complete_job(job_id, "postgres-worker", 2).await.expect("complete PostgreSQL job");
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.as_slice())
+            .execute(reopened.pool())
+            .await
+            .expect("clean PostgreSQL parity organization");
         reopened.pool().close().await;
     }
 }

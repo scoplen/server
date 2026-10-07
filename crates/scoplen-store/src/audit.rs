@@ -490,6 +490,13 @@ pub async fn append_audit_event_in_postgres_transaction(
     if created_at_ms <= 0 {
         return Err(AuditStoreError::Primitive(AuditError::InvalidPosition));
     }
+    // Serialize sequence allocation for one organization. The foreign-key owner row is stable
+    // for the lifetime of the audit chain and provides the same per-organization write boundary
+    // that SQLite gets from its immediate transaction.
+    sqlx::query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE")
+        .bind(organization_id.as_slice())
+        .fetch_optional(&mut **transaction)
+        .await?;
     let latest = sqlx::query(
         "SELECT sequence, event_hash FROM audit_events
          WHERE organization_id = $1 ORDER BY sequence DESC LIMIT 1",

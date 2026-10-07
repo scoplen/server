@@ -5,10 +5,10 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::Row;
+use sqlx::{Row, postgres::PgRow};
 use thiserror::Error;
 
-use crate::{RelationalStore, SqliteStore};
+use crate::{PostgresStore, RelationalStore, SqliteStore};
 
 /// Maximum UTF-8 byte length for a job kind.
 pub const MAX_JOB_KIND_BYTES: usize = 128;
@@ -346,6 +346,300 @@ impl SqliteStore {
     }
 }
 
+impl PostgresStore {
+    /// Enqueue a job for immediate or future processing in PostgreSQL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for invalid fields or a database constraint error for a reused
+    /// id.
+    pub async fn enqueue_job(
+        &self,
+        id: JobId,
+        kind: &str,
+        payload: &[u8],
+        available_at_ms: i64,
+    ) -> Result<(), JobQueueError> {
+        validate_kind(kind)?;
+        validate_payload(payload)?;
+        validate_timestamp(available_at_ms)?;
+        let created_at_ms = now_ms()?;
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, available_at_ms, created_at_ms) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id.as_slice())
+        .bind(kind)
+        .bind(payload)
+        .bind(available_at_ms)
+        .bind(created_at_ms)
+        .execute(self.pool())
+        .await
+        .map(|_| ())
+        .map_err(map_write_error)
+    }
+
+    /// Enqueue a job unless an unfinished job with the same kind and payload already exists.
+    ///
+    /// A transaction-scoped advisory lock serializes the duplicate check for one kind and payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, constraint, or database error when the job cannot be scheduled.
+    pub async fn enqueue_job_if_absent(
+        &self,
+        id: JobId,
+        kind: &str,
+        payload: &[u8],
+        available_at_ms: i64,
+    ) -> Result<bool, JobQueueError> {
+        validate_kind(kind)?;
+        validate_payload(payload)?;
+        validate_timestamp(available_at_ms)?;
+        let created_at_ms = now_ms()?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || encode($2, 'hex'), 0))")
+            .bind(kind)
+            .bind(payload)
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM jobs WHERE kind = $1 AND payload = $2 AND finished_at_ms IS NULL LIMIT 1",
+        )
+        .bind(kind)
+        .bind(payload)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if existing.is_some() {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, available_at_ms, created_at_ms) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id.as_slice())
+        .bind(kind)
+        .bind(payload)
+        .bind(available_at_ms)
+        .bind(created_at_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_write_error)?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    /// Claim the oldest eligible PostgreSQL job with row locking that skips another worker's row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for invalid lease parameters or a database error when the claim
+    /// cannot be committed.
+    pub async fn claim_job(
+        &self,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
+        self.claim_job_filtered(None, owner, now_ms, lease_ms).await
+    }
+
+    /// Claim the oldest eligible PostgreSQL job of one kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or database error when the claim cannot be committed.
+    pub async fn claim_job_kind(
+        &self,
+        kind: &str,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
+        validate_kind(kind)?;
+        self.claim_job_filtered(Some(kind), owner, now_ms, lease_ms).await
+    }
+
+    async fn claim_job_filtered(
+        &self,
+        kind: Option<&str>,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
+        validate_owner(owner)?;
+        validate_timestamp(now_ms)?;
+        validate_lease(lease_ms)?;
+        let lease_until_ms =
+            now_ms.checked_add(lease_ms).ok_or(JobQueueError::TimestampOverflow)?;
+        let mut transaction = self.pool().begin().await?;
+        let query = if kind.is_some() {
+            "SELECT id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error
+             FROM jobs WHERE finished_at_ms IS NULL AND available_at_ms <= $1
+               AND (lease_until_ms IS NULL OR lease_until_ms <= $2) AND kind = $3
+             ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        } else {
+            "SELECT id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error
+             FROM jobs WHERE finished_at_ms IS NULL AND available_at_ms <= $1
+               AND (lease_until_ms IS NULL OR lease_until_ms <= $2)
+             ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+        };
+        let mut query = sqlx::query(query).bind(now_ms).bind(now_ms);
+        if let Some(kind) = kind {
+            query = query.bind(kind);
+        }
+        let row = query.fetch_optional(&mut *transaction).await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let id: Vec<u8> = row.try_get("id")?;
+        let id = id_from_bytes(&id)?;
+        let attempts: i64 = row.try_get("attempts")?;
+        let attempts = attempts.checked_add(1).ok_or(JobQueueError::AttemptsOverflow)?;
+        sqlx::query(
+            "UPDATE jobs SET attempts = $1, lease_owner = $2, lease_until_ms = $3 WHERE id = $4 AND finished_at_ms IS NULL",
+        )
+        .bind(attempts)
+        .bind(owner)
+        .bind(lease_until_ms)
+        .bind(id.as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        let mut job = job_from_postgres_row(&row)?;
+        job.id = id;
+        job.attempts =
+            u64::try_from(attempts).map_err(|_| JobQueueError::CorruptRow("attempts"))?;
+        job.lease_owner = Some(owner.to_owned());
+        job.lease_until_ms = Some(lease_until_ms);
+        transaction.commit().await?;
+        Ok(Some(job))
+    }
+
+    /// Extend a live PostgreSQL lease owned by `owner`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobQueueError::LeaseLost`] if another worker owns the job or its lease expired.
+    pub async fn renew_job(
+        &self,
+        id: JobId,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<(), JobQueueError> {
+        validate_owner(owner)?;
+        validate_timestamp(now_ms)?;
+        validate_lease(lease_ms)?;
+        let lease_until_ms =
+            now_ms.checked_add(lease_ms).ok_or(JobQueueError::TimestampOverflow)?;
+        let result = sqlx::query(
+            "UPDATE jobs SET lease_until_ms = $1
+             WHERE id = $2 AND lease_owner = $3 AND finished_at_ms IS NULL
+               AND lease_until_ms IS NOT NULL AND lease_until_ms > $4",
+        )
+        .bind(lease_until_ms)
+        .bind(id.as_slice())
+        .bind(owner)
+        .bind(now_ms)
+        .execute(self.pool())
+        .await?;
+        if result.rows_affected() == 1 { Ok(()) } else { Err(JobQueueError::LeaseLost) }
+    }
+
+    /// Mark a live PostgreSQL job complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobQueueError::LeaseLost`] if the lease is no longer owned by `owner`.
+    pub async fn complete_job(
+        &self,
+        id: JobId,
+        owner: &str,
+        now_ms: i64,
+    ) -> Result<(), JobQueueError> {
+        validate_owner(owner)?;
+        validate_timestamp(now_ms)?;
+        let result = sqlx::query(
+            "UPDATE jobs SET finished_at_ms = $1, lease_owner = NULL, lease_until_ms = NULL
+             WHERE id = $2 AND lease_owner = $3 AND finished_at_ms IS NULL
+               AND lease_until_ms IS NOT NULL AND lease_until_ms > $4",
+        )
+        .bind(now_ms)
+        .bind(id.as_slice())
+        .bind(owner)
+        .bind(now_ms)
+        .execute(self.pool())
+        .await?;
+        if result.rows_affected() == 1 { Ok(()) } else { Err(JobQueueError::LeaseLost) }
+    }
+
+    /// Record a PostgreSQL job failure and make it eligible again at `retry_at_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobQueueError::LeaseLost`] if the lease is no longer owned by `owner`.
+    pub async fn fail_job(
+        &self,
+        id: JobId,
+        owner: &str,
+        now_ms: i64,
+        retry_at_ms: i64,
+        error: &str,
+    ) -> Result<(), JobQueueError> {
+        validate_owner(owner)?;
+        validate_timestamp(now_ms)?;
+        validate_timestamp(retry_at_ms)?;
+        validate_error(error)?;
+        let result = sqlx::query(
+            "UPDATE jobs SET available_at_ms = $1, last_error = $2, lease_owner = NULL, lease_until_ms = NULL
+             WHERE id = $3 AND lease_owner = $4 AND finished_at_ms IS NULL
+               AND lease_until_ms IS NOT NULL AND lease_until_ms > $5",
+        )
+        .bind(retry_at_ms)
+        .bind(error)
+        .bind(id.as_slice())
+        .bind(owner)
+        .bind(now_ms)
+        .execute(self.pool())
+        .await?;
+        if result.rows_affected() == 1 { Ok(()) } else { Err(JobQueueError::LeaseLost) }
+    }
+
+    /// Release all expired PostgreSQL leases.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when the update cannot be committed.
+    pub async fn requeue_expired_jobs(&self, now_ms: i64) -> Result<u64, JobQueueError> {
+        validate_timestamp(now_ms)?;
+        let result = sqlx::query(
+            "UPDATE jobs SET lease_owner = NULL, lease_until_ms = NULL
+             WHERE finished_at_ms IS NULL AND lease_until_ms IS NOT NULL AND lease_until_ms <= $1",
+        )
+        .bind(now_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Read one PostgreSQL job for diagnostics and worker bookkeeping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobQueueError::NotFound`] when the id is absent.
+    pub async fn get_job(&self, id: JobId) -> Result<Job, JobQueueError> {
+        let row = sqlx::query(
+            "SELECT id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error
+             FROM jobs WHERE id = $1",
+        )
+        .bind(id.as_slice())
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(JobQueueError::NotFound)?;
+        job_from_postgres_row(&row)
+    }
+}
+
 fn validate_kind(kind: &str) -> Result<(), JobQueueError> {
     if kind.trim().is_empty() || kind.len() > MAX_JOB_KIND_BYTES {
         return Err(JobQueueError::InvalidKind);
@@ -391,6 +685,23 @@ fn id_from_bytes(id: &[u8]) -> Result<JobId, JobQueueError> {
 }
 
 fn job_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Job, JobQueueError> {
+    let id = id_from_bytes(&row.try_get::<Vec<u8>, _>("id")?)?;
+    let attempts = row.try_get::<i64, _>("attempts")?;
+    Ok(Job {
+        id,
+        kind: row.try_get("kind")?,
+        payload: row.try_get("payload")?,
+        available_at_ms: row.try_get("available_at_ms")?,
+        attempts: attempts.try_into().map_err(|_| JobQueueError::CorruptRow("attempts"))?,
+        lease_owner: row.try_get("lease_owner")?,
+        lease_until_ms: row.try_get("lease_until_ms")?,
+        created_at_ms: row.try_get("created_at_ms")?,
+        finished_at_ms: row.try_get("finished_at_ms")?,
+        last_error: row.try_get("last_error")?,
+    })
+}
+
+fn job_from_postgres_row(row: &PgRow) -> Result<Job, JobQueueError> {
     let id = id_from_bytes(&row.try_get::<Vec<u8>, _>("id")?)?;
     let attempts = row.try_get::<i64, _>("attempts")?;
     Ok(Job {

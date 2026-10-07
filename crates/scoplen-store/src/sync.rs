@@ -11,10 +11,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Postgres, Row, Sqlite, Transaction};
 use thiserror::Error;
 
-use crate::{RelationalStore, SqliteStore, account_keys::AccountId};
+use crate::{PostgresStore, RelationalStore, SqliteStore, account_keys::AccountId};
 
 /// Maximum envelope size from the sync protocol's default limits.
 pub const MAX_ENVELOPE_BYTES: usize = 260 * 1024;
@@ -1368,6 +1368,130 @@ impl SqliteStore {
     }
 }
 
+impl PostgresStore {
+    /// List a bounded, stable page of vault identifiers for retention scheduling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::InvalidPageSize`] for an invalid bound or a database/corrupt-row
+    /// error when vault identifiers cannot be read safely.
+    pub async fn list_sync_vault_ids(&self, limit: u16) -> Result<Vec<VaultId>, SyncStoreError> {
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(SyncStoreError::InvalidPageSize);
+        }
+        let rows = sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT $1")
+            .bind(i64::from(limit))
+            .fetch_all(self.pool())
+            .await?;
+        rows.into_iter()
+            .map(|row| id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id"))
+            .collect()
+    }
+
+    /// Prune old PostgreSQL versions and purge eligible tombstones for one vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultNotFound`], [`SyncStoreError::CursorAhead`],
+    /// [`SyncStoreError::InvalidRetentionTime`], or a database error when retention cannot be
+    /// committed.
+    pub async fn purge_sync_history(
+        &self,
+        vault_id: VaultId,
+        acknowledged_through: Option<u64>,
+        now_ms: i64,
+    ) -> Result<PurgeReport, SyncStoreError> {
+        if now_ms < 0 {
+            return Err(SyncStoreError::InvalidRetentionTime);
+        }
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let (current_seq, existing_horizon) =
+            vault_state_postgres(&mut transaction, vault_id).await?;
+        if let Some(cursor) = acknowledged_through
+            && cursor > current_seq
+        {
+            return Err(SyncStoreError::CursorAhead { cursor, current: current_seq });
+        }
+
+        let mut highest_removed = existing_horizon;
+        let version_cutoff_ms = now_ms.saturating_sub(VERSION_RETENTION_DAYS * MILLIS_PER_DAY);
+        let tombstone_cutoff_ms =
+            now_ms.saturating_sub(TOMBSTONE_PURGE_AFTER_DAYS * MILLIS_PER_DAY);
+        let old_version_max = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM (
+             SELECT sequence, written_at_ms, ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY sequence DESC) AS rank
+             FROM sync_object_versions WHERE vault_id = $1
+             ) AS retained WHERE rank > 21 OR (rank > 1 AND written_at_ms < $2)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(version_cutoff_ms)
+        .fetch_one(&mut *transaction)
+        .await?
+        .map(sequence_from_sql)
+        .transpose()?;
+        if let Some(max_sequence) = old_version_max {
+            highest_removed = highest_removed.max(max_sequence);
+        }
+        let old_versions_result = sqlx::query(
+            "DELETE FROM sync_object_versions WHERE vault_id = $1 AND sequence IN (
+             SELECT sequence FROM (
+               SELECT sequence, written_at_ms, ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY sequence DESC) AS rank
+               FROM sync_object_versions WHERE vault_id = $2
+             ) AS retained WHERE rank > 21 OR (rank > 1 AND written_at_ms < $3)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(vault_id.as_slice())
+        .bind(version_cutoff_ms)
+        .execute(&mut *transaction)
+        .await?;
+        let pruned_versions = old_versions_result.rows_affected();
+
+        let mut tombstone_query = String::from(
+            "SELECT object_id, sequence FROM sync_objects
+             WHERE vault_id = $1 AND tombstone = TRUE AND written_at_ms <= $2",
+        );
+        if acknowledged_through.is_some() {
+            tombstone_query.push_str(" OR (vault_id = $3 AND tombstone = TRUE AND sequence <= $4)");
+        }
+        let mut query =
+            sqlx::query(&tombstone_query).bind(vault_id.as_slice()).bind(tombstone_cutoff_ms);
+        if let Some(cursor) = acknowledged_through {
+            query = query.bind(vault_id.as_slice()).bind(sequence_to_sql(cursor)?);
+        }
+        let tombstones = query.fetch_all(&mut *transaction).await?;
+        let mut purged_tombstones = 0_u64;
+        let mut pruned_versions = pruned_versions;
+        for row in tombstones {
+            let object_id = id_from_bytes(&row.try_get::<Vec<u8>, _>("object_id")?, "object_id")?;
+            highest_removed = highest_removed.max(sequence_from_sql(row.try_get("sequence")?)?);
+            let history = sqlx::query(
+                "DELETE FROM sync_object_versions WHERE vault_id = $1 AND object_id = $2",
+            )
+            .bind(vault_id.as_slice())
+            .bind(object_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+            pruned_versions = pruned_versions.saturating_add(history.rows_affected());
+            sqlx::query("DELETE FROM sync_objects WHERE vault_id = $1 AND object_id = $2")
+                .bind(vault_id.as_slice())
+                .bind(object_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            purged_tombstones = purged_tombstones.saturating_add(1);
+        }
+        if highest_removed > existing_horizon {
+            sqlx::query("UPDATE sync_vaults SET purge_horizon = $1 WHERE vault_id = $2")
+                .bind(sequence_to_sql(highest_removed)?)
+                .bind(vault_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(PurgeReport { pruned_versions, purged_tombstones, purge_horizon: highest_removed })
+    }
+}
+
 async fn read_current_page(
     transaction: &mut Transaction<'_, Sqlite>,
     vault_id: VaultId,
@@ -1432,6 +1556,38 @@ async fn vault_state(
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(SyncStoreError::VaultNotFound)?;
+    Ok((
+        sequence_from_sql(row.try_get("current_seq")?)?,
+        sequence_from_sql(row.try_get("purge_horizon")?)?,
+    ))
+}
+
+async fn lock_vault_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+) -> Result<(), SyncStoreError> {
+    let result =
+        sqlx::query("UPDATE sync_vaults SET current_seq = current_seq WHERE vault_id = $1")
+            .bind(vault_id.as_slice())
+            .execute(&mut **transaction)
+            .await?;
+    if result.rows_affected() != 1 {
+        return Err(SyncStoreError::VaultNotFound);
+    }
+    Ok(())
+}
+
+async fn vault_state_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+) -> Result<(u64, u64), SyncStoreError> {
+    let row = sqlx::query(
+        "SELECT current_seq, purge_horizon FROM sync_vaults WHERE vault_id = $1 FOR UPDATE",
+    )
+    .bind(vault_id.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(SyncStoreError::VaultNotFound)?;
     Ok((
         sequence_from_sql(row.try_get("current_seq")?)?,
         sequence_from_sql(row.try_get("purge_horizon")?)?,
