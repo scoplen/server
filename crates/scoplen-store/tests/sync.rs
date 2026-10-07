@@ -9,7 +9,8 @@ use std::{
 use scoplen_store::{
     RelationalStore, SqliteStore,
     sync::{
-        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SharedVaultEpochWrap, SharedVaultKey,
+        MAX_MEMBERS_PER_SHARED_VAULT, MAX_OBJECTS_PER_VAULT, MAX_SHARED_VAULT_KEY_BYTES,
+        MAX_SHARED_VAULTS_PER_ACCOUNT, ObjectWrite, SharedVaultEpochWrap, SharedVaultKey,
         SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
     },
 };
@@ -391,6 +392,118 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
 }
 
 #[tokio::test]
+async fn shared_vault_quota_counts_creation_and_membership_atomically() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let account = [70; 16];
+    let other = [71; 16];
+    let target = [72; 16];
+    sqlx::query(
+        "WITH RECURSIVE ids(n) AS (
+           SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?
+         )
+         INSERT INTO sync_vaults (vault_id, kind)
+         SELECT CAST(printf('%016X', n) AS BLOB), 'shared' FROM ids",
+    )
+    .bind(i64::try_from(MAX_SHARED_VAULTS_PER_ACCOUNT).expect("test limit"))
+    .execute(store.pool())
+    .await
+    .expect("seed shared vaults");
+    sqlx::query(
+        "INSERT INTO sync_vault_members (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+         SELECT vault_id, ?, 'member', 1, x'01' FROM sync_vaults WHERE kind = 'shared'",
+    )
+    .bind(account.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("seed account memberships");
+    store.create_shared_sync_vault(target, other, &[1]).await.expect("target vault");
+
+    let rejected = [73; 16];
+    assert!(matches!(
+        store.create_shared_sync_vault(rejected, account, &[2]).await,
+        Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_vaults WHERE vault_id = ?")
+            .bind(rejected.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("rejected vault count"),
+        0
+    );
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                target,
+                account,
+                &[SharedVaultKey { epoch: 1, wrapped_vault_key: vec![2] }],
+            )
+            .await,
+        Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+    ));
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(target, account).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    store
+        .create_personal_sync_vault([74; 16], account, &[3])
+        .await
+        .expect("personal vault is independent");
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn member_quota_rejects_new_member_without_key_rows() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [75; 16];
+    store.create_shared_sync_vault(vault, [76; 16], &[1]).await.expect("shared vault");
+    sqlx::query(
+        "WITH RECURSIVE ids(n) AS (
+           SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?
+         )
+         INSERT INTO sync_vault_members (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+         SELECT ?, CAST(printf('%016X', n) AS BLOB), 'member', 1, x'01' FROM ids",
+    )
+    .bind(i64::try_from(MAX_MEMBERS_PER_SHARED_VAULT - 1).expect("test limit"))
+    .bind(vault.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("seed members");
+    let rejected = [77; 16];
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                vault,
+                rejected,
+                &[SharedVaultKey { epoch: 1, wrapped_vault_key: vec![2] }],
+            )
+            .await,
+        Err(SyncStoreError::QuotaExceeded("members per shared vault"))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ?")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("member count"),
+        i64::try_from(MAX_MEMBERS_PER_SHARED_VAULT).expect("test limit")
+    );
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, rejected).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn shared_vault_member_removal_cascades_and_marks_rotation() {
     let directory = test_directory();
@@ -603,6 +716,68 @@ async fn compare_and_swap_conflicts_are_atomic_and_report_current_state() {
     );
     let versions = store.sync_versions(vault, [1; 16]).await.expect("version history");
     assert_eq!(versions.iter().map(|change| change.sequence).collect::<Vec<_>>(), vec![1]);
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn object_quota_counts_tombstones_and_preserves_batch_sequence() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [78; 16];
+    store.create_sync_vault(vault, VaultKind::Personal).await.expect("create vault");
+    store.write_sync_batch(vault, &[write(1, None, 10)]).await.expect("initial object");
+    sqlx::query(
+        "WITH RECURSIVE ids(n) AS (
+           SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?
+         )
+         INSERT INTO sync_objects
+           (vault_id, object_id, sequence, envelope, tombstone, written_at_ms)
+         SELECT ?, CAST(printf('%016X', n) AS BLOB), n + 1, x'01', 1, 0 FROM ids",
+    )
+    .bind(i64::try_from(MAX_OBJECTS_PER_VAULT - 1).expect("test limit"))
+    .bind(vault.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("seed tombstones");
+    sqlx::query("UPDATE sync_vaults SET current_seq = ? WHERE vault_id = ?")
+        .bind(i64::try_from(MAX_OBJECTS_PER_VAULT).expect("test limit"))
+        .bind(vault.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("advance seeded sequence");
+
+    assert!(matches!(
+        store.write_sync_batch(vault, &[write(2, None, 20), write(3, None, 30)]).await,
+        Err(SyncStoreError::QuotaExceeded("objects per vault"))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT current_seq FROM sync_vaults WHERE vault_id = ?")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged sequence"),
+        i64::try_from(MAX_OBJECTS_PER_VAULT).expect("test limit")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_objects WHERE vault_id = ?")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged object count"),
+        i64::try_from(MAX_OBJECTS_PER_VAULT).expect("test limit")
+    );
+    let updated =
+        store.write_sync_batch(vault, &[write(1, Some(1), 40)]).await.expect("update at limit");
+    assert_eq!(updated[0].sequence, MAX_OBJECTS_PER_VAULT + 1);
+    assert!(matches!(
+        store
+            .write_sync_batch(vault, &[write(1, Some(updated[0].sequence), 50), write(2, None, 60)])
+            .await,
+        Err(SyncStoreError::QuotaExceeded("objects per vault"))
+    ));
 
     store.pool().close().await;
     drop(store);

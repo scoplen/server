@@ -35,8 +35,14 @@ storage boundary with local filesystem and S3-compatible implementations, includ
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, retention job scheduling and membership-aware purge orchestration, multi-instance
-notification fan-out, organization vault ownership in session listings, enforcement
-of all advertised sync quotas, audit, control, gateway, and console behavior are still roadmap work.
+notification fan-out, organization vault ownership in session listings, write-rate and
+deployment-configurable quota enforcement, audit, control, gateway, and console behavior are still
+roadmap work.
+The SQLite sync store enforces the default 100,000 current objects per vault (including
+tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
+the mutation transaction. The session advertises those same limits, and the HTTP adapter returns
+`413 sync.quota_exceeded` without changing state. Deployment-configurable quotas and per-device
+write-rate enforcement remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key; the enrollment service and the K-4 route for delivering or rotating that
 key are not implemented yet. A session lists a personal vault only after that provision succeeds.

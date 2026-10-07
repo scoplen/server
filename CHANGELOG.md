@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Enforced default sync cardinality limits atomically for object insertion, shared-vault creation,
+  and member addition. The session advertises the store limits, and quota rejection returns
+  `413 sync.quota_exceeded` with no mutation. Deployment-configurable limits and write-rate
+  enforcement remain open.
 - Added atomic one-per-account personal-vault provisioning with an ARK-wrapped epoch-one key,
   account-scoped key lookup, and personal-vault descriptors in the authenticated session response.
   SQLite and PostgreSQL migrations enforce ownership uniqueness. First-enrollment wiring and a

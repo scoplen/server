@@ -36,6 +36,12 @@ pub const MAX_SHARED_VAULT_KEY_BYTES: usize = 64 * 1024;
 pub const MAX_SHARED_VAULT_EPOCH_WRAPS: usize = 1_000;
 /// Maximum number of non-retired epochs supplied when adding a member.
 pub const MAX_SHARED_VAULT_MEMBER_EPOCHS: usize = 64;
+/// Maximum number of current object ids in a vault, including tombstones.
+pub const MAX_OBJECTS_PER_VAULT: u64 = 100_000;
+/// Maximum number of shared vaults visible to one account.
+pub const MAX_SHARED_VAULTS_PER_ACCOUNT: u64 = 1_000;
+/// Maximum number of current account members in a shared vault.
+pub const MAX_MEMBERS_PER_SHARED_VAULT: u64 = 1_000;
 
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
@@ -267,6 +273,9 @@ pub enum SyncStoreError {
     /// The database operation failed.
     #[error("sync database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// A durable sync cardinality limit would be exceeded.
+    #[error("sync {0} quota would be exceeded")]
+    QuotaExceeded(&'static str),
 }
 
 impl SqliteStore {
@@ -346,6 +355,7 @@ impl SqliteStore {
         if exists.is_some() {
             return Err(SyncStoreError::VaultAlreadyExists);
         }
+
         let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM sync_vaults WHERE vault_id = ?")
             .bind(vault_id.as_slice())
             .fetch_optional(&mut *transaction)
@@ -485,6 +495,20 @@ impl SqliteStore {
             .await?;
         if exists.is_some() {
             return Err(SyncStoreError::VaultAlreadyExists);
+        }
+
+        let shared_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = ? AND v.kind = 'shared'",
+        )
+        .bind(account_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
+            >= MAX_SHARED_VAULTS_PER_ACCOUNT
+        {
+            return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
         }
 
         sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES (?, 'shared')")
@@ -661,6 +685,30 @@ impl SqliteStore {
         if exists.is_some() {
             return Err(SyncStoreError::MemberAlreadyExists);
         }
+        let member_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ?",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(member_count).map_err(|_| SyncStoreError::CorruptRow("member_count"))?
+            >= MAX_MEMBERS_PER_SHARED_VAULT
+        {
+            return Err(SyncStoreError::QuotaExceeded("members per shared vault"));
+        }
+        let shared_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = ? AND v.kind = 'shared'",
+        )
+        .bind(account_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
+            >= MAX_SHARED_VAULTS_PER_ACCOUNT
+        {
+            return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
+        }
         let epoch_rows = sqlx::query(
             "SELECT DISTINCT epoch FROM sync_vault_member_keys WHERE vault_id = ? ORDER BY epoch ASC",
         )
@@ -786,6 +834,7 @@ impl SqliteStore {
     ///
     /// Returns a validation error for an invalid batch, [`SyncStoreError::Conflict`] when any
     /// compare-and-swap base is stale, or [`SyncStoreError::Database`] for a database failure.
+    #[allow(clippy::too_many_lines)]
     pub async fn write_sync_batch(
         &self,
         vault_id: VaultId,
@@ -828,6 +877,26 @@ impl SqliteStore {
             .collect::<Vec<_>>();
         if !conflicts.is_empty() {
             return Err(SyncStoreError::Conflict { conflicts });
+        }
+
+        let new_objects = writes.len() - current.len();
+        if new_objects > 0 {
+            let object_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sync_objects WHERE vault_id = ?",
+            )
+            .bind(vault_id.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let object_count = u64::try_from(object_count)
+                .map_err(|_| SyncStoreError::CorruptRow("object_count"))?;
+            let new_objects =
+                u64::try_from(new_objects).map_err(|_| SyncStoreError::SequenceExhausted)?;
+            if object_count
+                .checked_add(new_objects)
+                .is_none_or(|count| count > MAX_OBJECTS_PER_VAULT)
+            {
+                return Err(SyncStoreError::QuotaExceeded("objects per vault"));
+            }
         }
 
         let batch_len =

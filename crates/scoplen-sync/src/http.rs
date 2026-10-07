@@ -377,9 +377,9 @@ async fn session<A: SyncAuthenticator>(
             max_envelope_bytes: storage::MAX_ENVELOPE_BYTES as u64,
             max_batch_objects: storage::MAX_BATCH_OBJECTS as u64,
             max_batch_bytes: storage::MAX_BATCH_BYTES as u64,
-            max_objects_per_vault: 100_000,
-            max_shared_vaults_per_account: 1_000,
-            max_members_per_shared_vault: 1_000,
+            max_objects_per_vault: storage::MAX_OBJECTS_PER_VAULT,
+            max_shared_vaults_per_account: storage::MAX_SHARED_VAULTS_PER_ACCOUNT,
+            max_members_per_shared_vault: storage::MAX_MEMBERS_PER_SHARED_VAULT,
             write_requests_per_second: 50,
             write_burst: 200,
         },
@@ -1177,6 +1177,15 @@ impl SyncHttpError {
                 );
                 problem.with_conflicts(&conflicts)
             }
+            storage::SyncStoreError::QuotaExceeded(_) => Self::known(
+                instance,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "sync.quota_exceeded",
+                "Sync quota exceeded",
+                "The sync quota would be exceeded; no data changed and reduce usage or ask the operator to raise the limit.",
+                false,
+                false,
+            ),
             storage::SyncStoreError::EmptyBatch
             | storage::SyncStoreError::BatchObjectLimit
             | storage::SyncStoreError::BatchByteLimit
@@ -1694,6 +1703,15 @@ mod tests {
         let session = api::SyncSessionResponse::from_cbor(&bytes).expect("session cbor");
         assert_eq!(session.server_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(session.max_model_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(session.limits.max_objects_per_vault, storage::MAX_OBJECTS_PER_VAULT);
+        assert_eq!(
+            session.limits.max_shared_vaults_per_account,
+            storage::MAX_SHARED_VAULTS_PER_ACCOUNT
+        );
+        assert_eq!(
+            session.limits.max_members_per_shared_vault,
+            storage::MAX_MEMBERS_PER_SHARED_VAULT
+        );
         assert_eq!(session.vaults.len(), 1);
         assert_eq!(session.vaults[0].id, vault);
         assert_eq!(session.vaults[0].kind, api::VaultKind::Shared);
@@ -1923,6 +1941,49 @@ mod tests {
         assert_eq!(problem.code.as_str(), "sync.conflict");
         assert!(!problem.changed);
         assert!(!problem.retryable);
+    }
+
+    #[tokio::test]
+    async fn shared_vault_quota_returns_non_retryable_problem_without_creating_vault() {
+        let (store, _vault, device) = test_store().await;
+        for _ in 0..storage::MAX_SHARED_VAULTS_PER_ACCOUNT {
+            store
+                .create_shared_sync_vault(
+                    Uuid::now_v7().into_bytes(),
+                    TestAuthenticator::account_id(),
+                    &[1],
+                )
+                .await
+                .expect("seed account vault quota");
+        }
+        let rejected = Uuid::now_v7();
+        let body = api::SyncCreateVaultRequest { vault_id: rejected, wrapped_vault_key: vec![2] }
+            .to_cbor()
+            .expect("create request");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let response = app
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/sync/v1/vaults")
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(body))
+                .expect("create request builder"),
+            )
+            .await
+            .expect("quota response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("quota body");
+        let problem = ProblemDetails::from_cbor(&bytes).expect("quota problem");
+        assert_eq!(problem.code.as_str(), "sync.quota_exceeded");
+        assert!(!problem.changed);
+        assert!(!problem.retryable);
+        assert!(matches!(
+            store.sync_vault_kind(rejected.into_bytes()).await,
+            Err(storage::SyncStoreError::VaultNotFound)
+        ));
     }
 
     #[tokio::test]
