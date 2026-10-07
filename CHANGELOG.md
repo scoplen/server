@@ -4,9 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added atomic one-per-account personal-vault provisioning with an ARK-wrapped epoch-one key,
+  account-scoped key lookup, and personal-vault descriptors in the authenticated session response.
+  SQLite and PostgreSQL migrations enforce ownership uniqueness. First-enrollment wiring and a
+  personal-vault key wire route still require a shared contract and production identity service.
 - Added the injected-authenticator `POST /sync/v1/session` handshake with account-scoped shared-vault
   descriptors, device binding, compatibility checks, and the persisted rotation-pending state.
-  Personal and organization vault ownership, production identity, and full quota enforcement remain
+  Organization vault ownership, production identity, and full quota enforcement remain
   open; the baseline listener does not mount this router.
 - Added authenticated-injection `DELETE /sync/v1/vaults/{vault}/members/{account}` with
   last-admin protection, atomic member and wrap removal, and a durable rotation-pending marker.

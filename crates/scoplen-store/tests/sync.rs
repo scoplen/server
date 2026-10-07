@@ -33,6 +33,77 @@ async fn remove_test_directory(path: PathBuf) {
 }
 
 #[tokio::test]
+async fn personal_vault_provisioning_is_unique_atomic_and_account_scoped() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let owner = [21; 16];
+    let other = [22; 16];
+    let personal = [12; 16];
+    let shared = [11; 16];
+    store.create_personal_sync_vault(personal, owner, &[7, 8]).await.expect("personal vault");
+    store.create_shared_sync_vault(shared, owner, &[9]).await.expect("shared vault");
+    store.write_sync_batch(personal, &[write(31, None, 4)]).await.expect("personal write");
+
+    assert_eq!(
+        store.get_personal_sync_vault_key(owner).await.expect("owner key"),
+        (personal, vec![7, 8])
+    );
+    assert!(matches!(
+        store.get_personal_sync_vault_key(other).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    let listed = store.list_sync_vaults_for_account(owner).await.expect("owner vaults");
+    assert_eq!(listed.iter().map(|item| item.vault_id).collect::<Vec<_>>(), vec![shared, personal]);
+    assert_eq!(listed[0].kind, VaultKind::Shared);
+    assert_eq!(listed[1].kind, VaultKind::Personal);
+    assert_eq!(listed[1].sequence, 1);
+    assert_eq!(listed[1].key_epoch, 1);
+    assert!(!listed[1].rotation_pending);
+    assert_eq!(store.list_sync_vaults_for_account(other).await.expect("other vaults"), Vec::new());
+
+    assert!(matches!(
+        store.create_personal_sync_vault([13; 16], owner, &[1]).await,
+        Err(SyncStoreError::VaultAlreadyExists)
+    ));
+    assert!(matches!(
+        store.create_personal_sync_vault(personal, other, &[1]).await,
+        Err(SyncStoreError::VaultAlreadyExists)
+    ));
+    assert!(matches!(
+        store.create_personal_sync_vault([14; 16], other, &[]).await,
+        Err(SyncStoreError::EmptyVaultKey)
+    ));
+    assert!(matches!(
+        store
+            .create_personal_sync_vault([14; 16], other, &vec![1; MAX_SHARED_VAULT_KEY_BYTES + 1])
+            .await,
+        Err(SyncStoreError::VaultKeyTooLarge)
+    ));
+
+    sqlx::query(
+        "CREATE TRIGGER reject_personal_ownership BEFORE INSERT ON sync_personal_vaults
+         BEGIN SELECT RAISE(ABORT, 'injected ownership failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("install failure trigger");
+    assert!(matches!(
+        store.create_personal_sync_vault([14; 16], other, &[1]).await,
+        Err(SyncStoreError::Constraint(_))
+    ));
+    let orphan: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_vaults WHERE vault_id = ?")
+        .bind([14; 16].as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("check transaction rollback");
+    assert_eq!(orphan, 0);
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
 async fn shared_session_descriptors_follow_current_membership_and_rotation() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");

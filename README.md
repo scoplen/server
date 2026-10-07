@@ -19,8 +19,9 @@ with bounded payloads, atomic claims, owner-checked leases, retry/failure state,
 requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for a session handshake that lists
-current shared-vault memberships and their rotation state, shared-vault creation, key retrieval,
-epoch publication, and member addition and removal, plus account key bundles, changes,
+account-owned personal vaults and current shared-vault memberships with their rotation state,
+shared-vault creation, key retrieval, epoch publication, and member addition and removal, plus
+account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
 `/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
 applies an injected device policy, and fans out deterministic CBOR events through a caller-owned
@@ -34,8 +35,11 @@ storage boundary with local filesystem and S3-compatible implementations, includ
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, retention job scheduling and membership-aware purge orchestration, multi-instance
-notification fan-out, personal and organization vault ownership in session listings, enforcement
+notification fan-out, organization vault ownership in session listings, enforcement
 of all advertised sync quotas, audit, control, gateway, and console behavior are still roadmap work.
+The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
+ARK-wrapped initial key; the enrollment service and the K-4 route for delivering or rotating that
+key are not implemented yet. A session lists a personal vault only after that provision succeeds.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
 against the SQLite set. The server roles remain SQLite-only until their storage queries and
 readiness wiring are implemented for PostgreSQL.
