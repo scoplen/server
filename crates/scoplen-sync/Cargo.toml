@@ -8,8 +8,8 @@ description = "Scoplen encrypted synchronization service."
 
 [dependencies]
 axum.workspace = true
-scoplen-api = { git = "https://github.com/plystra/scoplen-proto.git", rev = "b5bceca" }
-scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "b5bceca" }
+scoplen-api = { git = "https://github.com/plystra/scoplen-proto.git", rev = "466b9ec" }
+scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "466b9ec" }
 scoplen-store = { path = "../scoplen-store" }
 tokio.workspace = true
 uuid.workspace = true
