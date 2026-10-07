@@ -77,6 +77,14 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
     assert_eq!(member.get::<String, _>("role"), "admin");
     assert_eq!(member.get::<i64, _>("key_epoch"), 1);
     assert_eq!(member.get::<Vec<u8>, _>("wrapped_vault_key"), vec![1, 2, 3]);
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, account).await.expect("member key lookup"),
+        vec![scoplen_store::sync::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![1, 2, 3] }]
+    );
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, [13; 16]).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
 
     assert!(matches!(
         store.create_shared_sync_vault(vault, [13; 16], &[9]).await,

@@ -255,6 +255,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
         .route("/sync/v1/notify", get(notify::<A>))
         .route("/sync/v1/vaults", post(create_vault::<A>))
+        .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -393,6 +394,40 @@ async fn create_vault<A: SyncAuthenticator>(
             &instance,
             format!("could not encode shared-vault response: {error}"),
         )
+    })?))
+}
+
+async fn vault_keys<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    Path(vault): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    let vault = parse_uuid(&vault, "vault", &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance)?;
+    let account_id = state
+        .authenticator
+        .account_id(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let keys = state
+        .store
+        .get_shared_sync_vault_keys(vault, account_id)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncVaultKeysResponse {
+        keys: keys
+            .into_iter()
+            .map(|key| api::SyncVaultKey {
+                epoch: key.epoch,
+                wrapped_vault_key: key.wrapped_vault_key,
+            })
+            .collect(),
+    };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("could not encode shared-vault keys: {error}"))
     })?))
 }
 
@@ -1280,6 +1315,27 @@ mod tests {
         assert_eq!(created.vault.key_epoch, 1);
         assert!(!created.vault.rotation_pending);
 
+        let response = app
+            .clone()
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .uri(format!("/sync/v1/vaults/{}/keys", path(vault.into_bytes()))),
+                )
+                .body(Body::empty())
+                .expect("keys request"),
+            )
+            .await
+            .expect("keys response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("keys response body");
+        let keys =
+            api::SyncVaultKeysResponse::from_cbor(&response_body).expect("keys response cbor");
+        assert_eq!(keys.keys.len(), 1);
+        assert_eq!(keys.keys[0].epoch, 1);
+        assert_eq!(keys.keys[0].wrapped_vault_key, vec![1, 2, 3]);
+
         let response = app.clone().oneshot(make_request()).await.expect("duplicate response");
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let response_body =
@@ -1311,12 +1367,26 @@ mod tests {
             api::SyncCreateVaultRequest { vault_id: Uuid::now_v7(), wrapped_vault_key: vec![1] }
                 .to_cbor()
                 .expect("valid request");
-        let denied = router(store, TestAuthenticator::new(device, false));
+        let denied = router(store.clone(), TestAuthenticator::new(device, false));
         let response = denied
             .oneshot(request_headers(request()).body(Body::from(body)).expect("denied request"))
             .await
             .expect("denied response");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let missing_member = router(store, TestAuthenticator::new(device, true));
+        let response = missing_member
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .uri(format!("/sync/v1/vaults/{}/keys", path(Uuid::now_v7().into_bytes()))),
+                )
+                .body(Body::empty())
+                .expect("missing keys request"),
+            )
+            .await
+            .expect("missing keys response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     fn key_update(device_ids: [storage::DeviceId; 2]) -> api::SyncAccountKeyBundleUpdate {

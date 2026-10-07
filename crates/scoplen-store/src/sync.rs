@@ -51,6 +51,15 @@ pub enum VaultKind {
     Organization,
 }
 
+/// One opaque wrapped key visible to a shared-vault member.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SharedVaultKey {
+    /// Positive non-retired key epoch.
+    pub epoch: u64,
+    /// Account-bound opaque vault-key wrap.
+    pub wrapped_vault_key: Vec<u8>,
+}
+
 impl VaultKind {
     const fn as_str(self) -> &'static str {
         match self {
@@ -280,6 +289,41 @@ impl SqliteStore {
         .map_err(map_constraint)?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Return the non-retired wrapped keys for one shared-vault member.
+    ///
+    /// The current creation boundary stores epoch one in the membership row. Future rotation
+    /// migrations can add rows without changing this service-facing representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultNotFound`] when the vault or account membership is absent,
+    /// [`SyncStoreError::CorruptRow`] when a stored epoch or wrap violates its bounds, and
+    /// [`SyncStoreError::Database`] when the lookup fails.
+    pub async fn get_shared_sync_vault_keys(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+    ) -> Result<Vec<SharedVaultKey>, SyncStoreError> {
+        let row = sqlx::query(
+            "SELECT key_epoch, wrapped_vault_key FROM sync_vault_members
+             WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(SyncStoreError::VaultNotFound)?;
+        let epoch = epoch_from_sql(row.try_get("key_epoch")?)?;
+        let wrapped_vault_key: Vec<u8> = row.try_get("wrapped_vault_key")?;
+        if wrapped_vault_key.is_empty() {
+            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        }
+        if wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
+            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        }
+        Ok(vec![SharedVaultKey { epoch, wrapped_vault_key }])
     }
 
     /// Return the kind of one sync vault for service-level authorization checks.
@@ -811,6 +855,14 @@ fn bool_from_sql(value: i64) -> Result<bool, SyncStoreError> {
 
 fn sequence_from_sql(value: i64) -> Result<u64, SyncStoreError> {
     value.try_into().map_err(|_| SyncStoreError::CorruptRow("sequence"))
+}
+
+fn epoch_from_sql(value: i64) -> Result<u64, SyncStoreError> {
+    let epoch = value.try_into().map_err(|_| SyncStoreError::CorruptRow("key_epoch"))?;
+    if epoch == 0 {
+        return Err(SyncStoreError::CorruptRow("key_epoch"));
+    }
+    Ok(epoch)
 }
 
 fn sequence_to_sql(value: u64) -> Result<i64, SyncStoreError> {

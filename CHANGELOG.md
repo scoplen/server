@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection `GET /sync/v1/vaults/{vault}/keys` with bounded ascending epoch
+  wraps, account-scoped durable lookup, not-found mapping, and route failure-path coverage. The
+  initial creation flow returns the epoch-1 opaque wrap; rotation remains a later endpoint.
 - Added authenticated-injection `POST /sync/v1/vaults` shared-vault creation with deterministic
   CBOR decoding, UUIDv7 and bounded-wrap validation, duplicate conflict mapping, and a response
   descriptor fixed to epoch one. SQLite persists the creator's admin/member row and opaque key wrap
