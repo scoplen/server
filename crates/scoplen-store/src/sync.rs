@@ -32,6 +32,8 @@ pub const VERSION_RETENTION_DAYS: i64 = 30;
 pub const TOMBSTONE_PURGE_AFTER_DAYS: i64 = 180;
 /// Maximum size of the opaque wrapped epoch-1 shared-vault key.
 pub const MAX_SHARED_VAULT_KEY_BYTES: usize = 64 * 1024;
+/// Maximum number of member wraps in one epoch publication.
+pub const MAX_SHARED_VAULT_EPOCH_WRAPS: usize = 1_000;
 
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
@@ -57,6 +59,15 @@ pub struct SharedVaultKey {
     /// Positive non-retired key epoch.
     pub epoch: u64,
     /// Account-bound opaque vault-key wrap.
+    pub wrapped_vault_key: Vec<u8>,
+}
+
+/// One member-specific wrap supplied when publishing a new epoch.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SharedVaultEpochWrap {
+    /// Current member account identifier.
+    pub account_id: AccountId,
+    /// Opaque account-bound vault-key wrap.
     pub wrapped_vault_key: Vec<u8>,
 }
 
@@ -160,6 +171,15 @@ pub enum SyncStoreError {
     /// A shared vault with this identifier is already present.
     #[error("sync vault already exists")]
     VaultAlreadyExists,
+    /// The requested epoch does not immediately follow the current epoch.
+    #[error("sync vault epoch conflicts with current epoch {current_epoch}")]
+    EpochConflict { current_epoch: u64 },
+    /// The supplied wraps do not exactly match the current member set.
+    #[error("sync vault epoch member set does not match current members")]
+    MemberSetMismatch,
+    /// The epoch wrap list is empty, oversized, unsorted, or duplicated.
+    #[error("sync vault epoch wraps are invalid")]
+    InvalidEpochWraps,
     /// The initial shared-vault key wrap is empty.
     #[error("shared-vault key wrap must not be empty")]
     EmptyVaultKey,
@@ -287,6 +307,17 @@ impl SqliteStore {
         .execute(&mut *transaction)
         .await
         .map_err(map_constraint)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_member_keys
+             (vault_id, account_id, epoch, wrapped_vault_key)
+             VALUES (?, ?, 1, ?)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
         transaction.commit().await?;
         Ok(())
     }
@@ -306,24 +337,102 @@ impl SqliteStore {
         vault_id: VaultId,
         account_id: AccountId,
     ) -> Result<Vec<SharedVaultKey>, SyncStoreError> {
-        let row = sqlx::query(
-            "SELECT key_epoch, wrapped_vault_key FROM sync_vault_members
-             WHERE vault_id = ? AND account_id = ?",
+        let rows = sqlx::query(
+            "SELECT epoch, wrapped_vault_key FROM sync_vault_member_keys
+             WHERE vault_id = ? AND account_id = ? ORDER BY epoch ASC",
         )
         .bind(vault_id.as_slice())
         .bind(account_id.as_slice())
-        .fetch_optional(self.pool())
+        .fetch_all(self.pool())
+        .await?;
+        if rows.is_empty() {
+            return Err(SyncStoreError::VaultNotFound);
+        }
+        rows.into_iter()
+            .map(|row| {
+                let epoch = epoch_from_sql(row.try_get("epoch")?)?;
+                let wrapped_vault_key: Vec<u8> = row.try_get("wrapped_vault_key")?;
+                if wrapped_vault_key.is_empty()
+                    || wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES
+                {
+                    return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+                }
+                Ok(SharedVaultKey { epoch, wrapped_vault_key })
+            })
+            .collect()
+    }
+
+    /// Atomically publish the next shared-vault epoch for every current member.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict when the epoch is not the next value, a member-set error when the
+    /// supplied wraps do not exactly match current members, validation errors for malformed wraps,
+    /// and a storage error when the transaction cannot commit.
+    pub async fn publish_shared_sync_vault_epoch(
+        &self,
+        vault_id: VaultId,
+        epoch: u64,
+        wraps: &[SharedVaultEpochWrap],
+    ) -> Result<(), SyncStoreError> {
+        validate_epoch_wraps(wraps)?;
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        lock_vault(&mut transaction, vault_id).await?;
+        let current_epoch = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(epoch) FROM sync_vault_member_keys WHERE vault_id = ?",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
         .await?
-        .ok_or(SyncStoreError::VaultNotFound)?;
-        let epoch = epoch_from_sql(row.try_get("key_epoch")?)?;
-        let wrapped_vault_key: Vec<u8> = row.try_get("wrapped_vault_key")?;
-        if wrapped_vault_key.is_empty() {
-            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        .map(epoch_from_sql)
+        .transpose()?
+        .unwrap_or(0);
+        let expected = current_epoch.checked_add(1).ok_or(SyncStoreError::SequenceExhausted)?;
+        if epoch != expected {
+            return Err(SyncStoreError::EpochConflict { current_epoch });
         }
-        if wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
-            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        let member_rows = sqlx::query(
+            "SELECT account_id FROM sync_vault_members WHERE vault_id = ? ORDER BY account_id ASC",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let members = member_rows
+            .iter()
+            .map(|row| {
+                let bytes: Vec<u8> = row.try_get("account_id")?;
+                id_from_bytes(&bytes, "account_id")
+            })
+            .collect::<Result<Vec<_>, SyncStoreError>>()?;
+        let supplied: Vec<AccountId> = wraps.iter().map(|wrap| wrap.account_id).collect();
+        if supplied != members {
+            return Err(SyncStoreError::MemberSetMismatch);
         }
-        Ok(vec![SharedVaultKey { epoch, wrapped_vault_key }])
+        for wrap in wraps {
+            sqlx::query(
+                "INSERT INTO sync_vault_member_keys
+                 (vault_id, account_id, epoch, wrapped_vault_key) VALUES (?, ?, ?, ?)",
+            )
+            .bind(vault_id.as_slice())
+            .bind(wrap.account_id.as_slice())
+            .bind(sequence_to_sql(epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
+            sqlx::query(
+                "UPDATE sync_vault_members SET key_epoch = ?, wrapped_vault_key = ?
+                 WHERE vault_id = ? AND account_id = ?",
+            )
+            .bind(sequence_to_sql(epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .bind(vault_id.as_slice())
+            .bind(wrap.account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Return the kind of one sync vault for service-level authorization checks.
@@ -814,6 +923,28 @@ fn validate_batch(writes: &[ObjectWrite]) -> Result<(), SyncStoreError> {
     }
     if total_bytes > MAX_BATCH_BYTES {
         return Err(SyncStoreError::BatchByteLimit);
+    }
+    Ok(())
+}
+
+fn validate_epoch_wraps(wraps: &[SharedVaultEpochWrap]) -> Result<(), SyncStoreError> {
+    if wraps.is_empty() || wraps.len() > MAX_SHARED_VAULT_EPOCH_WRAPS {
+        return Err(SyncStoreError::InvalidEpochWraps);
+    }
+    let mut previous = None;
+    for wrap in wraps {
+        if wrap.account_id == [0; 16]
+            || wrap.wrapped_vault_key.is_empty()
+            || wrap.wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES
+        {
+            return Err(SyncStoreError::InvalidEpochWraps);
+        }
+        if let Some(previous) = previous
+            && wrap.account_id <= previous
+        {
+            return Err(SyncStoreError::InvalidEpochWraps);
+        }
+        previous = Some(wrap.account_id);
     }
     Ok(())
 }

@@ -19,7 +19,7 @@ with bounded payloads, atomic claims, owner-checked leases, retry/failure state,
 requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for shared-vault creation, shared-vault key retrieval,
-account key bundles, changes,
+shared-vault epoch publication, account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
 `/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
 applies an injected device policy, and fans out deterministic CBOR events through a caller-owned

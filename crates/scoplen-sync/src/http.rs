@@ -40,6 +40,8 @@ const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum SyncOperation {
     /// Create a shared vault owned by the authenticated account.
     CreateVault,
+    /// Publish a new shared-vault key epoch.
+    PublishVaultEpoch,
     /// Read the current change feed.
     Read,
     /// Read a full reconciliation snapshot.
@@ -256,6 +258,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
         .route("/sync/v1/notify", get(notify::<A>))
         .route("/sync/v1/vaults", post(create_vault::<A>))
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
+        .route("/sync/v1/vaults/{vault}/epochs", post(publish_vault_epoch::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -428,6 +431,51 @@ async fn vault_keys<A: SyncAuthenticator>(
     };
     Ok(cbor_response(response.to_cbor().map_err(|error| {
         SyncHttpError::invalid(&instance, format!("could not encode shared-vault keys: {error}"))
+    })?))
+}
+
+async fn publish_vault_epoch<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    Path(vault): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    require_cbor(&headers, &instance)?;
+    let vault = parse_uuid(&vault, "vault", &instance)?;
+    let _identity = authorize(
+        &state,
+        &method,
+        &uri,
+        &headers,
+        vault,
+        SyncOperation::PublishVaultEpoch,
+        &instance,
+    )?;
+    let request = api::SyncPublishVaultEpochRequest::from_cbor(&body).map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("invalid shared-vault epoch request: {error}"))
+    })?;
+    let wraps = request
+        .wrapped_keys
+        .iter()
+        .map(|wrap| storage::SharedVaultEpochWrap {
+            account_id: wrap.account_id.into_bytes(),
+            wrapped_vault_key: wrap.wrapped_vault_key.clone(),
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .publish_shared_sync_vault_epoch(vault, request.epoch, &wraps)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncPublishVaultEpochResponse { epoch: request.epoch };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(
+            &instance,
+            format!("could not encode shared-vault epoch response: {error}"),
+        )
     })?))
 }
 
@@ -858,6 +906,24 @@ impl SyncHttpError {
                 false,
                 false,
             ),
+            storage::SyncStoreError::EpochConflict { current_epoch } => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync vault epoch conflict",
+                format!(
+                    "The requested vault epoch follows neither the current epoch {current_epoch} nor an exact replay; no data changed and fetch current keys before retrying."
+                ),
+                false,
+                true,
+            ),
+            storage::SyncStoreError::MemberSetMismatch => Self::invalid(
+                instance,
+                "shared-vault epoch wraps must contain exactly one entry for every current member",
+            ),
+            storage::SyncStoreError::InvalidEpochWraps => {
+                Self::invalid(instance, "shared-vault epoch wraps are invalid")
+            }
             storage::SyncStoreError::VaultNotFound | storage::SyncStoreError::ObjectNotFound => {
                 Self::known(
                     instance,
@@ -1112,6 +1178,10 @@ mod tests {
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
+
+        fn account_id() -> key_storage::AccountId {
+            [0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 42]
+        }
     }
 
     impl SyncAuthenticator for TestAuthenticator {
@@ -1185,7 +1255,7 @@ mod tests {
             &self,
             _identity: AuthenticatedDevice,
         ) -> Result<key_storage::AccountId, AuthFailure> {
-            Ok([42; 16])
+            Ok(Self::account_id())
         }
 
         fn authorize_keys(
@@ -1335,6 +1405,47 @@ mod tests {
         assert_eq!(keys.keys.len(), 1);
         assert_eq!(keys.keys[0].epoch, 1);
         assert_eq!(keys.keys[0].wrapped_vault_key, vec![1, 2, 3]);
+
+        let epoch_body = api::SyncPublishVaultEpochRequest {
+            epoch: 2,
+            wrapped_keys: vec![api::SyncVaultEpochWrap {
+                account_id: Uuid::from_bytes(TestAuthenticator::account_id()),
+                wrapped_vault_key: vec![4, 5, 6],
+            }],
+        }
+        .to_cbor()
+        .expect("epoch request");
+        let epoch_request = || {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sync/v1/vaults/{}/epochs", path(vault.into_bytes())))
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(epoch_body.clone()))
+            .expect("epoch request builder")
+        };
+        let response = app.clone().oneshot(epoch_request()).await.expect("epoch response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("epoch response body");
+        assert_eq!(
+            api::SyncPublishVaultEpochResponse::from_cbor(&response_body)
+                .expect("epoch response cbor")
+                .epoch,
+            2
+        );
+        let response = app.clone().oneshot(epoch_request()).await.expect("epoch conflict");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("epoch conflict body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&response_body)
+                .expect("epoch conflict problem")
+                .code
+                .as_str(),
+            "sync.conflict"
+        );
 
         let response = app.clone().oneshot(make_request()).await.expect("duplicate response");
         assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -1494,7 +1605,11 @@ mod tests {
         let authenticator = TestAuthenticator::new(device, true);
         let app = router(store.clone(), authenticator);
         store
-            .replace_account_key_statements([42; 16], &[vec![3], vec![1], vec![3]], &[vec![2]])
+            .replace_account_key_statements(
+                TestAuthenticator::account_id(),
+                &[vec![3], vec![1], vec![3]],
+                &[vec![2]],
+            )
             .await
             .expect("statements");
         let update = key_update(device_ids);

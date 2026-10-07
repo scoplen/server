@@ -9,8 +9,8 @@ use std::{
 use scoplen_store::{
     RelationalStore, SqliteStore,
     sync::{
-        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS,
-        VERSION_RETENTION_DAYS, VaultKind,
+        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SharedVaultEpochWrap, SyncStoreError,
+        TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
     },
 };
 
@@ -58,6 +58,7 @@ fn now_ms() -> i64 {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
@@ -84,6 +85,35 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
     assert!(matches!(
         store.get_shared_sync_vault_keys(vault, [13; 16]).await,
         Err(SyncStoreError::VaultNotFound)
+    ));
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: account, wrapped_vault_key: vec![4, 5, 6] }],
+        )
+        .await
+        .expect("publish next epoch");
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, account).await.expect("all epochs"),
+        vec![
+            scoplen_store::sync::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![1, 2, 3] },
+            scoplen_store::sync::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4, 5, 6] },
+        ]
+    );
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                2,
+                &[SharedVaultEpochWrap { account_id: account, wrapped_vault_key: vec![7] }],
+            )
+            .await,
+        Err(SyncStoreError::EpochConflict { current_epoch: 2 })
+    ));
+    assert!(matches!(
+        store.publish_shared_sync_vault_epoch(vault, 3, &[]).await,
+        Err(SyncStoreError::InvalidEpochWraps)
     ));
 
     assert!(matches!(

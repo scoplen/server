@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection `POST /sync/v1/vaults/{vault}/epochs` with admin-gated next-epoch
+  validation, exact current-member wrap matching, atomic historical/current key persistence, and
+  conflict and malformed-request problem mapping. SQLite/PostgreSQL schema parity and route/store
+  failure-path tests cover the all-or-nothing rotation boundary.
 - Added authenticated-injection `GET /sync/v1/vaults/{vault}/keys` with bounded ascending epoch
   wraps, account-scoped durable lookup, not-found mapping, and route failure-path coverage. The
   initial creation flow returns the epoch-1 opaque wrap; rotation remains a later endpoint.

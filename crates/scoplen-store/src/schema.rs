@@ -127,6 +127,52 @@ const SYNC_VAULT_MEMBERS: TableSpec = TableSpec {
     }],
 };
 
+const SYNC_VAULT_MEMBER_KEYS: TableSpec = TableSpec {
+    name: "sync_vault_member_keys",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "epoch",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "wrapped_vault_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "sync_vault_members",
+            target_column: "vault_id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "sync_vault_members",
+            target_column: "account_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "sync_vault_member_keys_by_vault_epoch",
+        columns: &["vault_id", "epoch", "account_id"],
+    }],
+};
+
 const SYNC_OBJECTS: TableSpec = TableSpec {
     name: "sync_objects",
     columns: &[
@@ -471,6 +517,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATIONS,
     SYNC_VAULTS,
     SYNC_VAULT_MEMBERS,
+    SYNC_VAULT_MEMBER_KEYS,
     SYNC_OBJECTS,
     SYNC_OBJECT_VERSIONS,
     SYNC_ACKS,

@@ -18,6 +18,15 @@ CREATE TABLE sync_vault_members (
     FOREIGN KEY (vault_id) REFERENCES sync_vaults (vault_id) ON DELETE CASCADE
 );
 
+CREATE TABLE sync_vault_member_keys (
+    vault_id BLOB NOT NULL CHECK (length(vault_id) = 16),
+    account_id BLOB NOT NULL CHECK (length(account_id) = 16),
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    wrapped_vault_key BLOB NOT NULL CHECK (length(wrapped_vault_key) > 0 AND length(wrapped_vault_key) <= 65536),
+    PRIMARY KEY (vault_id, account_id, epoch),
+    FOREIGN KEY (vault_id, account_id) REFERENCES sync_vault_members (vault_id, account_id) ON DELETE CASCADE
+);
+
 CREATE TABLE sync_objects (
     vault_id BLOB NOT NULL,
     object_id BLOB NOT NULL CHECK (length(object_id) = 16),
@@ -56,3 +65,4 @@ CREATE TABLE sync_acks (
 CREATE INDEX sync_objects_by_vault_sequence ON sync_objects (vault_id, sequence);
 CREATE INDEX sync_versions_by_vault_sequence ON sync_object_versions (vault_id, sequence);
 CREATE INDEX sync_vault_members_by_account ON sync_vault_members (account_id, vault_id);
+CREATE INDEX sync_vault_member_keys_by_vault_epoch ON sync_vault_member_keys (vault_id, epoch, account_id);
