@@ -16,6 +16,7 @@ use hyper_util::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
+use scoplen_store::sync::{MAX_PAGE_SIZE, SyncStoreError};
 use scoplen_store::{ObjectStorage, SqliteStore};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -178,6 +179,10 @@ async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
 }
 
 const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const RETENTION_JOB_KIND: &str = "sync-retention";
+const RETENTION_WORKER_OWNER: &str = "sync-retention-worker";
+const RETENTION_JOB_LEASE_MS: i64 = 60_000;
+const RETENTION_RETRY_MS: i64 = 60_000;
 
 async fn run_worker_role(store: Arc<SqliteStore>) -> Result<(), ServerError> {
     let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
@@ -189,17 +194,94 @@ async fn run_worker_role(store: Arc<SqliteStore>) -> Result<(), ServerError> {
             }
             Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
         }
+        match worker_retention_pass(&store).await {
+            Ok((scheduled, processed)) => {
+                info!(
+                    role = "worker",
+                    scheduled_retention_jobs = scheduled,
+                    processed_retention_jobs = processed,
+                    "retention pass"
+                );
+            }
+            Err(error) => error!(%error, role = "worker", "retention pass failed"),
+        }
     }
 }
 
 async fn worker_heartbeat(store: &SqliteStore) -> Result<u64, ServerError> {
-    let now = SystemTime::now()
+    let now = worker_now_ms()?;
+    store.requeue_expired_jobs(now).await.map_err(|error| ServerError::Task(error.to_string()))
+}
+
+fn worker_now_ms() -> Result<i64, ServerError> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| ServerError::Task(format!("worker clock is before Unix epoch: {error}")))?
         .as_millis()
         .try_into()
-        .map_err(|_| ServerError::Task("worker clock exceeds SQLite timestamp range".into()))?;
-    store.requeue_expired_jobs(now).await.map_err(|error| ServerError::Task(error.to_string()))
+        .map_err(|_| ServerError::Task("worker clock exceeds SQLite timestamp range".into()))
+}
+
+async fn worker_retention_pass(store: &SqliteStore) -> Result<(u64, u64), ServerError> {
+    let now = worker_now_ms()?;
+    worker_retention_pass_at(store, now).await
+}
+
+async fn worker_retention_pass_at(
+    store: &SqliteStore,
+    now: i64,
+) -> Result<(u64, u64), ServerError> {
+    let mut scheduled = 0_u64;
+    for vault_id in store
+        .list_sync_vault_ids(MAX_PAGE_SIZE)
+        .await
+        .map_err(|error| ServerError::Task(error.to_string()))?
+    {
+        if store
+            .enqueue_job_if_absent(
+                uuid::Uuid::new_v4().into_bytes(),
+                RETENTION_JOB_KIND,
+                &vault_id,
+                now,
+            )
+            .await
+            .map_err(|error| ServerError::Task(error.to_string()))?
+        {
+            scheduled = scheduled.saturating_add(1);
+        }
+    }
+
+    let mut processed = 0_u64;
+    while let Some(job) = store
+        .claim_job_kind(RETENTION_JOB_KIND, RETENTION_WORKER_OWNER, now, RETENTION_JOB_LEASE_MS)
+        .await
+        .map_err(|error| ServerError::Task(error.to_string()))?
+    {
+        let result = job
+            .payload
+            .as_slice()
+            .try_into()
+            .map(|vault_id| store.purge_sync_history(vault_id, None, now));
+        let result = match result {
+            Ok(purge) => purge.await,
+            Err(_) => Err(SyncStoreError::CorruptRow("retention payload")),
+        };
+        match result {
+            Ok(_) => store
+                .complete_job(job.id, RETENTION_WORKER_OWNER, now)
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?,
+            Err(error) => {
+                let retry_at = now.saturating_add(RETENTION_RETRY_MS);
+                store
+                    .fail_job(job.id, RETENTION_WORKER_OWNER, now, retry_at, &error.to_string())
+                    .await
+                    .map_err(|error| ServerError::Task(error.to_string()))?;
+            }
+        }
+        processed = processed.saturating_add(1);
+    }
+    Ok((scheduled, processed))
 }
 
 fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Router {
@@ -391,6 +473,7 @@ mod tests {
 
     use super::*;
     use scoplen_store::RelationalStore;
+    use scoplen_store::sync::{ObjectWrite, TOMBSTONE_PURGE_AFTER_DAYS, VaultKind};
     use tokio::io::AsyncReadExt;
 
     async fn remove_test_directory(path: &Path) {
@@ -538,6 +621,95 @@ mod tests {
             .expect("requeued job is available");
         assert_eq!(reclaimed.id, job_id);
         assert_eq!(reclaimed.lease_owner.as_deref(), Some("worker-b"));
+
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn worker_retention_pass_schedules_and_purges_old_tombstones() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-retention-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("open retention database");
+        let vault = [61; 16];
+        store.create_sync_vault(vault, VaultKind::Personal).await.expect("create vault");
+        store
+            .write_sync_batch(
+                vault,
+                &[ObjectWrite {
+                    object_id: [62; 16],
+                    base_sequence: None,
+                    envelope: vec![1, 2, 3],
+                    tombstone: false,
+                    signer_device_id: Some([63; 16]),
+                }],
+            )
+            .await
+            .expect("write object");
+        store
+            .write_sync_batch(
+                vault,
+                &[ObjectWrite {
+                    object_id: [62; 16],
+                    base_sequence: Some(1),
+                    envelope: vec![4, 5, 6],
+                    tombstone: true,
+                    signer_device_id: Some([63; 16]),
+                }],
+            )
+            .await
+            .expect("write tombstone");
+        let now =
+            worker_now_ms().expect("clock") + TOMBSTONE_PURGE_AFTER_DAYS * 24 * 60 * 60 * 1_000 + 1;
+        let (scheduled, processed) =
+            worker_retention_pass_at(&store, now).await.expect("retention pass");
+        assert_eq!((scheduled, processed), (1, 1));
+        assert_eq!(store.sync_snapshot(vault, 0, 10).await.expect("snapshot").objects.len(), 0);
+        assert!(
+            store
+                .claim_job_kind(
+                    RETENTION_JOB_KIND,
+                    RETENTION_WORKER_OWNER,
+                    worker_now_ms().expect("clock"),
+                    RETENTION_JOB_LEASE_MS
+                )
+                .await
+                .expect("queue is empty")
+                .is_none()
+        );
+
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn worker_retention_pass_retries_malformed_payload_without_blocking_valid_jobs() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-retention-retry-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("open retention database");
+        let vault = [63; 16];
+        store.create_sync_vault(vault, VaultKind::Personal).await.expect("create vault");
+        let now = worker_now_ms().expect("clock");
+        let malformed = [64; 16];
+        store
+            .enqueue_job(malformed, RETENTION_JOB_KIND, &[1], now)
+            .await
+            .expect("enqueue malformed retention job");
+
+        let (_, processed) = worker_retention_pass(&store).await.expect("retention retry pass");
+        assert_eq!(processed, 2);
+        let failed = store.get_job(malformed).await.expect("read failed retention job");
+        assert!(
+            failed.last_error.as_deref().is_some_and(|error| error.contains("retention payload"))
+        );
+        assert!(failed.available_at_ms >= now + RETENTION_RETRY_MS);
+        assert!(failed.lease_owner.is_none());
 
         store.pool().close().await;
         drop(store);

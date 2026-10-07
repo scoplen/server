@@ -34,7 +34,7 @@ does not mount this router. The `scoplen-store` crate now provides a backend-neu
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
-filtering, retention job scheduling and membership-aware purge orchestration, multi-instance
+filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, write-rate and
 deployment-configurable quota enforcement, audit, control, gateway, and console behavior are still
 roadmap work.

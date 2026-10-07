@@ -82,6 +82,50 @@ async fn enqueue_is_durable_and_duplicate_ids_are_rejected() {
 }
 
 #[tokio::test]
+async fn enqueue_if_absent_deduplicates_unfinished_payloads_and_allows_retry_after_completion() {
+    let (directory, store) = open_store().await;
+    assert!(
+        store
+            .enqueue_job_if_absent(job_id(1), "sync-retention", &[7], 100)
+            .await
+            .expect("enqueue first")
+    );
+    assert!(
+        !store
+            .enqueue_job_if_absent(job_id(2), "sync-retention", &[7], 200)
+            .await
+            .expect("deduplicate pending")
+    );
+    assert!(
+        store
+            .enqueue_job_if_absent(job_id(3), "sync-retention", &[8], 200)
+            .await
+            .expect("different payload")
+    );
+    let claim_at = now_ms();
+    let first = store
+        .claim_job_kind("sync-retention", "worker", claim_at, 100_000)
+        .await
+        .expect("claim retention")
+        .expect("retention job");
+    store.complete_job(first.id, "worker", claim_at + 1).await.expect("complete retention");
+    assert!(
+        store
+            .enqueue_job_if_absent(job_id(4), "sync-retention", &[7], 300)
+            .await
+            .expect("enqueue completed payload")
+    );
+    assert!(
+        store
+            .claim_job_kind("other", "worker", 1_000, 1_000)
+            .await
+            .expect("other kind claim")
+            .is_none()
+    );
+    close_store(directory, store).await;
+}
+
+#[tokio::test]
 async fn claims_follow_availability_order_and_update_attempts() {
     let (directory, store) = open_store().await;
     store.enqueue_job(job_id(1), "sync-retention", &[1], 200).await.expect("enqueue later job");

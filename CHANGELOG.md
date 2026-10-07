@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Connected the worker role to bounded sync-retention scheduling: vault ids are deduplicated in the
+  durable queue, claimed by kind, purged atomically with the existing retention primitive, and
+  retried after malformed or failed jobs. The worker passes no acknowledgement floor until device
+  membership and identity are available.
 - Enforced default sync cardinality limits atomically for object insertion, shared-vault creation,
   and member addition. The session advertises the store limits, and quota rejection returns
   `413 sync.quota_exceeded` with no mutation. Deployment-configurable limits remain open.

@@ -85,6 +85,52 @@ impl SqliteStore {
         .map_err(map_write_error)
     }
 
+    /// Enqueue a job unless an unfinished job with the same kind and payload already exists.
+    ///
+    /// The check and insert share the SQLite write transaction so concurrent worker heartbeats do
+    /// not schedule duplicate work for one resource.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, constraint, or database error when the job cannot be scheduled.
+    pub async fn enqueue_job_if_absent(
+        &self,
+        id: JobId,
+        kind: &str,
+        payload: &[u8],
+        available_at_ms: i64,
+    ) -> Result<bool, JobQueueError> {
+        validate_kind(kind)?;
+        validate_payload(payload)?;
+        validate_timestamp(available_at_ms)?;
+        let created_at_ms = now_ms()?;
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM jobs WHERE kind = ? AND payload = ? AND finished_at_ms IS NULL LIMIT 1",
+        )
+        .bind(kind)
+        .bind(payload)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if existing.is_some() {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, available_at_ms, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id.as_slice())
+        .bind(kind)
+        .bind(payload)
+        .bind(available_at_ms)
+        .bind(created_at_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_write_error)?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     /// Claim the oldest eligible job under an atomic SQLite write transaction.
     ///
     /// Expired leases are immediately eligible for another worker. A claim increments `attempts`
@@ -100,25 +146,54 @@ impl SqliteStore {
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
+        self.claim_job_filtered(None, owner, now_ms, lease_ms).await
+    }
+
+    /// Claim the oldest eligible job of one kind under an atomic SQLite write transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or database error when the claim cannot be committed.
+    pub async fn claim_job_kind(
+        &self,
+        kind: &str,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
+        validate_kind(kind)?;
+        self.claim_job_filtered(Some(kind), owner, now_ms, lease_ms).await
+    }
+
+    async fn claim_job_filtered(
+        &self,
+        kind: Option<&str>,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
         validate_owner(owner)?;
         validate_timestamp(now_ms)?;
         validate_lease(lease_ms)?;
         let lease_until_ms =
             now_ms.checked_add(lease_ms).ok_or(JobQueueError::TimestampOverflow)?;
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query(
+        let query = if kind.is_some() {
             "SELECT id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error
-             FROM jobs
-             WHERE finished_at_ms IS NULL
-               AND available_at_ms <= ?
+             FROM jobs WHERE finished_at_ms IS NULL AND available_at_ms <= ?
+               AND (lease_until_ms IS NULL OR lease_until_ms <= ?) AND kind = ?
+             ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1"
+        } else {
+            "SELECT id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error
+             FROM jobs WHERE finished_at_ms IS NULL AND available_at_ms <= ?
                AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
-             ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC
-             LIMIT 1",
-        )
-        .bind(now_ms)
-        .bind(now_ms)
-        .fetch_optional(&mut *transaction)
-        .await?;
+             ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1"
+        };
+        let mut query = sqlx::query(query).bind(now_ms).bind(now_ms);
+        if let Some(kind) = kind {
+            query = query.bind(kind);
+        }
+        let row = query.fetch_optional(&mut *transaction).await?;
         let Some(row) = row else {
             transaction.commit().await?;
             return Ok(None);

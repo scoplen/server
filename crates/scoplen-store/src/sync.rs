@@ -324,6 +324,28 @@ impl SqliteStore {
             .collect()
     }
 
+    /// List a bounded, stable page of vault identifiers for retention scheduling.
+    ///
+    /// The worker deliberately receives identifiers only; membership and acknowledgement policy
+    /// stay outside this storage enumeration. Callers repeat the bounded pass on later heartbeats.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::InvalidPageSize`] for an invalid bound or a database/corrupt-row
+    /// error when vault identifiers cannot be read safely.
+    pub async fn list_sync_vault_ids(&self, limit: u16) -> Result<Vec<VaultId>, SyncStoreError> {
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(SyncStoreError::InvalidPageSize);
+        }
+        let rows = sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT ?")
+            .bind(i64::from(limit))
+            .fetch_all(self.pool())
+            .await?;
+        rows.into_iter()
+            .map(|row| id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id"))
+            .collect()
+    }
+
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
     ///
     /// The identity enrollment service supplies the authenticated account and a client-generated
