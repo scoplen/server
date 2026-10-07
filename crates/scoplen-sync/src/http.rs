@@ -42,6 +42,8 @@ pub enum SyncOperation {
     CreateVault,
     /// Publish a new shared-vault key epoch.
     PublishVaultEpoch,
+    /// Add a member to a shared vault.
+    AddVaultMember,
     /// Read the current change feed.
     Read,
     /// Read a full reconciliation snapshot.
@@ -259,6 +261,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
         .route("/sync/v1/vaults", post(create_vault::<A>))
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/epochs", post(publish_vault_epoch::<A>))
+        .route("/sync/v1/vaults/{vault}/members", post(add_vault_member::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -475,6 +478,51 @@ async fn publish_vault_epoch<A: SyncAuthenticator>(
         SyncHttpError::invalid(
             &instance,
             format!("could not encode shared-vault epoch response: {error}"),
+        )
+    })?))
+}
+
+async fn add_vault_member<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    Path(vault): Path<String>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    require_cbor(&headers, &instance)?;
+    let vault = parse_uuid(&vault, "vault", &instance)?;
+    let _identity = authorize(
+        &state,
+        &method,
+        &uri,
+        &headers,
+        vault,
+        SyncOperation::AddVaultMember,
+        &instance,
+    )?;
+    let request = api::SyncAddVaultMemberRequest::from_cbor(&body).map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("invalid shared-vault member request: {error}"))
+    })?;
+    let wraps = request
+        .wrapped_keys
+        .iter()
+        .map(|key| storage::SharedVaultKey {
+            epoch: key.epoch,
+            wrapped_vault_key: key.wrapped_vault_key.clone(),
+        })
+        .collect::<Vec<_>>();
+    state
+        .store
+        .add_shared_sync_vault_member(vault, request.account_id.into_bytes(), &wraps)
+        .await
+        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let response = api::SyncAddVaultMemberResponse { account_id: request.account_id };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(
+            &instance,
+            format!("could not encode shared-vault member response: {error}"),
         )
     })?))
 }
@@ -895,6 +943,7 @@ impl SyncHttpError {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn from_store(error: storage::SyncStoreError, instance: &str) -> Box<Self> {
         match error {
             storage::SyncStoreError::VaultAlreadyExists => Self::known(
@@ -923,6 +972,11 @@ impl SyncHttpError {
             ),
             storage::SyncStoreError::InvalidEpochWraps => {
                 Self::invalid(instance, "shared-vault epoch wraps are invalid")
+            }
+            error @ (storage::SyncStoreError::MemberAlreadyExists
+            | storage::SyncStoreError::MemberEpochMismatch
+            | storage::SyncStoreError::InvalidMemberWraps) => {
+                Self::from_member_store(&error, instance)
             }
             storage::SyncStoreError::VaultNotFound | storage::SyncStoreError::ObjectNotFound => {
                 Self::known(
@@ -994,6 +1048,28 @@ impl SyncHttpError {
                 false,
                 true,
             ),
+        }
+    }
+
+    fn from_member_store(error: &storage::SyncStoreError, instance: &str) -> Box<Self> {
+        match error {
+            storage::SyncStoreError::MemberAlreadyExists => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync vault member already exists",
+                "The account is already a member of this vault; no data changed and retrying will not help.",
+                false,
+                false,
+            ),
+            storage::SyncStoreError::MemberEpochMismatch => Self::invalid(
+                instance,
+                "shared-vault member wraps must contain exactly one entry for every current epoch",
+            ),
+            storage::SyncStoreError::InvalidMemberWraps => {
+                Self::invalid(instance, "shared-vault member wraps are invalid")
+            }
+            _ => unreachable!("non-member storage error passed to member mapper"),
         }
     }
 
@@ -1455,6 +1531,111 @@ mod tests {
         assert_eq!(problem.code.as_str(), "sync.conflict");
         assert!(!problem.changed);
         assert!(!problem.retryable);
+    }
+
+    #[tokio::test]
+    async fn shared_vault_member_addition_routes_and_maps_conflicts() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let admin = TestAuthenticator::account_id();
+        store
+            .create_shared_sync_vault(vault.into_bytes(), admin, &[1, 2, 3])
+            .await
+            .expect("create shared vault");
+        store
+            .publish_shared_sync_vault_epoch(
+                vault.into_bytes(),
+                2,
+                &[storage::SharedVaultEpochWrap {
+                    account_id: admin,
+                    wrapped_vault_key: vec![7, 8, 9],
+                }],
+            )
+            .await
+            .expect("publish second epoch");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let member = Uuid::now_v7();
+        let body = api::SyncAddVaultMemberRequest {
+            account_id: member,
+            wrapped_keys: vec![
+                api::SyncVaultKey { epoch: 1, wrapped_vault_key: vec![4, 5, 6] },
+                api::SyncVaultKey { epoch: 2, wrapped_vault_key: vec![10, 11, 12] },
+            ],
+        }
+        .to_cbor()
+        .expect("member request");
+        let make_request = || {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sync/v1/vaults/{}/members", path(vault.into_bytes())))
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body.clone()))
+            .expect("member request builder")
+        };
+
+        let response = app.clone().oneshot(make_request()).await.expect("member response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("member response body");
+        assert_eq!(
+            api::SyncAddVaultMemberResponse::from_cbor(&response_body)
+                .expect("member response cbor")
+                .account_id,
+            member
+        );
+        assert_eq!(
+            store
+                .get_shared_sync_vault_keys(vault.into_bytes(), member.into_bytes())
+                .await
+                .expect("stored member keys"),
+            vec![
+                storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![4, 5, 6] },
+                storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![10, 11, 12] },
+            ]
+        );
+
+        let response =
+            app.clone().oneshot(make_request()).await.expect("duplicate member response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("duplicate member body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&response_body)
+                .expect("duplicate member problem")
+                .code
+                .as_str(),
+            "sync.conflict"
+        );
+
+        let missing_epoch_account = Uuid::now_v7();
+        let missing_epoch_body = api::SyncAddVaultMemberRequest {
+            account_id: missing_epoch_account,
+            wrapped_keys: vec![api::SyncVaultKey { epoch: 1, wrapped_vault_key: vec![10] }],
+        }
+        .to_cbor()
+        .expect("missing epoch member request");
+        let response = app
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/sync/v1/vaults/{}/members", path(vault.into_bytes())))
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(missing_epoch_body))
+                .expect("missing epoch request builder"),
+            )
+            .await
+            .expect("missing epoch response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("missing epoch body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&response_body).expect("missing epoch problem").code.as_str(),
+            "sync.invalid_request"
+        );
     }
 
     #[tokio::test]

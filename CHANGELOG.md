@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection `POST /sync/v1/vaults/{vault}/members` with bounded sorted epoch
+  wraps, exact current-epoch coverage, duplicate-member conflict mapping, and atomic membership
+  plus historical-wrap persistence. Route and storage tests cover missing epochs and rollback.
 - Added authenticated-injection `POST /sync/v1/vaults/{vault}/epochs` with admin-gated next-epoch
   validation, exact current-member wrap matching, atomic historical/current key persistence, and
   conflict and malformed-request problem mapping. SQLite/PostgreSQL schema parity and route/store

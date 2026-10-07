@@ -34,6 +34,8 @@ pub const TOMBSTONE_PURGE_AFTER_DAYS: i64 = 180;
 pub const MAX_SHARED_VAULT_KEY_BYTES: usize = 64 * 1024;
 /// Maximum number of member wraps in one epoch publication.
 pub const MAX_SHARED_VAULT_EPOCH_WRAPS: usize = 1_000;
+/// Maximum number of non-retired epochs supplied when adding a member.
+pub const MAX_SHARED_VAULT_MEMBER_EPOCHS: usize = 64;
 
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
@@ -177,9 +179,18 @@ pub enum SyncStoreError {
     /// The supplied wraps do not exactly match the current member set.
     #[error("sync vault epoch member set does not match current members")]
     MemberSetMismatch,
+    /// The target account is already a member of the vault.
+    #[error("sync vault member already exists")]
+    MemberAlreadyExists,
+    /// The supplied member wraps do not cover the current epoch set.
+    #[error("sync vault member epochs do not match current epochs")]
+    MemberEpochMismatch,
     /// The epoch wrap list is empty, oversized, unsorted, or duplicated.
     #[error("sync vault epoch wraps are invalid")]
     InvalidEpochWraps,
+    /// The member epoch-wrap list is empty, oversized, unsorted, or duplicated.
+    #[error("sync vault member wraps are invalid")]
+    InvalidMemberWraps,
     /// The initial shared-vault key wrap is empty.
     #[error("shared-vault key wrap must not be empty")]
     EmptyVaultKey,
@@ -430,6 +441,76 @@ impl SqliteStore {
             .bind(wrap.account_id.as_slice())
             .execute(&mut *transaction)
             .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically add a member with one opaque wrap for every currently served epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::MemberAlreadyExists`] for an existing member,
+    /// [`SyncStoreError::MemberEpochMismatch`] when the epoch list is not exact, validation errors
+    /// for malformed wraps, and a storage error when the transaction cannot commit.
+    pub async fn add_shared_sync_vault_member(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+        wraps: &[SharedVaultKey],
+    ) -> Result<(), SyncStoreError> {
+        validate_member_wraps(wraps)?;
+        let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        lock_vault(&mut transaction, vault_id).await?;
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sync_vault_members WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if exists.is_some() {
+            return Err(SyncStoreError::MemberAlreadyExists);
+        }
+        let epoch_rows = sqlx::query(
+            "SELECT DISTINCT epoch FROM sync_vault_member_keys WHERE vault_id = ? ORDER BY epoch ASC",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let epochs = epoch_rows
+            .iter()
+            .map(|row| epoch_from_sql(row.try_get("epoch")?))
+            .collect::<Result<Vec<_>, SyncStoreError>>()?;
+        let supplied_epochs: Vec<u64> = wraps.iter().map(|wrap| wrap.epoch).collect();
+        if supplied_epochs != epochs {
+            return Err(SyncStoreError::MemberEpochMismatch);
+        }
+        let current = wraps.last().ok_or(SyncStoreError::InvalidMemberWraps)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_members
+             (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+             VALUES (?, ?, 'member', ?, ?)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(sequence_to_sql(current.epoch)?)
+        .bind(&current.wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
+        for wrap in wraps {
+            sqlx::query(
+                "INSERT INTO sync_vault_member_keys
+                 (vault_id, account_id, epoch, wrapped_vault_key) VALUES (?, ?, ?, ?)",
+            )
+            .bind(vault_id.as_slice())
+            .bind(account_id.as_slice())
+            .bind(sequence_to_sql(wrap.epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
         }
         transaction.commit().await?;
         Ok(())
@@ -945,6 +1026,23 @@ fn validate_epoch_wraps(wraps: &[SharedVaultEpochWrap]) -> Result<(), SyncStoreE
             return Err(SyncStoreError::InvalidEpochWraps);
         }
         previous = Some(wrap.account_id);
+    }
+    Ok(())
+}
+
+fn validate_member_wraps(wraps: &[SharedVaultKey]) -> Result<(), SyncStoreError> {
+    if wraps.is_empty() || wraps.len() > MAX_SHARED_VAULT_MEMBER_EPOCHS {
+        return Err(SyncStoreError::InvalidMemberWraps);
+    }
+    let mut previous = 0;
+    for wrap in wraps {
+        if wrap.epoch <= previous
+            || wrap.wrapped_vault_key.is_empty()
+            || wrap.wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES
+        {
+            return Err(SyncStoreError::InvalidMemberWraps);
+        }
+        previous = wrap.epoch;
     }
     Ok(())
 }

@@ -9,8 +9,8 @@ use std::{
 use scoplen_store::{
     RelationalStore, SqliteStore,
     sync::{
-        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SharedVaultEpochWrap, SyncStoreError,
-        TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
+        MAX_SHARED_VAULT_KEY_BYTES, ObjectWrite, SharedVaultEpochWrap, SharedVaultKey,
+        SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
     },
 };
 
@@ -116,6 +116,95 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
         Err(SyncStoreError::InvalidEpochWraps)
     ));
 
+    store
+        .add_shared_sync_vault_member(
+            vault,
+            [13; 16],
+            &[
+                SharedVaultKey { epoch: 1, wrapped_vault_key: vec![7, 8] },
+                SharedVaultKey { epoch: 2, wrapped_vault_key: vec![9, 10] },
+            ],
+        )
+        .await
+        .expect("add shared-vault member");
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, [13; 16]).await.expect("member epoch keys"),
+        vec![
+            SharedVaultKey { epoch: 1, wrapped_vault_key: vec![7, 8] },
+            SharedVaultKey { epoch: 2, wrapped_vault_key: vec![9, 10] },
+        ]
+    );
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                vault,
+                [13; 16],
+                &[
+                    SharedVaultKey { epoch: 1, wrapped_vault_key: vec![7, 8] },
+                    SharedVaultKey { epoch: 2, wrapped_vault_key: vec![9, 10] },
+                ],
+            )
+            .await,
+        Err(SyncStoreError::MemberAlreadyExists)
+    ));
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                vault,
+                [14; 16],
+                &[SharedVaultKey { epoch: 1, wrapped_vault_key: vec![11] }],
+            )
+            .await,
+        Err(SyncStoreError::MemberEpochMismatch)
+    ));
+
+    sqlx::query(
+        "CREATE TRIGGER reject_sync_vault_member_key BEFORE INSERT ON sync_vault_member_keys
+         BEGIN SELECT RAISE(ABORT, 'injected member key failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("install member key failure trigger");
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                vault,
+                [15; 16],
+                &[
+                    SharedVaultKey { epoch: 1, wrapped_vault_key: vec![12] },
+                    SharedVaultKey { epoch: 2, wrapped_vault_key: vec![13] },
+                ],
+            )
+            .await,
+        Err(SyncStoreError::Constraint(_))
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault.as_slice())
+        .bind([15; 16].as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("rolled-back member count"),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_member_keys WHERE vault_id = ? AND account_id = ?",
+        )
+        .bind(vault.as_slice())
+        .bind([15; 16].as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("rolled-back member key count"),
+        0
+    );
+    sqlx::query("DROP TRIGGER reject_sync_vault_member_key")
+        .execute(store.pool())
+        .await
+        .expect("remove member key failure trigger");
+
     assert!(matches!(
         store.create_shared_sync_vault(vault, [13; 16], &[9]).await,
         Err(SyncStoreError::VaultAlreadyExists)
@@ -126,7 +215,7 @@ async fn shared_vault_creation_persists_admin_wrap_and_rolls_back_failures() {
             .fetch_one(store.pool())
             .await
             .expect("member count"),
-        1
+        2
     );
     assert!(matches!(
         store.create_shared_sync_vault([14; 16], account, &[]).await,

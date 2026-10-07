@@ -19,13 +19,14 @@ with bounded payloads, atomic claims, owner-checked leases, retry/failure state,
 requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for shared-vault creation, shared-vault key retrieval,
-shared-vault epoch publication, account key bundles, changes,
+shared-vault epoch publication and member addition, account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
 `/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
 applies an injected device policy, and fans out deterministic CBOR events through a caller-owned
 local hub. It requires an injected authenticator that binds DPoP proofs to the request method and
 URI, authorizes vault, account-key, and notification operations, records the creator's initial
-shared-vault membership and opaque epoch-1 key wrap, validates account-key signatures and
+shared-vault membership and opaque epoch-1 key wrap, adds members with historical opaque wraps,
+validates account-key signatures and
 active-device wraps, and validates encrypted envelopes before storage; the baseline listener
 does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
