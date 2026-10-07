@@ -86,6 +86,7 @@ async fn run() -> Result<(), ServerError> {
         config,
         roles,
         prepared.store,
+        prepared.postgres_store,
         prepared.object_storage,
         prepared.key_management,
         prepared.audit_signer,

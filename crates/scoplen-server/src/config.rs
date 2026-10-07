@@ -91,6 +91,9 @@ impl Config {
         if let Some(value) = env_value("SPL_STORAGE_BACKEND") {
             self.storage.backend = value;
         }
+        if let Some(value) = env_value("SPL_STORAGE_DATABASE_URL") {
+            self.storage.database_url = Some(SecretValue(value));
+        }
         if let Some(value) = env_value("SPL_STORAGE_OBJECT_BACKEND") {
             self.storage.object.backend = value;
         }
@@ -196,10 +199,30 @@ impl Config {
     /// Returns an error if any selected role cannot run with the configured storage backend.
     pub fn validate_for_roles(&self, roles: &[crate::Role]) -> Result<(), ConfigError> {
         self.validate()?;
-        if roles.iter().any(|role| role.requires_store()) && self.storage.backend != "sqlite" {
-            return Err(ConfigError::Invalid(
-                "storage.backend must be sqlite for api, worker, or edge; PostgreSQL support is not available yet".into(),
-            ));
+        if roles.iter().any(|role| role.requires_store()) {
+            match self.storage.backend.trim().to_ascii_lowercase().as_str() {
+                "sqlite" => {}
+                "postgres" => {
+                    if roles.iter().any(|role| matches!(role, crate::Role::Api | crate::Role::Edge))
+                    {
+                        return Err(ConfigError::Invalid(
+                            "storage.backend = postgres is currently supported by the worker role only; api and edge still require sqlite".into(),
+                        ));
+                    }
+                    if self.storage.database_url.as_ref().is_none_or(|url| url.0.trim().is_empty())
+                    {
+                        return Err(ConfigError::Invalid(
+                            "storage.database_url is required when storage.backend = postgres"
+                                .into(),
+                        ));
+                    }
+                }
+                backend => {
+                    return Err(ConfigError::Invalid(format!(
+                        "storage.backend must be sqlite or postgres, got {backend:?}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -319,8 +342,10 @@ impl Default for RoleSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StorageSettings {
-    /// `sqlite` is the Personal and Team default; PostgreSQL remains a later storage profile.
+    /// `sqlite` is the Personal and Team default; `postgres` is currently available to the worker role.
     pub backend: String,
+    /// PostgreSQL connection URL, required when `backend = "postgres"`.
+    pub database_url: Option<SecretValue>,
     /// Object storage backend used by recordings, exports, large envelopes, and backups.
     pub object: ObjectStorageSettings,
     /// Key-management backend used for deployment and application data keys.
@@ -331,6 +356,7 @@ impl Default for StorageSettings {
     fn default() -> Self {
         Self {
             backend: "sqlite".into(),
+            database_url: None,
             object: ObjectStorageSettings::default(),
             kms: KmsSettings::default(),
         }
@@ -434,7 +460,7 @@ impl KmsSettings {
 pub struct SecretValue(String);
 
 impl SecretValue {
-    fn expose(&self) -> String {
+    pub(crate) fn expose(&self) -> String {
         self.0.clone()
     }
 }
@@ -595,6 +621,24 @@ mod tests {
         config
             .validate_for_roles(&[crate::Role::Ca, crate::Role::Gateway])
             .expect("database-free roles ignore storage backend");
+    }
+
+    #[test]
+    fn postgres_backend_is_worker_only_and_requires_a_url() {
+        let mut config = Config::default();
+        config.storage.backend = "postgres".into();
+        let missing = config
+            .validate_for_roles(&[crate::Role::Worker])
+            .expect_err("PostgreSQL worker needs a connection URL");
+        assert!(missing.to_string().contains("storage.database_url"));
+        config.storage.database_url = Some(SecretValue("postgres://localhost/scoplen".into()));
+        config
+            .validate_for_roles(&[crate::Role::Worker])
+            .expect("PostgreSQL worker configuration is valid");
+        let api = config
+            .validate_for_roles(&[crate::Role::Api])
+            .expect_err("the API still requires SQLite");
+        assert!(api.to_string().contains("worker role only"));
     }
 
     #[test]

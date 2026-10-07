@@ -61,8 +61,10 @@ owner using the shared `{keys}` response shape. Enrollment wiring, production id
 personal-key rotation remain open. A session lists a personal vault only after provisioning
 succeeds.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
-against the SQLite set. The server roles remain SQLite-only until their storage queries and
-readiness wiring are implemented for PostgreSQL.
+against the SQLite set. The worker role can select PostgreSQL with `storage.backend = "postgres"`
+and `storage.database_url`; its queue, sync-retention, account-key, and audit query paths share the
+same bounded semantics. The API and edge roles still require SQLite because the sync HTTP adapter
+and listener readiness state have not yet been generalized to both backends.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
@@ -101,10 +103,11 @@ certificate for `server.public_host`, using the contact in `tls.acme_email`. ACM
 certificates are cached below `server.data_dir/acme-cache`; keep the data directory in protected
 operator storage. The `tls.acme_production` setting defaults to `true`; set it to `false` only when
 testing against the Let's Encrypt staging directory.
-The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before database-backed
-roles start, and a migration failure stops startup. These roles currently require
-`storage.backend = "sqlite"`. Object storage is initialized alongside the database for those
-roles. The default `storage.object.backend = "filesystem"` stores below
+The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
+roles start, and a migration failure stops startup. The worker may instead use PostgreSQL by
+setting `storage.backend = "postgres"` and `storage.database_url` (or
+`SPL_STORAGE_DATABASE_URL`); API and edge continue to require SQLite. Object storage is initialized
+alongside the database for database-backed roles. The default `storage.object.backend = "filesystem"` stores below
 `server.data_dir/objects`; an S3-compatible backend can be selected with the nested S3 settings
 in `spl-server.example.toml` or their `SPL_STORAGE_OBJECT_*` environment overrides. `/readyz`
 checks both the database and the configured object-storage backend.

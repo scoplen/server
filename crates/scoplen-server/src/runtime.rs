@@ -2,6 +2,7 @@
 //! First-run material and role supervision.
 
 use std::{
+    future::Future,
     path::Path,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -17,10 +18,12 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_audit::checkpoint_payload;
-use scoplen_store::AuditCheckpoint;
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
-use scoplen_store::sync::{MAX_PAGE_SIZE, SyncStoreError};
-use scoplen_store::{ObjectStorage, SqliteStore};
+use scoplen_store::sync::MAX_PAGE_SIZE;
+use scoplen_store::{
+    AuditChainHead, AuditCheckpoint, AuditStoreError, JobQueueError, ObjectStorage, PostgresStore,
+    SqliteStore, sync::SyncStoreError,
+};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
@@ -39,6 +42,8 @@ pub struct BootstrapResult {
 pub struct PreparedRoles {
     /// Database pool for roles that need relational storage.
     pub store: Option<SqliteStore>,
+    /// PostgreSQL pool for worker-only high-availability deployments.
+    pub postgres_store: Option<PostgresStore>,
     /// Object storage backend for roles that need relational storage.
     pub object_storage: Option<ObjectStorage>,
     /// Initialized key-management backend for database-backed roles.
@@ -129,13 +134,28 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
     if !roles.iter().any(|role| role.requires_store()) {
         return Ok(PreparedRoles {
             store: None,
+            postgres_store: None,
             object_storage: None,
             key_management: None,
             audit_signer: None,
             setup_link: None,
         });
     }
-    let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?;
+    let (store, postgres_store) = if config.storage.backend.eq_ignore_ascii_case("postgres") {
+        let database_url = config
+            .storage
+            .database_url
+            .as_ref()
+            .ok_or_else(|| {
+                ServerError::Config(crate::ConfigError::Invalid(
+                    "storage.database_url is required when storage.backend = postgres".into(),
+                ))
+            })?
+            .expose();
+        (None, Some(PostgresStore::connect(&database_url).await?))
+    } else {
+        (Some(SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?), None)
+    };
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
     let bootstrap = bootstrap(config)?;
@@ -144,7 +164,8 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
     let audit_signer =
         Some(LocalAuditSigner::load(config.storage.kms_audit_key_file(&config.server.data_dir)?)?);
     Ok(PreparedRoles {
-        store: Some(store),
+        store,
+        postgres_store,
         object_storage: Some(object_storage),
         key_management,
         audit_signer,
@@ -161,12 +182,13 @@ pub async fn run_roles(
     config: Config,
     roles: Vec<Role>,
     store: Option<SqliteStore>,
+    postgres_store: Option<PostgresStore>,
     object_storage: Option<ObjectStorage>,
     key_management: Option<LocalKeyFile>,
     audit_signer: Option<LocalAuditSigner>,
 ) -> Result<(), ServerError> {
     if roles.iter().any(|role| role.requires_store())
-        && (store.is_none() || object_storage.is_none())
+        && (store.is_none() && postgres_store.is_none() || object_storage.is_none())
     {
         return Err(ServerError::MissingStore);
     }
@@ -178,6 +200,7 @@ pub async fn run_roles(
     }
     let _key_management = key_management;
     let store = store.map(Arc::new);
+    let postgres_store = postgres_store.map(Arc::new);
     let object_storage = object_storage.map(Arc::new);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
@@ -191,9 +214,14 @@ pub async fn run_roles(
         )));
     }
     if roles.contains(&Role::Worker) {
-        let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
         let signer = audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?;
-        tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
+        if let Some(store) = store.as_ref() {
+            tasks.push(tokio::spawn(run_worker_role(store.clone(), Arc::new(signer.clone()))));
+        } else if let Some(store) = postgres_store.as_ref() {
+            tasks.push(tokio::spawn(run_worker_role(store.clone(), Arc::new(signer.clone()))));
+        } else {
+            return Err(ServerError::MissingStore);
+        }
     }
     if roles.contains(&Role::Ca) {
         tasks.push(tokio::spawn(run_periodic_role("ca")));
@@ -225,20 +253,183 @@ const RETENTION_RETRY_MS: i64 = 60_000;
 const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
-async fn run_worker_role(
-    store: Arc<SqliteStore>,
+trait WorkerStoreBackend: Send + Sync {
+    fn requeue_expired_jobs(
+        &self,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<u64, JobQueueError>> + Send;
+    fn list_sync_vault_ids(
+        &self,
+        limit: u16,
+    ) -> impl Future<Output = Result<Vec<[u8; 16]>, SyncStoreError>> + Send;
+    fn enqueue_job_if_absent(
+        &self,
+        id: [u8; 16],
+        kind: &str,
+        payload: &[u8],
+        available_at_ms: i64,
+    ) -> impl Future<Output = Result<bool, JobQueueError>> + Send;
+    fn claim_job_kind(
+        &self,
+        kind: &str,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> impl Future<Output = Result<Option<scoplen_store::Job>, JobQueueError>> + Send;
+    fn purge_sync_history(
+        &self,
+        vault_id: [u8; 16],
+        acknowledged_through: Option<u64>,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<scoplen_store::sync::PurgeReport, SyncStoreError>> + Send;
+    fn complete_job(
+        &self,
+        id: [u8; 16],
+        owner: &str,
+        now_ms: i64,
+    ) -> impl Future<Output = Result<(), JobQueueError>> + Send;
+    fn fail_job(
+        &self,
+        id: [u8; 16],
+        owner: &str,
+        now_ms: i64,
+        retry_at_ms: i64,
+        error: &str,
+    ) -> impl Future<Output = Result<(), JobQueueError>> + Send;
+    fn list_audit_heads_page(
+        &self,
+        after_organization: Option<[u8; 16]>,
+        limit: u32,
+    ) -> impl Future<Output = Result<Vec<AuditChainHead>, AuditStoreError>> + Send;
+    fn verify_audit_chain(
+        &self,
+        organization_id: [u8; 16],
+    ) -> impl Future<Output = Result<[u8; 32], AuditStoreError>> + Send;
+    fn latest_audit_checkpoint(
+        &self,
+        organization_id: [u8; 16],
+    ) -> impl Future<Output = Result<Option<AuditCheckpoint>, AuditStoreError>> + Send;
+    fn write_audit_checkpoint(
+        &self,
+        checkpoint: &AuditCheckpoint,
+    ) -> impl Future<Output = Result<(), AuditStoreError>> + Send;
+}
+
+macro_rules! impl_worker_store_backend {
+    ($store:ty) => {
+        impl WorkerStoreBackend for $store {
+            fn requeue_expired_jobs(
+                &self,
+                now_ms: i64,
+            ) -> impl Future<Output = Result<u64, JobQueueError>> + Send {
+                <$store>::requeue_expired_jobs(self, now_ms)
+            }
+
+            fn list_sync_vault_ids(
+                &self,
+                limit: u16,
+            ) -> impl Future<Output = Result<Vec<[u8; 16]>, SyncStoreError>> + Send {
+                <$store>::list_sync_vault_ids(self, limit)
+            }
+
+            fn enqueue_job_if_absent(
+                &self,
+                id: [u8; 16],
+                kind: &str,
+                payload: &[u8],
+                available_at_ms: i64,
+            ) -> impl Future<Output = Result<bool, JobQueueError>> + Send {
+                <$store>::enqueue_job_if_absent(self, id, kind, payload, available_at_ms)
+            }
+
+            fn claim_job_kind(
+                &self,
+                kind: &str,
+                owner: &str,
+                now_ms: i64,
+                lease_ms: i64,
+            ) -> impl Future<Output = Result<Option<scoplen_store::Job>, JobQueueError>> + Send {
+                <$store>::claim_job_kind(self, kind, owner, now_ms, lease_ms)
+            }
+
+            fn purge_sync_history(
+                &self,
+                vault_id: [u8; 16],
+                acknowledged_through: Option<u64>,
+                now_ms: i64,
+            ) -> impl Future<Output = Result<scoplen_store::sync::PurgeReport, SyncStoreError>> + Send {
+                <$store>::purge_sync_history(self, vault_id, acknowledged_through, now_ms)
+            }
+
+            fn complete_job(
+                &self,
+                id: [u8; 16],
+                owner: &str,
+                now_ms: i64,
+            ) -> impl Future<Output = Result<(), JobQueueError>> + Send {
+                <$store>::complete_job(self, id, owner, now_ms)
+            }
+
+            fn fail_job(
+                &self,
+                id: [u8; 16],
+                owner: &str,
+                now_ms: i64,
+                retry_at_ms: i64,
+                error: &str,
+            ) -> impl Future<Output = Result<(), JobQueueError>> + Send {
+                <$store>::fail_job(self, id, owner, now_ms, retry_at_ms, error)
+            }
+
+            fn list_audit_heads_page(
+                &self,
+                after_organization: Option<[u8; 16]>,
+                limit: u32,
+            ) -> impl Future<Output = Result<Vec<AuditChainHead>, AuditStoreError>> + Send {
+                <$store>::list_audit_heads_page(self, after_organization, limit)
+            }
+
+            fn verify_audit_chain(
+                &self,
+                organization_id: [u8; 16],
+            ) -> impl Future<Output = Result<[u8; 32], AuditStoreError>> + Send {
+                <$store>::verify_audit_chain(self, organization_id)
+            }
+
+            fn latest_audit_checkpoint(
+                &self,
+                organization_id: [u8; 16],
+            ) -> impl Future<Output = Result<Option<AuditCheckpoint>, AuditStoreError>> + Send {
+                <$store>::latest_audit_checkpoint(self, organization_id)
+            }
+
+            fn write_audit_checkpoint(
+                &self,
+                checkpoint: &AuditCheckpoint,
+            ) -> impl Future<Output = Result<(), AuditStoreError>> + Send {
+                <$store>::write_audit_checkpoint(self, checkpoint)
+            }
+        }
+    };
+}
+
+impl_worker_store_backend!(SqliteStore);
+impl_worker_store_backend!(PostgresStore);
+
+async fn run_worker_role<S: WorkerStoreBackend + 'static>(
+    store: Arc<S>,
     signer: Arc<LocalAuditSigner>,
 ) -> Result<(), ServerError> {
     let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
     loop {
         interval.tick().await;
-        match worker_heartbeat(&store).await {
+        match worker_heartbeat(store.as_ref()).await {
             Ok(requeued) => {
                 info!(role = "worker", requeued_expired_jobs = requeued, "worker heartbeat");
             }
             Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
         }
-        match worker_retention_pass(&store).await {
+        match worker_retention_pass(store.as_ref()).await {
             Ok((scheduled, processed)) => {
                 info!(
                     role = "worker",
@@ -249,7 +440,7 @@ async fn run_worker_role(
             }
             Err(error) => error!(%error, role = "worker", "retention pass failed"),
         }
-        match worker_audit_checkpoint_pass(&store, signer.as_ref()).await {
+        match worker_audit_checkpoint_pass(store.as_ref(), signer.as_ref()).await {
             Ok(written) => {
                 info!(role = "worker", audit_checkpoints = written, "audit checkpoint pass");
             }
@@ -258,7 +449,7 @@ async fn run_worker_role(
     }
 }
 
-async fn worker_heartbeat(store: &SqliteStore) -> Result<u64, ServerError> {
+async fn worker_heartbeat<S: WorkerStoreBackend>(store: &S) -> Result<u64, ServerError> {
     let now = worker_now_ms()?;
     store.requeue_expired_jobs(now).await.map_err(|error| ServerError::Task(error.to_string()))
 }
@@ -269,16 +460,18 @@ fn worker_now_ms() -> Result<i64, ServerError> {
         .map_err(|error| ServerError::Task(format!("worker clock is before Unix epoch: {error}")))?
         .as_millis()
         .try_into()
-        .map_err(|_| ServerError::Task("worker clock exceeds SQLite timestamp range".into()))
+        .map_err(|_| ServerError::Task("worker clock exceeds database timestamp range".into()))
 }
 
-async fn worker_retention_pass(store: &SqliteStore) -> Result<(u64, u64), ServerError> {
+async fn worker_retention_pass<S: WorkerStoreBackend>(
+    store: &S,
+) -> Result<(u64, u64), ServerError> {
     let now = worker_now_ms()?;
     worker_retention_pass_at(store, now).await
 }
 
-async fn worker_retention_pass_at(
-    store: &SqliteStore,
+async fn worker_retention_pass_at<S: WorkerStoreBackend>(
+    store: &S,
     now: i64,
 ) -> Result<(u64, u64), ServerError> {
     let mut scheduled = 0_u64;
@@ -341,16 +534,16 @@ async fn worker_retention_pass_at(
     Ok((scheduled, processed))
 }
 
-async fn worker_audit_checkpoint_pass(
-    store: &SqliteStore,
+async fn worker_audit_checkpoint_pass<S: WorkerStoreBackend>(
+    store: &S,
     signer: &impl AuditCheckpointSigner,
 ) -> Result<u64, ServerError> {
     let now = worker_now_ms()?;
     worker_audit_checkpoint_pass_at(store, signer, now).await
 }
 
-async fn worker_audit_checkpoint_pass_at(
-    store: &SqliteStore,
+async fn worker_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
+    store: &S,
     signer: &impl AuditCheckpointSigner,
     now: i64,
 ) -> Result<u64, ServerError> {
@@ -965,17 +1158,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_worker_and_edge_still_require_sqlite() {
+    async fn api_and_edge_require_sqlite_when_selected() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
         fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
 
-        for role in [Role::Api, Role::Worker, Role::Edge] {
+        for role in [Role::Api, Role::Edge] {
             let result = prepare_roles(&config, &[role]).await;
             assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
         }
-        let result = run_roles(config, vec![Role::Api], None, None, None, None).await;
+        let result = run_roles(config, vec![Role::Api], None, None, None, None, None).await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_file(data_dir).expect("test file is removable");
     }

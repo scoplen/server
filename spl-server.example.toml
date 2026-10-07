@@ -18,8 +18,9 @@ trusted_proxies = []
 names = ["all"]
 
 [storage]
-# SQLite is required by api, worker, and edge. The file is data_dir/scoplen.sqlite.
+# SQLite is required by api and edge. The worker can also use PostgreSQL with database_url.
 backend = "sqlite"
+# database_url = "postgres://scoplen:change-me@db.example.com/scoplen"
 
 [storage.kms]
 # The local backend reads data_dir/deployment.key unless an explicit file is configured.

@@ -21,10 +21,10 @@ self-hosted server, host agent, administration CLI, and web console.
 - SQLite migration, transaction, initial sync storage, an atomic retention primitive, a durable
   leased job queue with worker lease cleanup, and an explicitly authenticated K-4 HTTP/CBOR adapter
   exist. The baseline listener does not mount the adapter until production identity is available.
-  Membership-aware purge scheduling, the PostgreSQL query backend and runtime role selection,
-  identity, policy, certificate, gateway, audit, agent, CLI, and console behavior remain on the
-  roadmap. A parallel PostgreSQL migration set and logical schema check are present, but they do
-  not enable PostgreSQL-backed server roles.
+  Membership-aware purge scheduling, PostgreSQL API/edge query and sync-router support, identity,
+  policy, certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The
+  worker can now use the PostgreSQL query backend; API and edge remain SQLite-only until their
+  listener and sync paths are ported.
 - Deployment, backup/restore, upgrade, and release artifacts require their own validated gates.
 
 ## Review
