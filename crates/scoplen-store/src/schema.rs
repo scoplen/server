@@ -1133,6 +1133,7 @@ mod tests {
 
     #[cfg(feature = "postgres-integration")]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn postgres_migrations_match_the_sqlite_logical_schema() {
         let Some(database_url) = std::env::var_os("SCOPLEN_TEST_DATABASE_URL") else {
             panic!("SCOPLEN_TEST_DATABASE_URL is required for the PostgreSQL integration test");
@@ -1218,6 +1219,35 @@ mod tests {
             signed_at_ms: 2,
         };
         reopened.write_audit_checkpoint(&checkpoint).await.expect("write PostgreSQL checkpoint");
+        let account = uuid::Uuid::new_v4().into_bytes();
+        let key_update = crate::account_keys::AccountKeyBundleUpdate {
+            revision: 1,
+            device_wraps: vec![crate::account_keys::DeviceWrap {
+                device_id: [7; 16],
+                wrapped_ark: vec![7, 1],
+            }],
+            account_signing_key: vec![7, 2],
+            account_kem_key: vec![7, 3],
+            recovery_blob: vec![7, 4],
+            signature: [7; 64],
+        };
+        assert_eq!(
+            reopened
+                .put_account_key_bundle(account, &key_update)
+                .await
+                .expect("put PostgreSQL account key"),
+            crate::account_keys::AccountKeyBundlePut::Applied { revision: 1 }
+        );
+        reopened
+            .replace_account_key_statements(account, &[vec![2], vec![1]], &[vec![3]])
+            .await
+            .expect("replace PostgreSQL account key statements");
+        let key_bundle = reopened
+            .get_account_key_bundle(account, [7; 16])
+            .await
+            .expect("get PostgreSQL account key");
+        assert_eq!(key_bundle.wrapped_ark, vec![7, 1]);
+        assert_eq!(key_bundle.certificates, vec![vec![1], vec![2]]);
         let job_id = uuid::Uuid::new_v4().into_bytes();
         reopened
             .enqueue_job(job_id, "postgres-parity", b"payload", 0)
@@ -1230,6 +1260,11 @@ mod tests {
             .expect("PostgreSQL job is available");
         assert_eq!(claimed.id, job_id);
         reopened.complete_job(job_id, "postgres-worker", 2).await.expect("complete PostgreSQL job");
+        sqlx::query("DELETE FROM sync_account_key_bundles WHERE account_id = $1")
+            .bind(account.as_slice())
+            .execute(reopened.pool())
+            .await
+            .expect("clean PostgreSQL account key");
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.as_slice())
             .execute(reopened.pool())

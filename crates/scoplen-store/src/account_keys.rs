@@ -8,10 +8,10 @@
 
 #![forbid(unsafe_code)]
 
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Postgres, Row, Sqlite, Transaction, postgres::PgRow};
 use thiserror::Error;
 
-use crate::{RelationalStore, SqliteStore};
+use crate::{PostgresStore, RelationalStore, SqliteStore};
 
 /// Maximum size of one opaque key artifact, as specified by K-4.
 pub const MAX_KEY_ARTIFACT_BYTES: usize = 64 * 1024;
@@ -341,6 +341,223 @@ impl SqliteStore {
     }
 }
 
+impl PostgresStore {
+    /// Read the account bundle visible to one authenticated device from PostgreSQL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AccountKeyStoreError::BundleNotFound`] when the account or device wrap is absent,
+    /// [`AccountKeyStoreError::CorruptRow`] when stored values violate their invariants, or
+    /// [`AccountKeyStoreError::Database`] when PostgreSQL cannot complete the read.
+    pub async fn get_account_key_bundle(
+        &self,
+        account_id: AccountId,
+        device_id: DeviceId,
+    ) -> Result<AccountKeyBundle, AccountKeyStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        let row = sqlx::query(
+            "SELECT revision, account_signing_key, account_kem_key, recovery_blob
+             FROM sync_account_key_bundles WHERE account_id = $1",
+        )
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(AccountKeyStoreError::BundleNotFound)?;
+
+        let revision = revision_from_sql(row.try_get("revision")?)?;
+        let account_signing_key = artifact_from_postgres_row(&row, "account_signing_key")?;
+        let account_kem_key = artifact_from_postgres_row(&row, "account_kem_key")?;
+        let recovery_blob = artifact_from_postgres_row(&row, "recovery_blob")?;
+        let wrapped_ark = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT wrapped_ark FROM sync_account_key_device_wraps
+             WHERE account_id = $1 AND device_id = $2",
+        )
+        .bind(account_id.as_slice())
+        .bind(device_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(AccountKeyStoreError::BundleNotFound)?;
+        let wrapped_ark = validate_artifact(wrapped_ark, "wrapped_ark")?;
+
+        let mut certificates = read_postgres_statements(
+            &mut transaction,
+            "SELECT certificate FROM sync_account_key_certificates
+             WHERE account_id = $1 ORDER BY certificate ASC",
+            account_id,
+            "certificate",
+        )
+        .await?;
+        let mut revocations = read_postgres_statements(
+            &mut transaction,
+            "SELECT revocation FROM sync_account_key_revocations
+             WHERE account_id = $1 ORDER BY revocation ASC",
+            account_id,
+            "revocation",
+        )
+        .await?;
+        certificates.sort();
+        revocations.sort();
+        transaction.commit().await?;
+
+        Ok(AccountKeyBundle {
+            revision,
+            wrapped_ark,
+            account_signing_key,
+            account_kem_key,
+            recovery_blob,
+            certificates,
+            revocations,
+        })
+    }
+
+    /// Atomically apply a signed account key rotation with PostgreSQL revision CAS semantics.
+    ///
+    /// A transaction-scoped advisory lock serializes competing first writes for one account;
+    /// existing rows are additionally locked with `FOR UPDATE` before their revision is checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error for an invalid artifact or device-wrap set,
+    /// [`AccountKeyStoreError::Conflict`] for a stale, skipped, or non-identical replayed
+    /// revision, or [`AccountKeyStoreError::Database`] when PostgreSQL cannot commit the update.
+    pub async fn put_account_key_bundle(
+        &self,
+        account_id: AccountId,
+        update: &AccountKeyBundleUpdate,
+    ) -> Result<AccountKeyBundlePut, AccountKeyStoreError> {
+        validate_update(update)?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 0))")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query(
+            "SELECT revision, account_signing_key, account_kem_key, recovery_blob, signature
+             FROM sync_account_key_bundles WHERE account_id = $1 FOR UPDATE",
+        )
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+
+        if let Some(row) = existing {
+            let current_revision = revision_from_sql(row.try_get("revision")?)?;
+            if update.revision == current_revision {
+                if update_matches_current_postgres(&mut transaction, account_id, update, &row)
+                    .await?
+                {
+                    transaction.commit().await?;
+                    return Ok(AccountKeyBundlePut::Replay { revision: current_revision });
+                }
+                return Err(AccountKeyStoreError::Conflict { current_revision });
+            }
+            let expected =
+                current_revision.checked_add(1).ok_or(AccountKeyStoreError::RevisionExhausted)?;
+            if update.revision != expected {
+                return Err(AccountKeyStoreError::Conflict { current_revision });
+            }
+        } else if update.revision != 1 {
+            return Err(AccountKeyStoreError::Conflict { current_revision: 0 });
+        }
+
+        let updated_at_ms = now_ms()?;
+        sqlx::query(
+            "INSERT INTO sync_account_key_bundles
+             (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (account_id) DO UPDATE SET
+               revision = EXCLUDED.revision,
+               account_signing_key = EXCLUDED.account_signing_key,
+               account_kem_key = EXCLUDED.account_kem_key,
+               recovery_blob = EXCLUDED.recovery_blob,
+               signature = EXCLUDED.signature,
+               updated_at_ms = EXCLUDED.updated_at_ms",
+        )
+        .bind(account_id.as_slice())
+        .bind(revision_to_sql(update.revision)?)
+        .bind(&update.account_signing_key)
+        .bind(&update.account_kem_key)
+        .bind(&update.recovery_blob)
+        .bind(update.signature.as_slice())
+        .bind(updated_at_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_write_error)?;
+
+        sqlx::query("DELETE FROM sync_account_key_device_wraps WHERE account_id = $1")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        for wrap in &update.device_wraps {
+            sqlx::query(
+                "INSERT INTO sync_account_key_device_wraps (account_id, device_id, wrapped_ark)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(account_id.as_slice())
+            .bind(wrap.device_id.as_slice())
+            .bind(&wrap.wrapped_ark)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_write_error)?;
+        }
+        transaction.commit().await?;
+        Ok(AccountKeyBundlePut::Applied { revision: update.revision })
+    }
+
+    /// Replace the signed device certificate and revocation statements for one account in
+    /// PostgreSQL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when a statement is empty or exceeds the artifact limit, or a
+    /// database error when the replacement transaction cannot commit.
+    pub async fn replace_account_key_statements(
+        &self,
+        account_id: AccountId,
+        certificates: &[Vec<u8>],
+        revocations: &[Vec<u8>],
+    ) -> Result<(), AccountKeyStoreError> {
+        validate_statements(certificates, "certificate")?;
+        validate_statements(revocations, "revocation")?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 0))")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM sync_account_key_certificates WHERE account_id = $1")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        for certificate in certificates {
+            sqlx::query(
+                "INSERT INTO sync_account_key_certificates (account_id, certificate)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(account_id.as_slice())
+            .bind(certificate)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_write_error)?;
+        }
+        sqlx::query("DELETE FROM sync_account_key_revocations WHERE account_id = $1")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        for revocation in revocations {
+            sqlx::query(
+                "INSERT INTO sync_account_key_revocations (account_id, revocation)
+                 VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            )
+            .bind(account_id.as_slice())
+            .bind(revocation)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_write_error)?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+}
+
 fn validate_update(update: &AccountKeyBundleUpdate) -> Result<(), AccountKeyStoreError> {
     if update.revision == 0 {
         return Err(AccountKeyStoreError::InvalidRevision);
@@ -425,6 +642,40 @@ async fn update_matches_current(
     Ok(true)
 }
 
+async fn update_matches_current_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: AccountId,
+    update: &AccountKeyBundleUpdate,
+    row: &PgRow,
+) -> Result<bool, AccountKeyStoreError> {
+    let signature: Vec<u8> = row.try_get("signature")?;
+    if signature != update.signature.as_slice()
+        || row.try_get::<Vec<u8>, _>("account_signing_key")? != update.account_signing_key
+        || row.try_get::<Vec<u8>, _>("account_kem_key")? != update.account_kem_key
+        || row.try_get::<Vec<u8>, _>("recovery_blob")? != update.recovery_blob
+    {
+        return Ok(false);
+    }
+    let rows = sqlx::query(
+        "SELECT device_id, wrapped_ark FROM sync_account_key_device_wraps
+         WHERE account_id = $1 ORDER BY device_id ASC",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    if rows.len() != update.device_wraps.len() {
+        return Ok(false);
+    }
+    for (row, expected) in rows.iter().zip(&update.device_wraps) {
+        let device_id: Vec<u8> = row.try_get("device_id")?;
+        let wrapped_ark: Vec<u8> = row.try_get("wrapped_ark")?;
+        if device_id.as_slice() != expected.device_id || wrapped_ark != expected.wrapped_ark {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 async fn read_statements(
     transaction: &mut Transaction<'_, Sqlite>,
     query: &str,
@@ -435,8 +686,25 @@ async fn read_statements(
     rows.into_iter().map(|row| validate_artifact(row.try_get(field)?, field)).collect()
 }
 
+async fn read_postgres_statements(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: &str,
+    account_id: AccountId,
+    field: &'static str,
+) -> Result<Vec<Vec<u8>>, AccountKeyStoreError> {
+    let rows = sqlx::query(query).bind(account_id.as_slice()).fetch_all(&mut **transaction).await?;
+    rows.into_iter().map(|row| validate_artifact(row.try_get(field)?, field)).collect()
+}
+
 fn artifact_from_row(
     row: &sqlx::sqlite::SqliteRow,
+    field: &'static str,
+) -> Result<Vec<u8>, AccountKeyStoreError> {
+    validate_artifact(row.try_get(field)?, field)
+}
+
+fn artifact_from_postgres_row(
+    row: &PgRow,
     field: &'static str,
 ) -> Result<Vec<u8>, AccountKeyStoreError> {
     validate_artifact(row.try_get(field)?, field)
