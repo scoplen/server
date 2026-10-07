@@ -125,6 +125,9 @@ impl Config {
         if let Some(value) = env_value("SPL_STORAGE_KMS_KEY_FILE") {
             self.storage.kms.key_file = Some(PathBuf::from(value));
         }
+        if let Some(value) = env_value("SPL_STORAGE_KMS_AUDIT_KEY_FILE") {
+            self.storage.kms.audit_key_file = Some(PathBuf::from(value));
+        }
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -376,6 +379,16 @@ impl StorageSettings {
         self.kms.validate()?;
         Ok(self.kms.key_file.clone().unwrap_or_else(|| data_dir.join("deployment.key")))
     }
+
+    /// Resolve the local audit signing-key path against the deployment data directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when the KMS backend or configured path is invalid.
+    pub fn kms_audit_key_file(&self, data_dir: &Path) -> Result<PathBuf, ConfigError> {
+        self.kms.validate()?;
+        Ok(self.kms.audit_key_file.clone().unwrap_or_else(|| data_dir.join("audit-signing.key")))
+    }
 }
 
 /// Key-management backend settings.
@@ -386,11 +399,13 @@ pub struct KmsSettings {
     pub backend: String,
     /// Optional local deployment-key file path.
     pub key_file: Option<PathBuf>,
+    /// Optional local audit signing-key file path.
+    pub audit_key_file: Option<PathBuf>,
 }
 
 impl Default for KmsSettings {
     fn default() -> Self {
-        Self { backend: "local".into(), key_file: None }
+        Self { backend: "local".into(), key_file: None, audit_key_file: None }
     }
 }
 
@@ -403,6 +418,11 @@ impl KmsSettings {
         }
         if self.key_file.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
             return Err(ConfigError::Invalid("storage.kms.key_file must not be empty".into()));
+        }
+        if self.audit_key_file.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+            return Err(ConfigError::Invalid(
+                "storage.kms.audit_key_file must not be empty".into(),
+            ));
         }
         Ok(())
     }
@@ -599,6 +619,10 @@ mod tests {
         assert_eq!(
             config.storage.kms_key_file(&data_dir).expect("default local KMS"),
             data_dir.join("deployment.key")
+        );
+        assert_eq!(
+            config.storage.kms_audit_key_file(&data_dir).expect("default audit signer"),
+            data_dir.join("audit-signing.key")
         );
         let mut unsupported = config;
         unsupported.storage.kms.backend = "aws-kms".into();

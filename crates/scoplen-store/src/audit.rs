@@ -42,6 +42,17 @@ pub struct AuditCheckpoint {
     pub signed_at_ms: i64,
 }
 
+/// Current head of one organization's audit chain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditChainHead {
+    /// Organization that owns the chain.
+    pub organization_id: [u8; 16],
+    /// One-based sequence of the head event.
+    pub sequence: u64,
+    /// Hash at `sequence`.
+    pub head_hash: [u8; HASH_BYTES],
+}
+
 /// Audit storage failures.
 #[derive(Debug, Error)]
 pub enum AuditStoreError {
@@ -66,6 +77,101 @@ pub enum AuditStoreError {
 }
 
 impl SqliteStore {
+    /// List one bounded page of current organization audit heads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuditStoreError::Database`] when the head query fails or
+    /// [`AuditStoreError::CorruptChain`] when a stored identifier or hash has the wrong width.
+    pub async fn list_audit_heads_page(
+        &self,
+        after_organization: Option<[u8; 16]>,
+        limit: u32,
+    ) -> Result<Vec<AuditChainHead>, AuditStoreError> {
+        let limit = i64::from(limit.clamp(1, 256));
+        let rows = match after_organization {
+            Some(after) => {
+                sqlx::query(
+                    "SELECT e.organization_id, e.sequence, e.event_hash
+                 FROM audit_events AS e
+                 WHERE e.organization_id > ? AND NOT EXISTS (
+                     SELECT 1 FROM audit_events AS newer
+                     WHERE newer.organization_id = e.organization_id AND newer.sequence > e.sequence
+                 )
+                 ORDER BY e.organization_id LIMIT ?",
+                )
+                .bind(after.as_slice())
+                .bind(limit)
+                .fetch_all(self.pool())
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    "SELECT e.organization_id, e.sequence, e.event_hash
+                 FROM audit_events AS e
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM audit_events AS newer
+                     WHERE newer.organization_id = e.organization_id AND newer.sequence > e.sequence
+                 )
+                 ORDER BY e.organization_id LIMIT ?",
+                )
+                .bind(limit)
+                .fetch_all(self.pool())
+                .await?
+            }
+        };
+        rows.into_iter()
+            .map(|row| {
+                Ok(AuditChainHead {
+                    organization_id: fixed_bytes::<16>(
+                        &row.try_get::<Vec<u8>, _>("organization_id")?,
+                    )?,
+                    sequence: sql_to_u64(row.try_get("sequence")?)?,
+                    head_hash: fixed_bytes::<HASH_BYTES>(
+                        &row.try_get::<Vec<u8>, _>("event_hash")?,
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    /// Return the newest checkpoint for one organization, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuditStoreError::Database`] when the checkpoint query fails or
+    /// [`AuditStoreError::CorruptChain`] when a stored field has an invalid representation.
+    pub async fn latest_audit_checkpoint(
+        &self,
+        organization_id: [u8; 16],
+    ) -> Result<Option<AuditCheckpoint>, AuditStoreError> {
+        let row = sqlx::query(
+            "SELECT sequence, head_hash, signature, signed_at_ms
+             FROM audit_checkpoints WHERE organization_id = ?
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(organization_id.as_slice())
+        .fetch_optional(self.pool())
+        .await?;
+        row.map(|row| {
+            let sequence = sql_to_u64(row.try_get("sequence")?)?;
+            let signed_at_ms = row.try_get::<i64, _>("signed_at_ms")?;
+            if sequence == 0 || signed_at_ms <= 0 {
+                return Err(AuditStoreError::CorruptChain);
+            }
+            Ok(AuditCheckpoint {
+                organization_id,
+                sequence,
+                head_hash: fixed_bytes::<HASH_BYTES>(&row.try_get::<Vec<u8>, _>("head_hash")?)?,
+                signature: fixed_bytes::<CHECKPOINT_SIGNATURE_BYTES>(
+                    &row.try_get::<Vec<u8>, _>("signature")?,
+                )?,
+                signed_at_ms,
+            })
+        })
+        .transpose()
+    }
+
     /// Append an event in its own transaction.
     ///
     /// Callers that mutate other state should use [`append_audit_event_in_transaction`] with the

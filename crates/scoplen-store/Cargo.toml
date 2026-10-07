@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
 bytes.workspace = true
+ed25519-dalek.workspace = true
 futures-util.workspace = true
 object_store.workspace = true
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros"] }

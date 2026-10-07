@@ -16,7 +16,9 @@ use hyper_util::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
-use scoplen_store::kms::LocalKeyFile;
+use scoplen_audit::checkpoint_payload;
+use scoplen_store::AuditCheckpoint;
+use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
 use scoplen_store::sync::{MAX_PAGE_SIZE, SyncStoreError};
 use scoplen_store::{ObjectStorage, SqliteStore};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
@@ -41,6 +43,8 @@ pub struct PreparedRoles {
     pub object_storage: Option<ObjectStorage>,
     /// Initialized key-management backend for database-backed roles.
     pub key_management: Option<LocalKeyFile>,
+    /// Initialized audit checkpoint signer for database-backed roles.
+    pub audit_signer: Option<LocalAuditSigner>,
     /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<String>,
 }
@@ -64,6 +68,16 @@ pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
             source: std::io::Error::other(source.to_string()),
         })?;
         write_private(&deployment_key, &hex_bytes(&bytes))?;
+    }
+
+    let audit_signing_key = config.storage.kms_audit_key_file(&config.server.data_dir)?;
+    if !audit_signing_key.exists() {
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|source| ServerError::Material {
+            path: audit_signing_key.clone(),
+            source: std::io::Error::other(source.to_string()),
+        })?;
+        write_private(&audit_signing_key, &hex_bytes(&bytes))?;
     }
 
     let ca_certificate = config.server.data_dir.join("internal-ca.pem");
@@ -117,6 +131,7 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
             store: None,
             object_storage: None,
             key_management: None,
+            audit_signer: None,
             setup_link: None,
         });
     }
@@ -126,10 +141,13 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
     let bootstrap = bootstrap(config)?;
     let key_management =
         Some(LocalKeyFile::load(config.storage.kms_key_file(&config.server.data_dir)?)?);
+    let audit_signer =
+        Some(LocalAuditSigner::load(config.storage.kms_audit_key_file(&config.server.data_dir)?)?);
     Ok(PreparedRoles {
         store: Some(store),
         object_storage: Some(object_storage),
         key_management,
+        audit_signer,
         setup_link: bootstrap.setup_link,
     })
 }
@@ -145,6 +163,7 @@ pub async fn run_roles(
     store: Option<SqliteStore>,
     object_storage: Option<ObjectStorage>,
     key_management: Option<LocalKeyFile>,
+    audit_signer: Option<LocalAuditSigner>,
 ) -> Result<(), ServerError> {
     if roles.iter().any(|role| role.requires_store())
         && (store.is_none() || object_storage.is_none())
@@ -152,6 +171,9 @@ pub async fn run_roles(
         return Err(ServerError::MissingStore);
     }
     if roles.iter().any(|role| role.requires_store()) && key_management.is_none() {
+        return Err(ServerError::MissingKeyManagement);
+    }
+    if roles.iter().any(|role| role.requires_store()) && audit_signer.is_none() {
         return Err(ServerError::MissingKeyManagement);
     }
     let _key_management = key_management;
@@ -170,7 +192,8 @@ pub async fn run_roles(
     }
     if roles.contains(&Role::Worker) {
         let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-        tasks.push(tokio::spawn(run_worker_role(store)));
+        let signer = audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?;
+        tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
     }
     if roles.contains(&Role::Ca) {
         tasks.push(tokio::spawn(run_periodic_role("ca")));
@@ -199,8 +222,13 @@ const RETENTION_JOB_KIND: &str = "sync-retention";
 const RETENTION_WORKER_OWNER: &str = "sync-retention-worker";
 const RETENTION_JOB_LEASE_MS: i64 = 60_000;
 const RETENTION_RETRY_MS: i64 = 60_000;
+const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
-async fn run_worker_role(store: Arc<SqliteStore>) -> Result<(), ServerError> {
+async fn run_worker_role(
+    store: Arc<SqliteStore>,
+    signer: Arc<LocalAuditSigner>,
+) -> Result<(), ServerError> {
     let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
     loop {
         interval.tick().await;
@@ -220,6 +248,12 @@ async fn run_worker_role(store: Arc<SqliteStore>) -> Result<(), ServerError> {
                 );
             }
             Err(error) => error!(%error, role = "worker", "retention pass failed"),
+        }
+        match worker_audit_checkpoint_pass(&store, signer.as_ref()).await {
+            Ok(written) => {
+                info!(role = "worker", audit_checkpoints = written, "audit checkpoint pass");
+            }
+            Err(error) => error!(%error, role = "worker", "audit checkpoint pass failed"),
         }
     }
 }
@@ -305,6 +339,93 @@ async fn worker_retention_pass_at(
         processed = processed.saturating_add(1);
     }
     Ok((scheduled, processed))
+}
+
+async fn worker_audit_checkpoint_pass(
+    store: &SqliteStore,
+    signer: &impl AuditCheckpointSigner,
+) -> Result<u64, ServerError> {
+    let now = worker_now_ms()?;
+    worker_audit_checkpoint_pass_at(store, signer, now).await
+}
+
+async fn worker_audit_checkpoint_pass_at(
+    store: &SqliteStore,
+    signer: &impl AuditCheckpointSigner,
+    now: i64,
+) -> Result<u64, ServerError> {
+    let mut written = 0_u64;
+    let mut after_organization = None;
+    loop {
+        let heads = store
+            .list_audit_heads_page(after_organization, AUDIT_HEAD_PAGE_SIZE)
+            .await
+            .map_err(|error| ServerError::Task(error.to_string()))?;
+        if heads.is_empty() {
+            break;
+        }
+        for head in &heads {
+            let verified_head = store
+                .verify_audit_chain(head.organization_id)
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+            if verified_head != head.head_hash {
+                return Err(ServerError::Task(
+                    "audit chain head changed or failed verification".into(),
+                ));
+            }
+            if let Some(previous) = store
+                .latest_audit_checkpoint(head.organization_id)
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?
+            {
+                if previous.sequence == head.sequence && previous.head_hash == head.head_hash {
+                    continue;
+                }
+                if now.saturating_sub(previous.signed_at_ms) < AUDIT_CHECKPOINT_INTERVAL_MS {
+                    continue;
+                }
+            }
+            let payload = checkpoint_payload(
+                &head.organization_id,
+                head.sequence,
+                &head.head_hash,
+                u64::try_from(now)
+                    .map_err(|_| ServerError::Task("worker clock is negative".into()))?,
+            )
+            .map_err(|error| ServerError::Task(error.to_string()))?;
+            let checkpoint = AuditCheckpoint {
+                organization_id: head.organization_id,
+                sequence: head.sequence,
+                head_hash: head.head_hash,
+                signature: signer.sign_checkpoint(&payload),
+                signed_at_ms: now,
+            };
+            match store.write_audit_checkpoint(&checkpoint).await {
+                Ok(()) => written = written.saturating_add(1),
+                Err(scoplen_store::AuditStoreError::CheckpointConflict) => {
+                    let current = store
+                        .latest_audit_checkpoint(head.organization_id)
+                        .await
+                        .map_err(|error| ServerError::Task(error.to_string()))?;
+                    if !current.is_some_and(|current| {
+                        current.sequence == head.sequence && current.head_hash == head.head_hash
+                    }) {
+                        return Err(ServerError::Task(
+                            "audit checkpoint changed to a different chain head concurrently"
+                                .into(),
+                        ));
+                    }
+                }
+                Err(error) => return Err(ServerError::Task(error.to_string())),
+            }
+        }
+        after_organization = heads.last().map(|head| head.organization_id);
+        if heads.len() < AUDIT_HEAD_PAGE_SIZE as usize {
+            break;
+        }
+    }
+    Ok(written)
 }
 
 fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Router {
@@ -520,7 +641,13 @@ mod tests {
 
         let first = bootstrap(&config).expect("first bootstrap succeeds");
         assert!(first.setup_link.is_some());
-        for name in ["deployment.key", "internal-ca.pem", "internal-ca-key.pem", "setup-link.txt"] {
+        for name in [
+            "deployment.key",
+            "audit-signing.key",
+            "internal-ca.pem",
+            "internal-ca-key.pem",
+            "setup-link.txt",
+        ] {
             let path = data_dir.join(name);
             assert!(path.is_file(), "expected generated material at {}", path.display());
         }
@@ -742,6 +869,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_audit_checkpoint_pass_is_hourly_and_idempotent() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-audit-worker-{}", uuid::Uuid::new_v4()));
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("open audit database");
+        let organization = [71_u8; 16];
+        sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES (?, ?, ?)")
+            .bind(organization.as_slice())
+            .bind("audit worker")
+            .bind(1_i64)
+            .execute(store.pool())
+            .await
+            .expect("create organization");
+        store.append_audit_event(organization, b"first", 1).await.expect("append first event");
+        let signer_path = data_dir.join("audit-signing.key");
+        fs::write(
+            &signer_path,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
+        )
+        .expect("write audit key");
+        let signer = LocalAuditSigner::load(&signer_path).expect("load audit signer");
+
+        let first_at = 3_600_000_i64;
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at)
+                .await
+                .expect("write first checkpoint"),
+            1
+        );
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at + 1)
+                .await
+                .expect("repeat checkpoint pass"),
+            0
+        );
+        store
+            .append_audit_event(organization, b"second", first_at + 2)
+            .await
+            .expect("append second event");
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at + 3)
+                .await
+                .expect("respect hourly cadence"),
+            0
+        );
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(
+                &store,
+                &signer,
+                first_at + AUDIT_CHECKPOINT_INTERVAL_MS,
+            )
+            .await
+            .expect("write advanced checkpoint"),
+            1
+        );
+        let checkpoint = store
+            .latest_audit_checkpoint(organization)
+            .await
+            .expect("read checkpoint")
+            .expect("checkpoint exists");
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.verification_key())
+            .expect("verification key");
+        let payload = checkpoint_payload(
+            &organization,
+            checkpoint.sequence,
+            &checkpoint.head_hash,
+            u64::try_from(checkpoint.signed_at_ms).expect("test checkpoint timestamp is positive"),
+        )
+        .expect("checkpoint payload");
+        verifying
+            .verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&checkpoint.signature))
+            .expect("checkpoint signature verifies");
+
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
     async fn standalone_ca_and_gateway_do_not_open_sqlite_or_generate_setup_material() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
         fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
@@ -769,7 +975,7 @@ mod tests {
             let result = prepare_roles(&config, &[role]).await;
             assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
         }
-        let result = run_roles(config, vec![Role::Api], None, None, None).await;
+        let result = run_roles(config, vec![Role::Api], None, None, None, None).await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_file(data_dir).expect("test file is removable");
     }

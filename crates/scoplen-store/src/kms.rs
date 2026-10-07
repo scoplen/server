@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ed25519_dalek::{Signer, SigningKey};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -38,6 +39,15 @@ pub trait KeyManagementService: Send + Sync {
     fn backend_name(&self) -> &'static str;
 }
 
+/// Signing boundary used for deployment audit checkpoints.
+pub trait AuditCheckpointSigner: Send + Sync {
+    /// Sign the domain-separated checkpoint payload.
+    fn sign_checkpoint(&self, payload: &[u8]) -> [u8; 64];
+
+    /// Return the public key used to verify exported checkpoints.
+    fn verification_key(&self) -> [u8; 32];
+}
+
 /// A deployment key loaded from the local key file generated during bootstrap.
 pub struct LocalKeyFile {
     path: PathBuf,
@@ -57,21 +67,7 @@ impl LocalKeyFile {
             return Err(KmsError::EmptyPath);
         }
         let contents = fs::read_to_string(path).map_err(KmsError::Read)?;
-        let encoded = contents.trim();
-        if encoded.len() != KEY_ENCRYPTION_KEY_BYTES * 2
-            || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            return Err(KmsError::InvalidEncoding);
-        }
-        let mut key = [0_u8; KEY_ENCRYPTION_KEY_BYTES];
-        for (index, slot) in key.iter_mut().enumerate() {
-            let offset = index * 2;
-            *slot = (hex_value(encoded.as_bytes()[offset])? << 4)
-                | hex_value(encoded.as_bytes()[offset + 1])?;
-        }
-        if key == [0; KEY_ENCRYPTION_KEY_BYTES] {
-            return Err(KmsError::ZeroKey);
-        }
+        let key = decode_key(contents.trim())?;
         Ok(Self { path: path.to_path_buf(), key: Zeroizing::new(key) })
     }
 
@@ -80,6 +76,74 @@ impl LocalKeyFile {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// An Ed25519 audit signing seed loaded from a local private file.
+#[derive(Clone)]
+pub struct LocalAuditSigner {
+    path: PathBuf,
+    seed: Zeroizing<[u8; 32]>,
+}
+
+impl LocalAuditSigner {
+    /// Load and validate an Ed25519 seed encoded as exactly 64 hexadecimal characters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KmsError`] when the path cannot be read or the seed is malformed or all zero.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, KmsError> {
+        let path = path.as_ref();
+        if path.as_os_str().is_empty() {
+            return Err(KmsError::EmptyPath);
+        }
+        let contents = fs::read_to_string(path).map_err(KmsError::Read)?;
+        let seed = decode_key(contents.trim())?;
+        Ok(Self { path: path.to_path_buf(), seed: Zeroizing::new(seed) })
+    }
+
+    /// Return the configured signing-key path without exposing the seed.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AuditCheckpointSigner for LocalAuditSigner {
+    fn sign_checkpoint(&self, payload: &[u8]) -> [u8; 64] {
+        SigningKey::from_bytes(&self.seed).sign(payload).to_bytes()
+    }
+
+    fn verification_key(&self) -> [u8; 32] {
+        SigningKey::from_bytes(&self.seed).verifying_key().to_bytes()
+    }
+}
+
+impl fmt::Debug for LocalAuditSigner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalAuditSigner")
+            .field("path", &self.path)
+            .field("seed", &"<redacted>")
+            .finish()
+    }
+}
+
+fn decode_key(encoded: &str) -> Result<[u8; KEY_ENCRYPTION_KEY_BYTES], KmsError> {
+    if encoded.len() != KEY_ENCRYPTION_KEY_BYTES * 2
+        || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(KmsError::InvalidEncoding);
+    }
+    let mut key = [0_u8; KEY_ENCRYPTION_KEY_BYTES];
+    for (index, slot) in key.iter_mut().enumerate() {
+        let offset = index * 2;
+        *slot = (hex_value(encoded.as_bytes()[offset])? << 4)
+            | hex_value(encoded.as_bytes()[offset + 1])?;
+    }
+    if key == [0; KEY_ENCRYPTION_KEY_BYTES] {
+        return Err(KmsError::ZeroKey);
+    }
+    Ok(key)
 }
 
 impl KeyManagementService for LocalKeyFile {
@@ -146,6 +210,22 @@ mod tests {
             assert!(matches!(error, KmsError::InvalidEncoding | KmsError::ZeroKey));
         }
         assert!(matches!(LocalKeyFile::load(""), Err(KmsError::EmptyPath)));
+        fs::remove_file(path).expect("remove key");
+    }
+
+    #[test]
+    fn local_audit_signer_signs_without_redacting_material() {
+        let path = path();
+        fs::write(&path, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n")
+            .expect("write key");
+        let signer = LocalAuditSigner::load(&path).expect("load signer");
+        let signature = signer.sign_checkpoint(b"checkpoint");
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.verification_key())
+            .expect("verification key");
+        verifying
+            .verify_strict(b"checkpoint", &ed25519_dalek::Signature::from_bytes(&signature))
+            .expect("signature verifies");
+        assert!(!format!("{signer:?}").contains("001122"));
         fs::remove_file(path).expect("remove key");
     }
 }

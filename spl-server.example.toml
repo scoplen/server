@@ -25,6 +25,7 @@ backend = "sqlite"
 # The local backend reads data_dir/deployment.key unless an explicit file is configured.
 backend = "local"
 # key_file = "./data/deployment.key"
+# audit_key_file = "./data/audit-signing.key"
 
 [storage.object]
 # Object storage is initialized for database-backed roles. The filesystem default stores below

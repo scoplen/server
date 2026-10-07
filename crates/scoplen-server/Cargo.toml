@@ -29,6 +29,11 @@ tracing-subscriber.workspace = true
 rustls-acme.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
+scoplen-audit = { path = "../scoplen-audit" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }

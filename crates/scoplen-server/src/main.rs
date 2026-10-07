@@ -88,6 +88,7 @@ async fn run() -> Result<(), ServerError> {
         prepared.store,
         prepared.object_storage,
         prepared.key_management,
+        prepared.audit_signer,
     )
     .await
 }

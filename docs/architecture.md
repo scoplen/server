@@ -43,8 +43,10 @@ bounded opaque payloads, claims jobs with owner-checked leases, records retries,
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration, the PostgreSQL query
 backend and runtime role selection, application-level column encryption, control-plane audit event
-producers, checkpoint signing, and other worker jobs remain roadmap work. The storage boundary
-defines a redacted local deployment-key-file backend behind a KMS trait; cloud adapters, column
-encryption, and external KMS readiness remain open. Database-backed role preparation loads and
-validates the local backend before startup; `storage.kms.backend` and `storage.kms.key_file` are
-also available through the documented TOML and environment configuration.
+producers, and other worker jobs remain roadmap work. The storage boundary defines a redacted
+local deployment-key-file backend behind a KMS trait; cloud adapters, column encryption, and
+external KMS readiness remain open. Database-backed role preparation loads and validates the local
+backend before startup; bootstrap creates an independent Ed25519 `audit-signing.key`, and the
+worker writes hourly idempotent checkpoints for advanced audit heads. `storage.kms.backend`,
+`storage.kms.key_file`, and `storage.kms.audit_key_file` are also available through the documented
+TOML and environment configuration. Audit retention/export integration remains open.

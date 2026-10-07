@@ -9,10 +9,14 @@ Changes are recorded here for released or reviewable repository outcomes.
   coverage. Database-backed role preparation now loads this backend before startup. Cloud
   KMS/PKCS#11 adapters and application-level column encryption remain open. TOML and
   `SPL_STORAGE_KMS_*` overrides select the local key-file path.
+- Added an independent local Ed25519 audit signer generated as `audit-signing.key`; the worker
+  signs advanced organization chain heads at most hourly and stores idempotent checkpoints.
+  External signer backends, public-key distribution, control-plane event producers, and audit
+  retention/export remain open.
 - Added bounded audit-chain primitives and SQLite persistence: canonical event SHA-256 chaining,
   same-transaction append helpers, checkpoint payload construction, idempotent signed-checkpoint
   storage, and chain verification with failure-path tests. Control-plane event producers and
-  checkpoint signing remain open.
+  retention/export integration remain open.
 - Added shared-vault epoch retirement with durable markers, per-object key-epoch tracking, an
   authenticated idempotent route, newest/in-use checks, and rejection of writes using retired
   epochs. Personal and organization vaults remain outside this operation.
