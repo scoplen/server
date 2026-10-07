@@ -36,8 +36,11 @@ validation and streaming/multipart operations; database-backed roles initialize 
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, write-rate and
-deployment-configurable quota enforcement, audit, control, gateway, and console behavior are still
-roadmap work.
+deployment-configurable quota enforcement, control, gateway, and console behavior are still
+roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
+hashing, same-transaction append helpers, checkpoint payload construction, durable checkpoints,
+and chain verification; control-plane event producers, deployment-key signing, and retention
+export wiring remain open.
 The SQLite sync store enforces the default 100,000 current objects per vault (including
 tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
 the mutation transaction. The session advertises those same limits, and the HTTP adapter returns

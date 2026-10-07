@@ -4,12 +4,17 @@
 #![forbid(unsafe_code)]
 
 pub mod account_keys;
+pub mod audit;
 pub mod jobs;
 pub mod object_storage;
 #[cfg(test)]
 mod schema;
 pub mod sync;
 
+pub use audit::{
+    AuditCheckpoint, AuditEvent, AuditStoreError, append_audit_event_in_transaction,
+    write_audit_checkpoint_in_transaction,
+};
 pub use jobs::{Job, JobId, JobQueueError};
 pub use object_storage::{
     ObjectStorage, ObjectStorageConfig, ObjectStorageError, S3ObjectStorageConfig,

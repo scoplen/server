@@ -60,6 +60,99 @@ const ORGANIZATIONS: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const AUDIT_EVENTS: TableSpec = TableSpec {
+    name: "audit_events",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "sequence",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "previous_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "event_bytes",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "event_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[IndexSpec {
+        name: "audit_events_by_hash",
+        columns: &["organization_id", "event_hash"],
+    }],
+};
+
+const AUDIT_CHECKPOINTS: TableSpec = TableSpec {
+    name: "audit_checkpoints",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "sequence",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "head_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "signature",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "signed_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
+};
+
 const SYNC_VAULTS: TableSpec = TableSpec {
     name: "sync_vaults",
     columns: &[
@@ -596,6 +689,8 @@ const JOBS: TableSpec = TableSpec {
 
 const TABLES: &[TableSpec] = &[
     ORGANIZATIONS,
+    AUDIT_EVENTS,
+    AUDIT_CHECKPOINTS,
     SYNC_VAULTS,
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
@@ -939,6 +1034,7 @@ mod tests {
 
     const SQLITE_ORGANIZATIONS: &str =
         include_str!("../migrations/sqlite/20261007000000_organizations.sql");
+    const SQLITE_AUDIT: &str = include_str!("../migrations/sqlite/20261008030000_audit_chain.sql");
     const SQLITE_SYNC: &str = include_str!("../migrations/sqlite/20261007010000_sync.sql");
     const SQLITE_MEMBER_REMOVAL: &str =
         include_str!("../migrations/sqlite/20261008000000_shared_vault_member_removal.sql");
@@ -951,6 +1047,8 @@ mod tests {
     const SQLITE_JOBS: &str = include_str!("../migrations/sqlite/20261007030000_jobs.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
+    const POSTGRES_AUDIT: &str =
+        include_str!("../migrations/postgres/20261008030000_audit_chain.sql");
     const POSTGRES_SYNC: &str = include_str!("../migrations/postgres/20261007010000_sync.sql");
     const POSTGRES_MEMBER_REMOVAL: &str =
         include_str!("../migrations/postgres/20261008000000_shared_vault_member_removal.sql");
@@ -984,6 +1082,7 @@ mod tests {
     fn migration_pairs_match_the_logical_schema() {
         let sqlite = [
             SQLITE_ORGANIZATIONS,
+            SQLITE_AUDIT,
             SQLITE_SYNC,
             SQLITE_KEYS,
             SQLITE_JOBS,
@@ -993,6 +1092,7 @@ mod tests {
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
+            POSTGRES_AUDIT,
             POSTGRES_SYNC,
             POSTGRES_KEYS,
             POSTGRES_JOBS,

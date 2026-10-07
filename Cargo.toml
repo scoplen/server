@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "jso
 tokio-stream = { version = "0.1.19", features = ["net"] }
 uuid = { version = "1.16.0", features = ["v4"] }
 rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "tokio", "webpki-roots"] }
+sha2 = "0.10.9"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

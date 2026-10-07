@@ -21,8 +21,9 @@ The relational storage boundary currently supports SQLite only for `api`, `worke
 Those roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys on pooled
 connections, and apply embedded forward migrations before generating first-run material. The
 migrations establish the organization table plus the sync storage foundation: vault counters,
-current opaque object envelopes, retained version rows, per-device acknowledgement cursors, and
-the account key-bundle tables. Account key artifacts remain opaque at this boundary; the store
+current opaque object envelopes, retained version rows, per-device acknowledgement cursors, the
+account key-bundle tables, and per-organization audit events and signed checkpoints. Account key
+artifacts remain opaque at this boundary; the store
 scopes wrapped-ARK reads to the authenticated device and applies atomic revision replay rules.
 `scoplen-store` allocates a contiguous sequence range inside a write transaction, checks every
 compare-and-swap base before changing state, and exposes current change and full-reconciliation
@@ -41,5 +42,5 @@ or multipart access. Database-backed roles initialize the configured object back
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration, the PostgreSQL query
-backend and runtime role selection, application-level column encryption, audit, and other worker
-jobs remain roadmap work.
+backend and runtime role selection, application-level column encryption, control-plane audit event
+producers, checkpoint signing, and other worker jobs remain roadmap work.

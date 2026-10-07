@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added bounded audit-chain primitives and SQLite persistence: canonical event SHA-256 chaining,
+  same-transaction append helpers, checkpoint payload construction, idempotent signed-checkpoint
+  storage, and chain verification with failure-path tests. Control-plane event producers and
+  checkpoint signing remain open.
 - Added shared-vault epoch retirement with durable markers, per-object key-epoch tracking, an
   authenticated idempotent route, newest/in-use checks, and rejection of writes using retired
   epochs. Personal and organization vaults remain outside this operation.
