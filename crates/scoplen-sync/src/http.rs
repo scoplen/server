@@ -8,15 +8,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use crate::notify::NotificationHub;
 use axum::{
     Router,
-    body::Bytes,
+    body::{Body, Bytes, to_bytes},
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -37,8 +41,63 @@ pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
 /// Maximum encoded session handshake request size.
 pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
+/// Default authenticated object-write refill rate advertised by the session handshake.
+pub const WRITE_REQUESTS_PER_SECOND: u64 = 50;
+/// Default authenticated object-write burst advertised by the session handshake.
+pub const WRITE_BURST: u64 = 200;
 
 const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const TOKEN_SCALE: u128 = 1_000_000_000;
+
+#[derive(Clone)]
+struct WriteRateLimiter {
+    buckets: Arc<Mutex<HashMap<storage::DeviceId, WriteBucket>>>,
+    refill_per_second: u64,
+    burst: u64,
+}
+
+#[derive(Clone, Copy)]
+struct WriteBucket {
+    tokens: u128,
+    last_refill: Instant,
+}
+
+impl WriteRateLimiter {
+    fn new(refill_per_second: u64, burst: u64) -> Self {
+        assert!(refill_per_second > 0 && burst > 0, "write rate limits must be positive");
+        Self { buckets: Arc::new(Mutex::new(HashMap::new())), refill_per_second, burst }
+    }
+
+    fn default_limits() -> Self {
+        Self::new(WRITE_REQUESTS_PER_SECOND, WRITE_BURST)
+    }
+
+    fn try_acquire(&self, device_id: storage::DeviceId) -> Result<(), u64> {
+        self.try_acquire_at(device_id, Instant::now())
+    }
+
+    fn try_acquire_at(&self, device_id: storage::DeviceId, now: Instant) -> Result<(), u64> {
+        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        let bucket = buckets.entry(device_id).or_insert(WriteBucket {
+            tokens: u128::from(self.burst).saturating_mul(TOKEN_SCALE),
+            last_refill: now,
+        });
+        let elapsed_nanos = now.duration_since(bucket.last_refill).as_nanos();
+        let refill = elapsed_nanos.saturating_mul(u128::from(self.refill_per_second));
+        let capacity = u128::from(self.burst).saturating_mul(TOKEN_SCALE);
+        bucket.tokens = bucket.tokens.saturating_add(refill).min(capacity);
+        bucket.last_refill = now;
+        if bucket.tokens >= TOKEN_SCALE {
+            bucket.tokens -= TOKEN_SCALE;
+            return Ok(());
+        }
+        let deficit = TOKEN_SCALE - bucket.tokens;
+        let rate = u128::from(self.refill_per_second);
+        let refill_per_second = rate.saturating_mul(TOKEN_SCALE);
+        let wait_seconds = deficit.saturating_add(refill_per_second - 1) / refill_per_second;
+        Err(u64::try_from(wait_seconds).unwrap_or(u64::MAX).max(1))
+    }
+}
 
 /// The operation requested from the authenticator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,7 +327,16 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
     authenticator: A,
     notifications: NotificationHub,
 ) -> Router {
-    let state = SyncHttpState { store, authenticator, notifications };
+    router_with_write_rate(store, authenticator, notifications, WriteRateLimiter::default_limits())
+}
+
+fn router_with_write_rate<A: SyncAuthenticator>(
+    store: Arc<SqliteStore>,
+    authenticator: A,
+    notifications: NotificationHub,
+    write_rate_limiter: WriteRateLimiter,
+) -> Router {
+    let state = SyncHttpState { store, authenticator, notifications, write_rate_limiter };
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
@@ -292,6 +360,7 @@ struct SyncHttpState<A> {
     store: Arc<SqliteStore>,
     authenticator: A,
     notifications: NotificationHub,
+    write_rate_limiter: WriteRateLimiter,
 }
 
 async fn session<A: SyncAuthenticator>(
@@ -380,8 +449,8 @@ async fn session<A: SyncAuthenticator>(
             max_objects_per_vault: storage::MAX_OBJECTS_PER_VAULT,
             max_shared_vaults_per_account: storage::MAX_SHARED_VAULTS_PER_ACCOUNT,
             max_members_per_shared_vault: storage::MAX_MEMBERS_PER_SHARED_VAULT,
-            write_requests_per_second: 50,
-            write_burst: 200,
+            write_requests_per_second: state.write_rate_limiter.refill_per_second,
+            write_burst: state.write_rate_limiter.burst,
         },
         vaults,
     };
@@ -866,16 +935,21 @@ async fn versions<A: SyncAuthenticator>(
 async fn objects<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request<Body>,
 ) -> SyncResult<Response> {
+    let (parts, body) = request.into_parts();
+    let method = parts.method;
+    let uri = parts.uri;
+    let headers = parts.headers;
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
         authorize(&state, &method, &uri, &headers, vault, SyncOperation::Write, &instance)?;
+    state
+        .write_rate_limiter
+        .try_acquire(identity.device_id)
+        .map_err(|seconds| SyncHttpError::rate_limited(&instance, seconds))?;
     if state
         .store
         .sync_vault_kind(vault)
@@ -893,9 +967,9 @@ async fn objects<A: SyncAuthenticator>(
             false,
         ));
     }
-    if body.len() > MAX_REQUEST_BYTES {
-        return Err(SyncHttpError::invalid(&instance, "write batch exceeds 4 MiB"));
-    }
+    let body = to_bytes(body, MAX_REQUEST_BYTES)
+        .await
+        .map_err(|_| SyncHttpError::too_large(&instance, "write batch exceeds 4 MiB"))?;
     let batch = api::SyncWriteBatch::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid write batch: {error}"))
     })?;
@@ -1083,6 +1157,7 @@ struct SyncHttpError {
     status: StatusCode,
     problem: ProblemDetails,
     body: Option<Vec<u8>>,
+    retry_after: Option<HeaderValue>,
 }
 
 impl SyncHttpError {
@@ -1319,6 +1394,20 @@ impl SyncHttpError {
         )
     }
 
+    fn rate_limited(instance: &str, seconds: u64) -> Box<Self> {
+        let mut error = Self::known(
+            instance,
+            StatusCode::TOO_MANY_REQUESTS,
+            "sync.rate_limited",
+            "Sync write rate exceeded",
+            "The device write rate is exhausted; no data changed and retry after the indicated delay.",
+            false,
+            true,
+        );
+        error.retry_after = Some(HeaderValue::from_str(&seconds.to_string()).expect("valid delay"));
+        error
+    }
+
     fn known(
         instance: &str,
         status: StatusCode,
@@ -1332,7 +1421,7 @@ impl SyncHttpError {
         let problem =
             ProblemDetails::new(code, status.as_u16(), title, detail, instance, changed, retryable)
                 .expect("sync HTTP problem details must be valid");
-        Box::new(Self { status, problem, body: None })
+        Box::new(Self { status, problem, body: None, retry_after: None })
     }
 
     fn with_conflicts(mut self: Box<Self>, conflicts: &[storage::ConflictEntry]) -> Box<Self> {
@@ -1346,12 +1435,16 @@ impl IntoResponse for Box<SyncHttpError> {
         let body = self.body.clone().unwrap_or_else(|| {
             self.problem.to_cbor().expect("validated sync HTTP problem must encode")
         });
-        (
+        let mut response = (
             self.status,
             [(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+cbor"))],
             body,
         )
-            .into_response()
+            .into_response();
+        if let Some(retry_after) = self.retry_after {
+            response.headers_mut().insert(header::RETRY_AFTER, retry_after);
+        }
+        response
     }
 }
 
@@ -1614,6 +1707,62 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    #[test]
+    fn write_rate_bucket_enforces_burst_refill_and_device_isolation() {
+        let limiter = WriteRateLimiter::new(2, 3);
+        let now = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(limiter.try_acquire_at([1; 16], now), Ok(()));
+        }
+        assert_eq!(limiter.try_acquire_at([1; 16], now), Err(1));
+        assert_eq!(limiter.try_acquire_at([2; 16], now), Ok(()));
+        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_millis(500)), Ok(()));
+        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_millis(500)), Err(1));
+        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_secs(10)), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn object_write_rate_rejects_before_reading_body_and_preserves_state() {
+        let (store, vault, device) = test_store().await;
+        let app = router_with_write_rate(
+            store.clone(),
+            TestAuthenticator::new(device, true),
+            NotificationHub::default(),
+            WriteRateLimiter::new(1, 2),
+        );
+        let make_request = |authorized: bool, body: Vec<u8>| {
+            let builder = Request::builder()
+                .method("POST")
+                .uri(format!("/sync/v1/vaults/{}/objects", path(vault)))
+                .header(header::CONTENT_TYPE, "application/cbor");
+            let builder = if authorized { request_headers(builder) } else { builder };
+            builder.body(Body::from(body)).expect("write request")
+        };
+        let rejected_auth = app
+            .clone()
+            .oneshot(make_request(false, vec![0xff]))
+            .await
+            .expect("unauthorized response");
+        assert_eq!(rejected_auth.status(), StatusCode::UNAUTHORIZED);
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(make_request(true, vec![0xff]))
+                .await
+                .expect("invalid body response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = app.oneshot(make_request(true, vec![0xff])).await.expect("rate response");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).expect("retry header"), "1");
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("rate body");
+        let problem = ProblemDetails::from_cbor(&bytes).expect("rate problem");
+        assert_eq!(problem.code.as_str(), "sync.rate_limited");
+        assert!(!problem.changed);
+        assert!(problem.retryable);
+        assert_eq!(store.sync_changes(vault, 0, 1).await.expect("changes").changes.len(), 0);
     }
 
     #[tokio::test]

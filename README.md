@@ -42,7 +42,10 @@ The SQLite sync store enforces the default 100,000 current objects per vault (in
 tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
 the mutation transaction. The session advertises those same limits, and the HTTP adapter returns
 `413 sync.quota_exceeded` without changing state. Deployment-configurable quotas and per-device
-write-rate enforcement remain roadmap work.
+write-rate enforcement remains process-local at the advertised default of 50 requests per second
+with a burst of 200; an exhausted authenticated device bucket returns `429 sync.rate_limited` and
+`Retry-After`. Deployment-configurable limits and multi-instance rate admission remain roadmap
+work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key; the enrollment service and the K-4 route for delivering or rotating that
 key are not implemented yet. A session lists a personal vault only after that provision succeeds.

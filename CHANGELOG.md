@@ -6,8 +6,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 - Enforced default sync cardinality limits atomically for object insertion, shared-vault creation,
   and member addition. The session advertises the store limits, and quota rejection returns
-  `413 sync.quota_exceeded` with no mutation. Deployment-configurable limits and write-rate
-  enforcement remain open.
+  `413 sync.quota_exceeded` with no mutation. Deployment-configurable limits remain open.
+- Added process-local per-device token-bucket admission for authenticated object writes at the
+  advertised 50 requests-per-second and burst-200 defaults. Exhausted buckets return
+  `429 sync.rate_limited` with `Retry-After`, without reading or mutating the request body.
+  Deployment-configurable and multi-instance admission remain open.
 - Added atomic one-per-account personal-vault provisioning with an ARK-wrapped epoch-one key,
   account-scoped key lookup, and personal-vault descriptors in the authenticated session response.
   SQLite and PostgreSQL migrations enforce ownership uniqueness. First-enrollment wiring and a
