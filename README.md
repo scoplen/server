@@ -42,7 +42,8 @@ hashing, same-transaction append helpers, checkpoint payload construction, durab
 and chain verification; control-plane event producers, deployment-key signing, and retention
 export wiring remain open. The storage crate also validates and redacts a local 32-byte deployment
 key-file backend behind the `KeyManagementService` trait; cloud KMS, PKCS#11, column encryption,
-and runtime KMS wiring remain open.
+and external KMS runtime wiring remain open. Database-backed role preparation now loads and
+validates the local backend before startup.
 The SQLite sync store enforces the default 100,000 current objects per vault (including
 tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
 the mutation transaction. The session advertises those same limits, and the HTTP adapter returns

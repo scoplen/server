@@ -17,9 +17,15 @@ pub enum ServerError {
     /// Object storage could not be initialized or reached.
     #[error("object storage error: {0}")]
     ObjectStorage(#[from] scoplen_store::ObjectStorageError),
+    /// Key-management backend could not be initialized.
+    #[error("key-management error: {0}")]
+    KeyManagement(#[from] scoplen_store::kms::KmsError),
     /// A database-backed role was started without initialized storage.
     #[error("api, worker, and edge roles require initialized storage")]
     MissingStore,
+    /// A database-backed role was started without initialized key management.
+    #[error("api, worker, and edge roles require initialized key management")]
+    MissingKeyManagement,
     /// The data directory could not be initialized.
     #[error("could not initialize data directory {path}: {source}")]
     DataDirectory {

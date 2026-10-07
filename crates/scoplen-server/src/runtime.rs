@@ -16,6 +16,7 @@ use hyper_util::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
+use scoplen_store::kms::LocalKeyFile;
 use scoplen_store::sync::{MAX_PAGE_SIZE, SyncStoreError};
 use scoplen_store::{ObjectStorage, SqliteStore};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
@@ -38,6 +39,8 @@ pub struct PreparedRoles {
     pub store: Option<SqliteStore>,
     /// Object storage backend for roles that need relational storage.
     pub object_storage: Option<ObjectStorage>,
+    /// Initialized key-management backend for database-backed roles.
+    pub key_management: Option<LocalKeyFile>,
     /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<String>,
 }
@@ -110,15 +113,22 @@ fn hex_bytes(bytes: &[u8]) -> String {
 pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRoles, ServerError> {
     config.validate_for_roles(roles)?;
     if !roles.iter().any(|role| role.requires_store()) {
-        return Ok(PreparedRoles { store: None, object_storage: None, setup_link: None });
+        return Ok(PreparedRoles {
+            store: None,
+            object_storage: None,
+            key_management: None,
+            setup_link: None,
+        });
     }
     let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?;
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
     let bootstrap = bootstrap(config)?;
+    let key_management = Some(LocalKeyFile::load(config.server.data_dir.join("deployment.key"))?);
     Ok(PreparedRoles {
         store: Some(store),
         object_storage: Some(object_storage),
+        key_management,
         setup_link: bootstrap.setup_link,
     })
 }
@@ -133,12 +143,17 @@ pub async fn run_roles(
     roles: Vec<Role>,
     store: Option<SqliteStore>,
     object_storage: Option<ObjectStorage>,
+    key_management: Option<LocalKeyFile>,
 ) -> Result<(), ServerError> {
     if roles.iter().any(|role| role.requires_store())
         && (store.is_none() || object_storage.is_none())
     {
         return Err(ServerError::MissingStore);
     }
+    if roles.iter().any(|role| role.requires_store()) && key_management.is_none() {
+        return Err(ServerError::MissingKeyManagement);
+    }
+    let _key_management = key_management;
     let store = store.map(Arc::new);
     let object_storage = object_storage.map(Arc::new);
     let mut tasks = Vec::new();
@@ -753,7 +768,7 @@ mod tests {
             let result = prepare_roles(&config, &[role]).await;
             assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
         }
-        let result = run_roles(config, vec![Role::Api], None, None).await;
+        let result = run_roles(config, vec![Role::Api], None, None, None).await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_file(data_dir).expect("test file is removable");
     }

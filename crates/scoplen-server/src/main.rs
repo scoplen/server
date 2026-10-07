@@ -82,7 +82,14 @@ async fn run() -> Result<(), ServerError> {
     if let Some(link) = prepared.setup_link {
         println!("first-run setup link (valid for one hour): {link}");
     }
-    scoplen_server::run_roles(config, roles, prepared.store, prepared.object_storage).await
+    scoplen_server::run_roles(
+        config,
+        roles,
+        prepared.store,
+        prepared.object_storage,
+        prepared.key_management,
+    )
+    .await
 }
 
 // Keep the public role names visible to rustdoc and downstream CLI tooling.

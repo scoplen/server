@@ -45,4 +45,5 @@ retention job scheduling and membership-aware tombstone purge orchestration, the
 backend and runtime role selection, application-level column encryption, control-plane audit event
 producers, checkpoint signing, and other worker jobs remain roadmap work. The storage boundary
 defines a redacted local deployment-key-file backend behind a KMS trait; cloud adapters, column
-encryption, and runtime KMS readiness wiring remain open.
+encryption, and external KMS readiness remain open. Database-backed role preparation loads and
+validates the local backend before startup.
