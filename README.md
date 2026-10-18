@@ -38,8 +38,8 @@ storage boundary with local filesystem and S3-compatible implementations, includ
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, membership-aware purge orchestration, multi-instance
-notification fan-out, organization vault ownership in session listings, write-rate and
-deployment-configurable quota enforcement, control, gateway, and console behavior are still
+notification fan-out, organization vault ownership in session listings, configurable wire/body
+and rate limits, control, gateway, and console behavior are still
 roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
 hashing, same-transaction append helpers, checkpoint payload construction, durable checkpoints,
 and chain verification. The worker signs an advanced chain head at most hourly with an independent
@@ -53,13 +53,15 @@ validates the local backend before startup. Bootstrap also creates the independe
 For a stale object-write batch, the sync adapter returns every conflicting object in request order
 with its current change or an explicit absent value. If a stored change cannot be encoded within
 the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomplete conflict body.
-The SQLite sync store enforces the default 100,000 current objects per vault (including
-tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
-the mutation transaction. The session advertises those same limits, and the HTTP adapter returns
-`413 sync.quota_exceeded` without changing state. Deployment-configurable quotas and per-device
-write-rate enforcement remains process-local at the advertised default of 50 requests per second
-with a burst of 200; an exhausted authenticated device bucket returns `429 sync.rate_limited` and
-`Retry-After`. Deployment-configurable limits and multi-instance rate admission remain roadmap
+The SQLite sync store enforces configured cardinality limits in the mutation transaction. Defaults
+are 100,000 current objects per vault (including tombstones), 1,000 shared vault memberships per
+account, and 1,000 accounts per shared vault. The K-4 session advertises the values enforced by
+that store, and quota rejection returns `413 sync.quota_exceeded` without changing state. Member
+limits cannot exceed 1,000 because epoch publication requires one key wrap per member and the
+current wire codec accepts at most 1,000 wraps. Per-device write-rate enforcement remains
+process-local at the advertised default of 50 requests per second with a burst of 200; an
+exhausted authenticated device bucket returns `429 sync.rate_limited` and `Retry-After`.
+Deployment-configurable wire/body and rate limits and multi-instance rate admission remain roadmap
 work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
@@ -117,6 +119,11 @@ alongside the database for database-backed roles. The default `storage.object.ba
 `server.data_dir/objects`; an S3-compatible backend can be selected with the nested S3 settings
 in `spl-server.example.toml` or their `SPL_STORAGE_OBJECT_*` environment overrides. `/readyz`
 checks both the database and the configured object-storage backend.
+Set the three `[sync]` cardinality values in `spl-server.example.toml` or override them with
+`SPL_SYNC_MAX_OBJECTS_PER_VAULT`, `SPL_SYNC_MAX_SHARED_VAULTS_PER_ACCOUNT`, and
+`SPL_SYNC_MAX_MEMBERS_PER_SHARED_VAULT`. Values must be positive; object and account limits must fit
+SQLite's signed count range, and the member limit must be at most 1,000. The baseline listener does
+not mount the K-4 router until production identity is available.
 
 ## Security
 

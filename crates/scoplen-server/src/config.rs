@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig};
+use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig, sync::SyncCardinalityLimits};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -25,6 +25,8 @@ pub struct Config {
     pub roles: RoleSettings,
     /// Storage profile selected for the process.
     pub storage: StorageSettings,
+    /// SQLite sync cardinality limits.
+    pub sync: SyncSettings,
 }
 
 impl Config {
@@ -131,6 +133,7 @@ impl Config {
         if let Some(value) = env_value("SPL_STORAGE_KMS_AUDIT_KEY_FILE") {
             self.storage.kms.audit_key_file = Some(PathBuf::from(value));
         }
+        self.sync.apply_environment()?;
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -189,6 +192,7 @@ impl Config {
         }
         self.storage.object.validate()?;
         self.storage.kms.validate()?;
+        self.sync.cardinality_limits().validate().map_err(ConfigError::Invalid)?;
         Ok(())
     }
 
@@ -335,6 +339,65 @@ pub struct RoleSettings {
 impl Default for RoleSettings {
     fn default() -> Self {
         Self { names: vec!["all".into()] }
+    }
+}
+
+/// SQLite cardinality limits advertised by the sync session.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SyncSettings {
+    /// Maximum current object identifiers, including tombstones, in one vault.
+    pub max_objects_per_vault: u64,
+    /// Maximum shared vault memberships visible to one account.
+    pub max_shared_vaults_per_account: u64,
+    /// Maximum current members in one shared vault.
+    pub max_members_per_shared_vault: u64,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        let limits = SyncCardinalityLimits::default();
+        Self {
+            max_objects_per_vault: limits.max_objects_per_vault,
+            max_shared_vaults_per_account: limits.max_shared_vaults_per_account,
+            max_members_per_shared_vault: limits.max_members_per_shared_vault,
+        }
+    }
+}
+
+impl SyncSettings {
+    fn apply_environment(&mut self) -> Result<(), ConfigError> {
+        if let Some(value) = env_value("SPL_SYNC_MAX_OBJECTS_PER_VAULT") {
+            self.max_objects_per_vault = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_OBJECTS_PER_VAULT must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_MAX_SHARED_VAULTS_PER_ACCOUNT") {
+            self.max_shared_vaults_per_account = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_SHARED_VAULTS_PER_ACCOUNT must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_MAX_MEMBERS_PER_SHARED_VAULT") {
+            self.max_members_per_shared_vault = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_MEMBERS_PER_SHARED_VAULT must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cardinality_limits(&self) -> SyncCardinalityLimits {
+        SyncCardinalityLimits {
+            max_objects_per_vault: self.max_objects_per_vault,
+            max_shared_vaults_per_account: self.max_shared_vaults_per_account,
+            max_members_per_shared_vault: self.max_members_per_shared_vault,
+        }
     }
 }
 
@@ -581,6 +644,46 @@ mod tests {
         let config = Config::default();
         config.validate().expect("defaults are valid");
         assert_eq!(config.listen_address(), "127.0.0.1:8443");
+    }
+
+    #[test]
+    fn sync_cardinality_settings_validate_below_and_above_defaults() {
+        let config: Config = toml::from_str(
+            "[sync]\nmax_objects_per_vault = 100001\nmax_shared_vaults_per_account = 1001\nmax_members_per_shared_vault = 2\n",
+        )
+        .expect("parse sync settings");
+        config.validate().expect("supported limits");
+        assert_eq!(config.sync.cardinality_limits().max_objects_per_vault, 100_001);
+        assert_eq!(config.sync.cardinality_limits().max_shared_vaults_per_account, 1_001);
+        assert_eq!(config.sync.cardinality_limits().max_members_per_shared_vault, 2);
+
+        let mut invalid = config.clone();
+        invalid.sync.max_objects_per_vault = 0;
+        assert!(
+            invalid
+                .validate()
+                .expect_err("zero object limit")
+                .to_string()
+                .contains("sync.max_objects_per_vault")
+        );
+        invalid.sync = config.sync.clone();
+        invalid.sync.max_shared_vaults_per_account = i64::MAX as u64 + 1;
+        assert!(
+            invalid
+                .validate()
+                .expect_err("unrepresentable account limit")
+                .to_string()
+                .contains("sync.max_shared_vaults_per_account")
+        );
+        invalid.sync = config.sync.clone();
+        invalid.sync.max_members_per_shared_vault = 1_001;
+        assert!(
+            invalid
+                .validate()
+                .expect_err("unusable member limit")
+                .to_string()
+                .contains("epoch publication")
+        );
     }
 
     #[test]

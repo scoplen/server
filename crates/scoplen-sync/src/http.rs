@@ -439,6 +439,7 @@ async fn session<A: SyncAuthenticator>(
             rotation_pending: vault.rotation_pending,
         })
         .collect();
+    let cardinality_limits = state.store.sync_cardinality_limits();
     let response = api::SyncSessionResponse {
         server_version: server_version.to_string(),
         max_model_version: CURRENT_SCHEMA_VERSION,
@@ -446,9 +447,9 @@ async fn session<A: SyncAuthenticator>(
             max_envelope_bytes: storage::MAX_ENVELOPE_BYTES as u64,
             max_batch_objects: storage::MAX_BATCH_OBJECTS as u64,
             max_batch_bytes: storage::MAX_BATCH_BYTES as u64,
-            max_objects_per_vault: storage::MAX_OBJECTS_PER_VAULT,
-            max_shared_vaults_per_account: storage::MAX_SHARED_VAULTS_PER_ACCOUNT,
-            max_members_per_shared_vault: storage::MAX_MEMBERS_PER_SHARED_VAULT,
+            max_objects_per_vault: cardinality_limits.max_objects_per_vault,
+            max_shared_vaults_per_account: cardinality_limits.max_shared_vaults_per_account,
+            max_members_per_shared_vault: cardinality_limits.max_members_per_shared_vault,
             write_requests_per_second: state.write_rate_limiter.refill_per_second,
             write_burst: state.write_rate_limiter.burst,
         },
@@ -2046,6 +2047,49 @@ mod tests {
         let session = api::SyncSessionResponse::from_cbor(&bytes).expect("rotated cbor");
         assert_eq!(session.vaults[0].key_epoch, 2);
         assert!(!session.vaults[0].rotation_pending);
+    }
+
+    #[tokio::test]
+    async fn session_advertises_the_cardinality_limits_enforced_by_its_store() {
+        let path = std::env::temp_dir().join(format!("scoplen-http-limits-{}", Uuid::new_v4()));
+        let limits = storage::SyncCardinalityLimits {
+            max_objects_per_vault: storage::MAX_OBJECTS_PER_VAULT + 1,
+            max_shared_vaults_per_account: storage::MAX_SHARED_VAULTS_PER_ACCOUNT + 1,
+            max_members_per_shared_vault: 2,
+        };
+        let store = Arc::new(
+            SqliteStore::open_with_sync_limits(&path, limits).await.expect("open limited store"),
+        );
+        let device = Uuid::now_v7();
+        let app = router(store, TestAuthenticator::new(device.into_bytes(), true));
+        let body = api::SyncSessionRequest {
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            model_version: CURRENT_SCHEMA_VERSION,
+            device_id: device,
+        }
+        .to_cbor()
+        .expect("session request");
+        let response = app
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/sync/v1/session")
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(body))
+                .expect("session request builder"),
+            )
+            .await
+            .expect("session response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("session body");
+        let advertised = api::SyncSessionResponse::from_cbor(&bytes).expect("session cbor").limits;
+        assert_eq!(advertised.max_objects_per_vault, limits.max_objects_per_vault);
+        assert_eq!(advertised.max_shared_vaults_per_account, limits.max_shared_vaults_per_account);
+        assert_eq!(advertised.max_members_per_shared_vault, limits.max_members_per_shared_vault);
+        assert_eq!(advertised.max_batch_objects, storage::MAX_BATCH_OBJECTS as u64);
+        assert_eq!(advertised.write_requests_per_second, WRITE_REQUESTS_PER_SECOND);
     }
 
     #[tokio::test]
