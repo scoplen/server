@@ -1082,7 +1082,7 @@ async fn changes<A: SyncAuthenticator>(
         .store
         .sync_changes(vault, query.after, query.limit)
         .await
-        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+        .map_err(|error| SyncHttpError::from_page_store(error, &instance))?;
     let response = api::SyncChangesResponse {
         changes: page.changes.into_iter().map(change_to_api).collect(),
         next_cursor: page.next_cursor,
@@ -1113,7 +1113,7 @@ async fn snapshot<A: SyncAuthenticator>(
         .store
         .sync_snapshot(vault, query.after, query.limit)
         .await
-        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+        .map_err(|error| SyncHttpError::from_page_store(error, &instance))?;
     let response = api::SyncSnapshotResponse {
         objects: page.objects.into_iter().map(change_to_api).collect(),
         next_cursor: page.next_cursor,
@@ -1617,6 +1617,23 @@ impl SyncHttpError {
                 false,
                 true,
             ),
+        }
+    }
+
+    fn from_page_store(error: storage::SyncStoreError, instance: &str) -> Box<Self> {
+        match error {
+            storage::SyncStoreError::CursorAhead { cursor, current } => Self::known(
+                instance,
+                StatusCode::GONE,
+                "sync.cursor_expired",
+                "Sync cursor expired",
+                format!(
+                    "Cursor {cursor} is ahead of the current sequence {current}; no data changed and restart full reconciliation from after=0."
+                ),
+                false,
+                false,
+            ),
+            error => Self::from_store(error, instance),
         }
     }
 
@@ -4049,11 +4066,11 @@ mod tests {
             for query in &max_queries {
                 let response =
                     app.clone().oneshot(request(query, true)).await.expect("max query response");
-                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(response.status(), StatusCode::GONE);
                 let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
                 assert_eq!(
                     ProblemDetails::from_cbor(&bytes).expect("cursor problem").code.as_str(),
-                    "sync.cursor_ahead"
+                    "sync.cursor_expired"
                 );
             }
 
@@ -4094,6 +4111,96 @@ mod tests {
             assert_eq!(store.sync_changes(vault, 0, 1).await.expect("changes"), before_changes);
             assert_eq!(store.sync_snapshot(vault, 0, 1).await.expect("snapshot"), before_snapshot);
         }
+    }
+
+    #[tokio::test]
+    async fn read_cursor_errors_require_reconciliation_while_ack_keeps_ahead_error() {
+        let (store, vault, device) = test_store().await;
+        let object = Uuid::now_v7().into_bytes();
+        let initial = storage::ObjectWrite {
+            object_id: object,
+            base_sequence: None,
+            envelope: vec![1],
+            key_epoch: 1,
+            tombstone: false,
+            signer_device_id: Some(device),
+        };
+        store.write_sync_batch(vault, std::slice::from_ref(&initial)).await.expect("initial write");
+        store
+            .write_sync_batch(
+                vault,
+                &[storage::ObjectWrite {
+                    base_sequence: Some(1),
+                    tombstone: true,
+                    envelope: vec![2],
+                    ..initial
+                }],
+            )
+            .await
+            .expect("tombstone");
+        let now_ms = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("timestamp fits SQLite integer");
+        let retention =
+            store.purge_sync_history(vault, Some(2), now_ms).await.expect("purge tombstone");
+        assert_eq!(retention.purge_horizon, 2);
+        assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("initial ack"), 0);
+        let before = store.sync_snapshot(vault, 0, 1).await.expect("snapshot state");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+
+        for (endpoint, after) in [("changes", 0), ("changes", 3), ("snapshot", 3)] {
+            let request =
+                request_headers(Request::builder().uri(format!(
+                    "/sync/v1/vaults/{}/{endpoint}?after={after}&limit=1",
+                    path(vault)
+                )))
+                .body(Body::empty())
+                .expect("read request");
+            let response = app.clone().oneshot(request).await.expect("read response");
+            assert_eq!(response.status(), StatusCode::GONE, "{endpoint} after={after}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/problem+cbor"
+            );
+            let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem");
+            let problem = ProblemDetails::from_cbor(&body).expect("CBOR problem");
+            assert_eq!(problem.code.as_str(), "sync.cursor_expired");
+            assert!(!problem.changed);
+            assert!(!problem.retryable);
+        }
+
+        let snapshot = request_headers(
+            Request::builder()
+                .uri(format!("/sync/v1/vaults/{}/snapshot?after=0&limit=1", path(vault))),
+        )
+        .body(Body::empty())
+        .expect("snapshot request");
+        assert_eq!(
+            app.clone().oneshot(snapshot).await.expect("snapshot response").status(),
+            StatusCode::OK
+        );
+
+        let ack = request_headers(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sync/v1/vaults/{}/ack", path(vault)))
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(SyncAckRequest { cursor: 3 }.to_cbor().expect("ack")))
+        .expect("ack request");
+        let response = app.oneshot(ack).await.expect("ack response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("ack problem");
+        assert_eq!(
+            ProblemDetails::from_cbor(&body).expect("ack CBOR problem").code.as_str(),
+            "sync.cursor_ahead"
+        );
+        assert_eq!(store.sync_snapshot(vault, 0, 1).await.expect("snapshot state"), before);
+        assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("stored ack"), 0);
     }
 
     #[tokio::test]

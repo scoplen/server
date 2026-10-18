@@ -75,8 +75,10 @@ changing state. Acknowledgements collect at most 17 bytes, the maximum canonical
 encoding, and reject larger bodies with a CBOR `400 sync.invalid_request` problem after authorization.
 Change-feed and snapshot reads accept at most 37 query bytes for canonical `after` and `limit`
 parameters, rejecting longer queries with a CBOR `400 sync.invalid_request` problem after
-authorization. These limits are not session-advertised write settings. Other route body limits and
-multi-instance rate admission remain roadmap work.
+authorization. A read cursor below the purge horizon or ahead of the vault sequence returns a
+CBOR `410 sync.cursor_expired` problem so the client can restart full reconciliation; an ACK cursor
+ahead of the sequence remains `400 sync.cursor_ahead`. These limits are not session-advertised write
+settings. Other route body limits and multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
 owner using the shared `{keys}` response shape. Enrollment wiring, production identity, and
