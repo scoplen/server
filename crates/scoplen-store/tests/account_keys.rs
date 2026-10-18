@@ -349,3 +349,134 @@ async fn postgres_account_key_response_admission_is_atomic() {
         .expect("remove test bundle");
     store.pool().close().await;
 }
+
+#[cfg(feature = "postgres-integration")]
+async fn wait_for_certificate_read(store: &scoplen_store::PostgresStore, application_name: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                   SELECT 1 FROM pg_stat_activity
+                   WHERE datname = current_database()
+                     AND pid <> pg_backend_pid()
+                     AND application_name = $1
+                     AND wait_event_type = 'Lock'
+                     AND query LIKE 'SELECT certificate FROM sync_account_key_certificates%'
+                 )",
+            )
+            .bind(application_name)
+            .fetch_one(store.pool())
+            .await
+            .expect("observe blocked read");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("GET must reach the certificate read");
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_account_key_read_uses_one_snapshot_during_rotation() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let test_id = uuid::Uuid::new_v4();
+    let application_name = format!("scoplen_snapshot_{test_id}");
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let database_url = format!("{database_url}{separator}application_name={application_name}");
+    let store =
+        scoplen_store::PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let account = test_id.into_bytes();
+    let mut original = update(1, 80);
+    original.device_wraps[0].wrapped_ark = vec![80; MAX_KEY_ARTIFACT_BYTES];
+    store.put_account_key_bundle(account, &original).await.expect("initial bundle");
+    let certificates = full_size_certificates(62);
+    store
+        .replace_account_key_statements(account, &certificates, &[])
+        .await
+        .expect("initial statements fit the response bound");
+
+    let mut table_lock = store.pool().begin().await.expect("open blocking transaction");
+    sqlx::query("LOCK TABLE sync_account_key_certificates IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *table_lock)
+        .await
+        .expect("block certificate reads");
+    let reader = store.clone();
+    let read = tokio::spawn(async move { reader.get_account_key_bundle(account, [1; 16]).await });
+    wait_for_certificate_read(&store, &application_name).await;
+
+    // This second valid state changes no certificate row, so it can commit while the GET waits.
+    let mut writer = store.pool().begin().await.expect("open rotation transaction");
+    sqlx::query(
+        "UPDATE sync_account_key_bundles
+         SET revision = 2, signature = $2, updated_at_ms = updated_at_ms + 1
+         WHERE account_id = $1",
+    )
+    .bind(account.as_slice())
+    .bind(vec![81u8; 64])
+    .execute(&mut *writer)
+    .await
+    .expect("rotate bundle");
+    sqlx::query(
+        "UPDATE sync_account_key_device_wraps SET wrapped_ark = $3
+         WHERE account_id = $1 AND device_id = $2",
+    )
+    .bind(account.as_slice())
+    .bind([1u8; 16].as_slice())
+    .bind(vec![81u8, 1])
+    .execute(&mut *writer)
+    .await
+    .expect("replace large wrap");
+    sqlx::query(
+        "INSERT INTO sync_account_key_revocations (account_id, revocation) VALUES ($1, $2)",
+    )
+    .bind(account.as_slice())
+    .bind(vec![81u8; MAX_KEY_ARTIFACT_BYTES])
+    .execute(&mut *writer)
+    .await
+    .expect("add revocation");
+    writer.commit().await.expect("commit rotation");
+    table_lock.commit().await.expect("release certificate read");
+
+    let first = tokio::time::timeout(Duration::from_secs(10), read)
+        .await
+        .expect("GET must finish")
+        .expect("reader task")
+        .expect("consistent initial bundle");
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.wrapped_ark.len(), MAX_KEY_ARTIFACT_BYTES);
+    assert!(first.wrapped_ark.iter().all(|byte| *byte == 80));
+    assert_eq!(first.certificates, certificates);
+    assert_eq!(first.revocations.len(), 0);
+
+    let second = store.get_account_key_bundle(account, [1; 16]).await.expect("rotated bundle");
+    assert_eq!(second.revision, 2);
+    assert_eq!(second.wrapped_ark, vec![81, 1]);
+    assert_eq!(second.certificates, certificates);
+    assert_eq!(second.revocations.len(), 1);
+    assert!(second.revocations[0].iter().all(|byte| *byte == 81));
+    store
+        .replace_account_key_statements(account, &certificates, &second.revocations)
+        .await
+        .expect("rotated state also fits the response bound");
+
+    sqlx::query("DELETE FROM sync_account_key_revocations WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test revocations");
+    sqlx::query("DELETE FROM sync_account_key_certificates WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test certificates");
+    sqlx::query("DELETE FROM sync_account_key_bundles WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test bundle");
+    store.pool().close().await;
+}

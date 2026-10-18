@@ -362,6 +362,9 @@ impl PostgresStore {
         device_id: DeviceId,
     ) -> Result<AccountKeyBundle, AccountKeyStoreError> {
         let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
         let row = sqlx::query(
             "SELECT revision, account_signing_key, account_kem_key, recovery_blob
              FROM sync_account_key_bundles WHERE account_id = $1",
