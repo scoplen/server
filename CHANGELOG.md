@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Require rustls 0.23.46 and update the server lockfile for the same TLS advisories
+  addressed in the shared protocol workspace (RUSTSEC-2026-0346 through RUSTSEC-2026-0349).
+
 - Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
   hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
   coverage. Database-backed role preparation now loads this backend before startup. Cloud
