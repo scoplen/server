@@ -1,4 +1,4 @@
-# scoplen-server
+# Scoplen server
 
 The self-hosted Scoplen server, host agent, administration CLI, and web-console workspace.
 Scoplen is a Plystra project. This repository is licensed under AGPL-3.0-only.
