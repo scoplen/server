@@ -47,6 +47,9 @@ and external KMS runtime wiring remain open. Database-backed role preparation no
 validates the local backend before startup. Bootstrap also creates the independent
 `audit-signing.key`; `storage.kms.backend = "local"`, `storage.kms.key_file`, and
 `storage.kms.audit_key_file` are configurable in TOML or via `SPL_STORAGE_KMS_*` environment overrides.
+For a stale object-write batch, the sync adapter returns every conflicting object in request order
+with its current change or an explicit absent value. If a stored change cannot be encoded within
+the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomplete conflict body.
 The SQLite sync store enforces the default 100,000 current objects per vault (including
 tombstones), 1,000 shared vault memberships per account, and 1,000 accounts per shared vault in
 the mutation transaction. The session advertises those same limits, and the HTTP adapter returns

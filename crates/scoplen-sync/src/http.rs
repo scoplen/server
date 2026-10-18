@@ -25,10 +25,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
-use scoplen_model::{
-    CURRENT_SCHEMA_VERSION,
-    cbor::{self, Value},
-};
+use scoplen_model::CURRENT_SCHEMA_VERSION;
 use scoplen_store::{SqliteStore, account_keys as key_storage, sync as storage};
 use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
@@ -1540,64 +1537,50 @@ impl SyncHttpError {
     }
 
     fn with_conflicts(mut self: Box<Self>, conflicts: &[storage::ConflictEntry]) -> Box<Self> {
-        self.body = encode_conflicts(&self.problem, conflicts).ok();
-        self
+        let response = api::SyncConflictProblem {
+            problem: self.problem.clone(),
+            conflicts: conflicts
+                .iter()
+                .map(|conflict| api::SyncConflictEntry {
+                    object_id: Uuid::from_bytes(conflict.object_id),
+                    current: conflict.current.clone().map(change_to_api),
+                })
+                .collect(),
+        };
+        match response.to_cbor() {
+            Ok(body) => {
+                self.body = Some(body);
+                self
+            }
+            Err(_) => Self::known(
+                &self.problem.instance,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sync.storage_unavailable",
+                "Sync service unavailable",
+                "The server could not construct the complete conflict response; no data changed and retrying may help.",
+                false,
+                true,
+            ),
+        }
     }
 }
 
 impl IntoResponse for Box<SyncHttpError> {
     fn into_response(self) -> Response {
-        let body = self.body.clone().unwrap_or_else(|| {
-            self.problem.to_cbor().expect("validated sync HTTP problem must encode")
-        });
+        let SyncHttpError { status, problem, body, retry_after } = *self;
+        let body = body
+            .unwrap_or_else(|| problem.to_cbor().expect("validated sync HTTP problem must encode"));
         let mut response = (
-            self.status,
+            status,
             [(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+cbor"))],
             body,
         )
             .into_response();
-        if let Some(retry_after) = self.retry_after {
+        if let Some(retry_after) = retry_after {
             response.headers_mut().insert(header::RETRY_AFTER, retry_after);
         }
         response
     }
-}
-
-fn encode_conflicts(
-    problem: &ProblemDetails,
-    conflicts: &[storage::ConflictEntry],
-) -> Result<Vec<u8>, String> {
-    let Value::Map(mut fields) =
-        cbor::decode(&problem.to_cbor().map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?
-    else {
-        return Err("problem details did not encode as a map".into());
-    };
-    // The pre-Stable extension keeps every stale object identifiable. A missing current row is
-    // represented by null so clients can distinguish it from a truncated conflict response.
-    let entries = conflicts
-        .iter()
-        .map(|conflict| {
-            let current = conflict.current.as_ref().map(|change| {
-                Value::Map(vec![
-                    (Value::UInt(1), Value::Bytes(change.object_id.to_vec())),
-                    (Value::UInt(2), Value::UInt(change.sequence)),
-                    (Value::UInt(3), Value::Bytes(change.envelope.clone())),
-                    (Value::UInt(4), Value::Bool(change.tombstone)),
-                    (
-                        Value::UInt(5),
-                        change.signer_device_id.map_or(Value::Null, |id| Value::Bytes(id.to_vec())),
-                    ),
-                ])
-            });
-            Value::Map(vec![
-                (Value::Text("object_id".into()), Value::Bytes(conflict.object_id.to_vec())),
-                (Value::Text("current".into()), current.unwrap_or(Value::Null)),
-            ])
-        })
-        .collect();
-    fields.push((Value::Text("conflicts".into()), Value::Array(entries)));
-    cbor::encode(&Value::Map(fields)).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -2972,7 +2955,9 @@ mod tests {
     async fn conflict_problem_contains_current_change_extension() {
         let (store, vault, device) = test_store().await;
         let app = router(store, TestAuthenticator::new(device, true));
-        let object = Uuid::now_v7();
+        let first_object = Uuid::now_v7();
+        let second_object = Uuid::now_v7();
+        let absent_object = Uuid::now_v7();
         let make_request = |batch: SyncWriteBatch| {
             request_headers(
                 Request::builder()
@@ -2984,65 +2969,103 @@ mod tests {
             .expect("request")
         };
         let first = SyncWriteBatch {
-            writes: vec![api::SyncWrite {
-                object_id: object,
-                base_seq: None,
-                payload: vec![1],
-                tombstone: false,
-            }],
+            writes: vec![
+                api::SyncWrite {
+                    object_id: first_object,
+                    base_seq: None,
+                    payload: vec![1],
+                    tombstone: false,
+                },
+                api::SyncWrite {
+                    object_id: second_object,
+                    base_seq: None,
+                    payload: vec![2],
+                    tombstone: false,
+                },
+            ],
         };
         assert_eq!(
             app.clone().oneshot(make_request(first)).await.expect("first").status(),
             StatusCode::OK
         );
         let stale = SyncWriteBatch {
-            writes: vec![api::SyncWrite {
-                object_id: object,
-                base_seq: None,
-                payload: vec![2],
-                tombstone: false,
-            }],
+            writes: vec![
+                api::SyncWrite {
+                    object_id: second_object,
+                    base_seq: None,
+                    payload: vec![3],
+                    tombstone: false,
+                },
+                api::SyncWrite {
+                    object_id: absent_object,
+                    base_seq: Some(1),
+                    payload: vec![4],
+                    tombstone: false,
+                },
+                api::SyncWrite {
+                    object_id: first_object,
+                    base_seq: None,
+                    payload: vec![5],
+                    tombstone: false,
+                },
+            ],
         };
-        let response = app.clone().oneshot(make_request(stale)).await.expect("conflict");
+        let response = app.oneshot(make_request(stale.clone())).await.expect("conflict");
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("conflict body");
-        let Value::Map(fields) = cbor::decode(&body).expect("problem cbor") else {
-            panic!("problem is map");
-        };
-        let conflicts = fields
-            .into_iter()
-            .find_map(|(key, value)| (key == Value::Text("conflicts".into())).then_some(value));
-        assert!(matches!(conflicts, Some(Value::Array(values)) if values.len() == 1));
+        let conflict = api::SyncConflictProblem::from_cbor(&body).expect("conflict problem");
+        conflict.validate_for_batch(&stale).expect("complete ordered conflict extension");
+        assert_eq!(conflict.problem.code.as_str(), "sync.conflict");
+        assert_eq!(
+            conflict.conflicts,
+            vec![
+                api::SyncConflictEntry {
+                    object_id: second_object,
+                    current: Some(api::SyncChange {
+                        object_id: second_object,
+                        seq: 2,
+                        payload: vec![2],
+                        tombstone: false,
+                        signer_device_id: Some(Uuid::from_bytes(device)),
+                    }),
+                },
+                api::SyncConflictEntry { object_id: absent_object, current: None },
+                api::SyncConflictEntry {
+                    object_id: first_object,
+                    current: Some(api::SyncChange {
+                        object_id: first_object,
+                        seq: 1,
+                        payload: vec![1],
+                        tombstone: false,
+                        signer_device_id: Some(Uuid::from_bytes(device)),
+                    }),
+                },
+            ]
+        );
+    }
 
-        let absent_object = Uuid::now_v7();
-        let absent = SyncWriteBatch {
-            writes: vec![api::SyncWrite {
-                object_id: absent_object,
-                base_seq: Some(1),
-                payload: vec![3],
-                tombstone: false,
+    #[tokio::test]
+    async fn invalid_stored_conflict_does_not_emit_partial_conflict_problem() {
+        let object_id = Uuid::now_v7().into_bytes();
+        let error = storage::SyncStoreError::Conflict {
+            conflicts: vec![storage::ConflictEntry {
+                object_id,
+                current: Some(storage::SyncChange {
+                    object_id,
+                    sequence: 0,
+                    envelope: vec![1],
+                    key_epoch: 1,
+                    tombstone: false,
+                    signer_device_id: None,
+                }),
             }],
         };
-        let response = app.oneshot(make_request(absent)).await.expect("absent conflict");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body =
-            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("absent conflict body");
-        let Value::Map(fields) = cbor::decode(&body).expect("absent conflict cbor") else {
-            panic!("problem is map");
-        };
-        let Some(Value::Array(entries)) = fields
-            .into_iter()
-            .find_map(|(key, value)| (key == Value::Text("conflicts".into())).then_some(value))
-        else {
-            panic!("conflict extension is missing");
-        };
-        assert_eq!(entries.len(), 1);
-        let Value::Map(entry) = &entries[0] else {
-            panic!("conflict entry is not a map");
-        };
-        assert!(entry.iter().any(|(key, value)| {
-            key == &Value::Text("current".into()) && value == &Value::Null
-        }));
+        let response = SyncHttpError::from_store(error, "test-conflict").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("storage problem");
+        assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+        assert!(api::SyncConflictProblem::from_cbor(&body).is_err());
     }
 
     #[tokio::test]
