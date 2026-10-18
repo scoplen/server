@@ -8,7 +8,7 @@ use std::{
 };
 
 use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig, sync::SyncCardinalityLimits};
-use scoplen_sync::http::WriteRateLimits;
+use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -195,6 +195,7 @@ impl Config {
         self.storage.kms.validate()?;
         self.sync.cardinality_limits().validate().map_err(ConfigError::Invalid)?;
         self.sync.write_rate_limits()?;
+        self.sync.write_body_limits()?;
         Ok(())
     }
 
@@ -344,7 +345,7 @@ impl Default for RoleSettings {
     }
 }
 
-/// Sync cardinality and per-device write-rate limits advertised by the session.
+/// Sync cardinality, object-write body, and per-device write-rate limits.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -359,18 +360,28 @@ pub struct SyncSettings {
     pub write_requests_per_second: u64,
     /// Maximum object-write tokens held by one device bucket.
     pub write_burst: u64,
+    /// Maximum opaque envelope bytes in one object write.
+    pub max_envelope_bytes: u64,
+    /// Maximum objects in one write batch.
+    pub max_batch_objects: u64,
+    /// Maximum encoded CBOR bytes in one write batch.
+    pub max_batch_bytes: u64,
 }
 
 impl Default for SyncSettings {
     fn default() -> Self {
         let limits = SyncCardinalityLimits::default();
         let write_rate = WriteRateLimits::default();
+        let write_body = WriteBodyLimits::default();
         Self {
             max_objects_per_vault: limits.max_objects_per_vault,
             max_shared_vaults_per_account: limits.max_shared_vaults_per_account,
             max_members_per_shared_vault: limits.max_members_per_shared_vault,
             write_requests_per_second: write_rate.requests_per_second(),
             write_burst: write_rate.burst(),
+            max_envelope_bytes: write_body.max_envelope_bytes(),
+            max_batch_objects: write_body.max_batch_objects(),
+            max_batch_bytes: write_body.max_batch_bytes(),
         }
     }
 }
@@ -410,6 +421,25 @@ impl SyncSettings {
                 ConfigError::Invalid("SPL_SYNC_WRITE_BURST must be an unsigned integer".into())
             })?;
         }
+        if let Some(value) = env_value("SPL_SYNC_MAX_ENVELOPE_BYTES") {
+            self.max_envelope_bytes = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_ENVELOPE_BYTES must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_MAX_BATCH_OBJECTS") {
+            self.max_batch_objects = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_BATCH_OBJECTS must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_MAX_BATCH_BYTES") {
+            self.max_batch_bytes = value.parse().map_err(|_| {
+                ConfigError::Invalid("SPL_SYNC_MAX_BATCH_BYTES must be an unsigned integer".into())
+            })?;
+        }
         Ok(())
     }
 
@@ -424,6 +454,12 @@ impl SyncSettings {
     /// Return the validated settings to pass when mounting the authenticated K-4 router.
     pub(crate) fn write_rate_limits(&self) -> Result<WriteRateLimits, ConfigError> {
         WriteRateLimits::new(self.write_requests_per_second, self.write_burst)
+            .map_err(ConfigError::Invalid)
+    }
+
+    /// Return validated write bounds for the authenticated K-4 router.
+    pub(crate) fn write_body_limits(&self) -> Result<WriteBodyLimits, ConfigError> {
+        WriteBodyLimits::new(self.max_envelope_bytes, self.max_batch_objects, self.max_batch_bytes)
             .map_err(ConfigError::Invalid)
     }
 }
@@ -745,6 +781,34 @@ mod tests {
         assert!(
             config.validate().expect_err("zero burst").to_string().contains("sync.write_burst")
         );
+    }
+
+    #[test]
+    fn sync_write_body_settings_validate_and_reach_router_settings() {
+        let mut config: Config = toml::from_str(
+            "[sync]\nmax_envelope_bytes = 2\nmax_batch_objects = 1\nmax_batch_bytes = 100\n",
+        )
+        .expect("parse write body settings");
+        config.validate().expect("lower write bounds");
+        let limits = config.sync.write_body_limits().expect("router settings");
+        assert_eq!(limits.max_envelope_bytes(), 2);
+        assert_eq!(limits.max_batch_objects(), 1);
+        assert_eq!(limits.max_batch_bytes(), 100);
+
+        for (name, invalid) in [
+            ("max_envelope_bytes", [0, 1, 100]),
+            ("max_batch_objects", [2, 0, 100]),
+            ("max_batch_bytes", [2, 1, 0]),
+            ("max_envelope_bytes", [scoplen_sync::MAX_ENVELOPE_BYTES as u64 + 1, 1, 100]),
+            ("max_batch_objects", [2, scoplen_sync::MAX_BATCH_OBJECTS as u64 + 1, 100]),
+            ("max_batch_bytes", [2, 1, scoplen_sync::MAX_BATCH_BYTES as u64 + 1]),
+        ] {
+            config.sync.max_envelope_bytes = invalid[0];
+            config.sync.max_batch_objects = invalid[1];
+            config.sync.max_batch_bytes = invalid[2];
+            assert!(config.validate().expect_err("invalid write bound").to_string().contains(name));
+        }
+        Config::default().validate().expect("default write bounds");
     }
 
     #[test]
