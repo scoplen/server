@@ -19,7 +19,7 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, RawQuery, State},
+    extract::{Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -40,6 +40,8 @@ pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
 pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
 // A one-entry CBOR map, the text key "cursor", and the largest encoded u64.
 const MAX_ACK_REQUEST_BYTES: usize = 1 + 7 + 9;
+// "after=" + 20-digit u64 + "&" + "limit=" + four-digit 1000, in either order.
+const MAX_SYNC_PAGE_QUERY_BYTES: usize = 6 + 20 + 1 + 6 + 4;
 /// Default authenticated object-write refill rate advertised by the session handshake.
 pub const WRITE_REQUESTS_PER_SECOND: u64 = 50;
 /// Default authenticated object-write burst advertised by the session handshake.
@@ -1067,7 +1069,6 @@ async fn keys_put<A: SyncAuthenticator>(
 async fn changes<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
-    RawQuery(query): RawQuery,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -1076,7 +1077,7 @@ async fn changes<A: SyncAuthenticator>(
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
         authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance)?;
-    let query = parse_query(query, &instance)?;
+    let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
         .sync_changes(vault, query.after, query.limit)
@@ -1099,7 +1100,6 @@ async fn changes<A: SyncAuthenticator>(
 async fn snapshot<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
-    RawQuery(query): RawQuery,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -1108,7 +1108,7 @@ async fn snapshot<A: SyncAuthenticator>(
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
         authorize(&state, &method, &uri, &headers, vault, SyncOperation::Snapshot, &instance)?;
-    let query = parse_query(query, &instance)?;
+    let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
         .sync_snapshot(vault, query.after, query.limit)
@@ -1361,10 +1361,13 @@ fn authorize<A: SyncAuthenticator>(
     Ok(identity)
 }
 
-fn parse_query(raw: Option<String>, instance: &str) -> SyncResult<api::SyncChangesQuery> {
+fn parse_query(raw: Option<&str>, instance: &str) -> SyncResult<api::SyncChangesQuery> {
     let raw =
         raw.ok_or_else(|| SyncHttpError::invalid(instance, "after and limit are required"))?;
-    api::SyncChangesQuery::from_query(&raw)
+    if raw.len() > MAX_SYNC_PAGE_QUERY_BYTES {
+        return Err(SyncHttpError::invalid(instance, "sync page query is too long"));
+    }
+    api::SyncChangesQuery::from_query(raw)
         .map_err(|error| SyncHttpError::invalid(instance, format!("invalid sync query: {error}")))
 }
 
@@ -4013,6 +4016,84 @@ mod tests {
         let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("ahead body");
         let problem = ProblemDetails::from_cbor(&body).expect("ahead problem");
         assert_eq!(problem.code.as_str(), "sync.cursor_ahead");
+    }
+
+    #[tokio::test]
+    async fn page_queries_are_bounded_after_authentication_on_both_read_routes() {
+        let (store, vault, device) = test_store().await;
+        let before_changes = store.sync_changes(vault, 0, 1).await.expect("initial changes");
+        let before_snapshot = store.sync_snapshot(vault, 0, 1).await.expect("initial snapshot");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+
+        let max_queries =
+            [format!("after={}&limit=1000", u64::MAX), format!("limit=1000&after={}", u64::MAX)];
+        for query in &max_queries {
+            assert_eq!(query.len(), MAX_SYNC_PAGE_QUERY_BYTES);
+            assert_eq!(
+                parse_query(Some(query), "test").expect("maximum canonical query"),
+                api::SyncChangesQuery { after: u64::MAX, limit: 1000 }
+            );
+        }
+        let too_long = format!("{}&", max_queries[0]);
+        assert_eq!(too_long.len(), MAX_SYNC_PAGE_QUERY_BYTES + 1);
+        let very_long = format!("after=0&limit=1&{}", "x".repeat(4096));
+
+        for endpoint in ["changes", "snapshot"] {
+            let request = |query: &str, authenticated: bool| {
+                let builder = Request::builder()
+                    .uri(format!("/sync/v1/vaults/{}/{endpoint}?{query}", path(vault)));
+                let builder = if authenticated { request_headers(builder) } else { builder };
+                builder.body(Body::empty()).expect("page request")
+            };
+
+            for query in &max_queries {
+                let response =
+                    app.clone().oneshot(request(query, true)).await.expect("max query response");
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
+                assert_eq!(
+                    ProblemDetails::from_cbor(&bytes).expect("cursor problem").code.as_str(),
+                    "sync.cursor_ahead"
+                );
+            }
+
+            for query in [too_long.as_str(), very_long.as_str(), "after=00&limit=1"] {
+                let response = app
+                    .clone()
+                    .oneshot(request(query, true))
+                    .await
+                    .expect("invalid query response");
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    response.headers().get(header::CONTENT_TYPE).unwrap(),
+                    "application/problem+cbor"
+                );
+                let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
+                let problem = ProblemDetails::from_cbor(&bytes).expect("invalid query problem");
+                assert_eq!(problem.code.as_str(), "sync.invalid_request");
+                assert!(!problem.changed);
+                assert!(!problem.retryable);
+                assert_eq!(
+                    problem.detail.contains("too long"),
+                    query.len() > MAX_SYNC_PAGE_QUERY_BYTES
+                );
+            }
+
+            let response = app
+                .clone()
+                .oneshot(request(&very_long, false))
+                .await
+                .expect("unauthenticated response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("auth body");
+            assert_eq!(
+                ProblemDetails::from_cbor(&bytes).expect("auth problem").code.as_str(),
+                "auth.authentication_required"
+            );
+
+            assert_eq!(store.sync_changes(vault, 0, 1).await.expect("changes"), before_changes);
+            assert_eq!(store.sync_snapshot(vault, 0, 1).await.expect("snapshot"), before_snapshot);
+        }
     }
 
     #[tokio::test]
