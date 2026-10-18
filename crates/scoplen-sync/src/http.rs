@@ -841,7 +841,7 @@ async fn retire_vault_epoch<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
@@ -855,12 +855,12 @@ async fn retire_vault_epoch<A: SyncAuthenticator>(
         SyncOperation::RetireVaultEpoch,
         &instance,
     )?;
-    if !body.is_empty() {
-        return Err(SyncHttpError::invalid(
+    to_bytes(body, 0).await.map_err(|_| {
+        SyncHttpError::invalid(
             &instance,
             "shared-vault epoch retirement does not accept a request body",
-        ));
-    }
+        )
+    })?;
     state
         .store
         .retire_shared_sync_vault_epoch(vault, epoch)
@@ -929,7 +929,7 @@ async fn remove_vault_member<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
@@ -943,12 +943,12 @@ async fn remove_vault_member<A: SyncAuthenticator>(
         SyncOperation::RemoveVaultMember,
         &instance,
     )?;
-    if !body.is_empty() {
-        return Err(SyncHttpError::invalid(
+    to_bytes(body, 0).await.map_err(|_| {
+        SyncHttpError::invalid(
             &instance,
             "shared-vault member removal does not accept a request body",
-        ));
-    }
+        )
+    })?;
     state
         .store
         .remove_shared_sync_vault_member(vault, account_id)
@@ -2950,6 +2950,91 @@ mod tests {
         let keys =
             store.get_shared_sync_vault_keys(vault.into_bytes(), account).await.expect("keys");
         assert_eq!(keys, vec![storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![2] }]);
+    }
+
+    #[tokio::test]
+    async fn bodyless_vault_mutations_reject_data_without_changing_state() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let admin = TestAuthenticator::account_id();
+        let member = Uuid::now_v7();
+        store.create_shared_sync_vault(vault.into_bytes(), admin, &[1]).await.expect("vault");
+        store
+            .publish_shared_sync_vault_epoch(
+                vault.into_bytes(),
+                2,
+                &[storage::SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+            )
+            .await
+            .expect("second epoch");
+        store
+            .add_shared_sync_vault_member(
+                vault.into_bytes(),
+                member.into_bytes(),
+                &[
+                    storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] },
+                    storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4] },
+                ],
+            )
+            .await
+            .expect("member");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let routes = [
+            (Method::POST, format!("/sync/v1/vaults/{vault}/epochs/1/retire")),
+            (Method::DELETE, format!("/sync/v1/vaults/{vault}/members/{member}")),
+        ];
+
+        for (method, uri) in routes {
+            for size in [1, MAX_REQUEST_BYTES + 1] {
+                let request = request_headers(Request::builder().method(method.clone()).uri(&uri))
+                    .body(Body::from(vec![1; size]))
+                    .expect("non-empty request");
+                let response = app.clone().oneshot(request).await.expect("body rejection");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{method} {uri}, {size} bytes"
+                );
+                assert_eq!(
+                    response.headers().get(header::CONTENT_TYPE).unwrap(),
+                    "application/problem+cbor"
+                );
+                let bytes =
+                    to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+                let problem = ProblemDetails::from_cbor(&bytes).expect("CBOR problem");
+                assert_eq!(problem.code.as_str(), "sync.invalid_request");
+                assert!(!problem.changed);
+                assert!(!problem.retryable);
+            }
+
+            let unauthenticated = Request::builder()
+                .method(method.clone())
+                .uri(&uri)
+                .body(Body::from(vec![1; MAX_REQUEST_BYTES + 1]))
+                .expect("unauthenticated request");
+            let response = app.clone().oneshot(unauthenticated).await.expect("auth response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("auth body");
+            assert_eq!(
+                ProblemDetails::from_cbor(&bytes).expect("auth problem").code.as_str(),
+                "auth.authentication_required"
+            );
+
+            assert_eq!(
+                store
+                    .get_shared_sync_vault_keys(vault.into_bytes(), member.into_bytes())
+                    .await
+                    .expect("member keys"),
+                vec![
+                    storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] },
+                    storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4] },
+                ]
+            );
+            let vaults = store.list_sync_vaults_for_account(admin).await.expect("admin vaults");
+            assert_eq!(vaults.len(), 1);
+            assert_eq!(vaults[0].key_epoch, 2);
+            assert!(!vaults[0].rotation_pending);
+        }
     }
 
     #[tokio::test]
