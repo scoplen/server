@@ -19,8 +19,8 @@ pub const MAX_KEY_ARTIFACT_BYTES: usize = 64 * 1024;
 pub const MAX_DEVICE_WRAPS: usize = 1_000;
 /// Maximum encoded HTTP request or response body for account key bundles.
 ///
-/// The protocol codec is responsible for checking the exact deterministic CBOR length.  This
-/// constant is exported so the HTTP layer can apply the same boundary before decoding.
+/// The protocol codec validates encoded bodies, and storage mutations check each projected GET
+/// response before committing. The HTTP layer also uses this bound before decoding requests.
 pub const MAX_KEY_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 
 /// A 16-byte account identifier.
@@ -212,7 +212,8 @@ impl SqliteStore {
     ///
     /// Returns a validation error for an invalid artifact or device-wrap set,
     /// [`AccountKeyStoreError::Conflict`] for a stale, skipped, or non-identical replayed
-    /// revision, or [`AccountKeyStoreError::Database`] when SQLite cannot commit the update.
+    /// revision, [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would
+    /// exceed the wire bound, or [`AccountKeyStoreError::Database`] when SQLite cannot commit.
     pub async fn put_account_key_bundle(
         &self,
         account_id: AccountId,
@@ -299,8 +300,9 @@ impl SqliteStore {
     ///
     /// # Errors
     ///
-    /// Returns a validation error when a statement is empty or exceeds the artifact limit, or a
-    /// database error when the replacement transaction cannot commit.
+    /// Returns a validation error when a statement is empty or exceeds the artifact limit,
+    /// [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would exceed
+    /// the wire bound, or a database error when the replacement transaction cannot commit.
     pub async fn replace_account_key_statements(
         &self,
         account_id: AccountId,
@@ -424,7 +426,8 @@ impl PostgresStore {
     ///
     /// Returns a validation error for an invalid artifact or device-wrap set,
     /// [`AccountKeyStoreError::Conflict`] for a stale, skipped, or non-identical replayed
-    /// revision, or [`AccountKeyStoreError::Database`] when PostgreSQL cannot commit the update.
+    /// revision, [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would
+    /// exceed the wire bound, or [`AccountKeyStoreError::Database`] when PostgreSQL cannot commit.
     pub async fn put_account_key_bundle(
         &self,
         account_id: AccountId,
@@ -514,8 +517,9 @@ impl PostgresStore {
     ///
     /// # Errors
     ///
-    /// Returns a validation error when a statement is empty or exceeds the artifact limit, or a
-    /// database error when the replacement transaction cannot commit.
+    /// Returns a validation error when a statement is empty or exceeds the artifact limit,
+    /// [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would exceed
+    /// the wire bound, or a database error when the replacement transaction cannot commit.
     pub async fn replace_account_key_statements(
         &self,
         account_id: AccountId,
