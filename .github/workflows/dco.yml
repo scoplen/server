@@ -14,6 +14,9 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
+      - name: Check DCO event ranges
+        shell: bash
+        run: bash scripts/test-dco.sh
       - name: Verify commit sign-offs
         shell: bash
         env:
@@ -21,18 +24,5 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            range="$BASE_SHA..$HEAD_SHA"
-          elif [[ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
-            range="$BEFORE_SHA..$HEAD_SHA"
-          else
-            range="$HEAD_SHA"
-          fi
-          while read -r commit; do
-            if ! git show -s --format=%B "$commit" | grep -Fq "Signed-off-by:"; then
-              echo "missing Signed-off-by trailer in $commit"
-              exit 1
-            fi
-          done < <(git rev-list "$range")
+          DCO_IMPORT_BASELINE: 38d1269fb0bccc57cdf850a6cfcba9fffd24b13e
+        run: bash scripts/verify-dco.sh

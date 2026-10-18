@@ -872,7 +872,23 @@ async fn postgres_foreign_keys(
     table: &str,
 ) -> Result<BTreeSet<ForeignKeyShape>, String> {
     let rows = sqlx::query(
-        "SELECT kcu.column_name AS source_column, ccu.table_name AS target_table, ccu.column_name AS target_column FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema AND kcu.table_name = tc.table_name JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.constraint_schema = tc.constraint_schema WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND tc.table_name = $1",
+        "SELECT source_attribute.attname AS source_column,
+                target_relation.relname AS target_table,
+                target_attribute.attname AS target_column
+         FROM pg_constraint fk
+         JOIN pg_class source_relation ON source_relation.oid = fk.conrelid
+         JOIN pg_namespace source_schema ON source_schema.oid = source_relation.relnamespace
+         JOIN pg_class target_relation ON target_relation.oid = fk.confrelid
+         CROSS JOIN LATERAL unnest(fk.conkey, fk.confkey)
+             AS key_pair(source_attnum, target_attnum)
+         JOIN pg_attribute source_attribute
+             ON source_attribute.attrelid = source_relation.oid
+            AND source_attribute.attnum = key_pair.source_attnum
+         JOIN pg_attribute target_attribute
+             ON target_attribute.attrelid = target_relation.oid
+            AND target_attribute.attnum = key_pair.target_attnum
+         WHERE fk.contype = 'f' AND source_schema.nspname = 'public'
+           AND source_relation.relname = $1",
     )
     .bind(table)
     .fetch_all(pool)
@@ -1148,7 +1164,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 6);
+        assert_eq!(migration_count, 8);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1157,7 +1173,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 6);
+        assert_eq!(replay_count, 8);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
@@ -1253,13 +1269,21 @@ mod tests {
             .enqueue_job(job_id, "postgres-parity", b"payload", 0)
             .await
             .expect("enqueue PostgreSQL job");
+        let created_at_ms: i64 = sqlx::query_scalar("SELECT created_at_ms FROM jobs WHERE id = $1")
+            .bind(job_id.as_slice())
+            .fetch_one(reopened.pool())
+            .await
+            .expect("read PostgreSQL job creation time");
         let claimed = reopened
-            .claim_job("postgres-worker", 1, 1_000)
+            .claim_job("postgres-worker", created_at_ms, 1_000)
             .await
             .expect("claim PostgreSQL job")
             .expect("PostgreSQL job is available");
         assert_eq!(claimed.id, job_id);
-        reopened.complete_job(job_id, "postgres-worker", 2).await.expect("complete PostgreSQL job");
+        reopened
+            .complete_job(job_id, "postgres-worker", created_at_ms + 1)
+            .await
+            .expect("complete PostgreSQL job");
         sqlx::query("DELETE FROM sync_account_key_bundles WHERE account_id = $1")
             .bind(account.as_slice())
             .execute(reopened.pool())

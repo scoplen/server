@@ -7,6 +7,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 - Enforced the fixed 4 MiB account-key GET response limit during bundle updates and statement
   replacement for every device wrap. Oversized projections roll back atomically and PUT returns
   `413 sync.quota_exceeded`; exact 4 MiB responses remain readable.
+- Fixed PostgreSQL schema verification for composite foreign keys by pairing referenced columns
+  with their source columns in constraint order, and synchronized its migration-count and job-time
+  assertions with current migrations and queue behavior.
+- Made KMS test key files unique across parallel tests so one test cannot overwrite another's
+  fixture on platforms with coarse clock resolution.
+- Require rustls 0.23.46 and update the server lockfile for the same TLS advisories
+  addressed in the shared protocol workspace (RUSTSEC-2026-0346 through RUSTSEC-2026-0349).
 - Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
   hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
   coverage. Database-backed role preparation now loads this backend before startup. Cloud
