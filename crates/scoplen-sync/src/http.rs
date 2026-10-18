@@ -46,11 +46,52 @@ pub const WRITE_BURST: u64 = 200;
 const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const TOKEN_SCALE: u128 = 1_000_000_000;
 
+/// Positive per-device object-write token bucket settings for one router.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriteRateLimits {
+    requests_per_second: u64,
+    burst: u64,
+}
+
+impl WriteRateLimits {
+    /// Validate and construct the effective write rate advertised to clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns the invalid setting when either value is zero.
+    pub fn new(requests_per_second: u64, burst: u64) -> Result<Self, String> {
+        if requests_per_second == 0 {
+            return Err("sync.write_requests_per_second must be positive".into());
+        }
+        if burst == 0 {
+            return Err("sync.write_burst must be positive".into());
+        }
+        Ok(Self { requests_per_second, burst })
+    }
+
+    /// Requests added to one device's bucket per second.
+    #[must_use]
+    pub fn requests_per_second(self) -> u64 {
+        self.requests_per_second
+    }
+
+    /// Maximum requests that one device may spend without refilling.
+    #[must_use]
+    pub fn burst(self) -> u64 {
+        self.burst
+    }
+}
+
+impl Default for WriteRateLimits {
+    fn default() -> Self {
+        Self { requests_per_second: WRITE_REQUESTS_PER_SECOND, burst: WRITE_BURST }
+    }
+}
+
 #[derive(Clone)]
 struct WriteRateLimiter {
     buckets: Arc<Mutex<HashMap<storage::DeviceId, WriteBucket>>>,
-    refill_per_second: u64,
-    burst: u64,
+    limits: WriteRateLimits,
 }
 
 #[derive(Clone, Copy)]
@@ -60,13 +101,8 @@ struct WriteBucket {
 }
 
 impl WriteRateLimiter {
-    fn new(refill_per_second: u64, burst: u64) -> Self {
-        assert!(refill_per_second > 0 && burst > 0, "write rate limits must be positive");
-        Self { buckets: Arc::new(Mutex::new(HashMap::new())), refill_per_second, burst }
-    }
-
-    fn default_limits() -> Self {
-        Self::new(WRITE_REQUESTS_PER_SECOND, WRITE_BURST)
+    fn new(limits: WriteRateLimits) -> Self {
+        Self { buckets: Arc::new(Mutex::new(HashMap::new())), limits }
     }
 
     fn try_acquire(&self, device_id: storage::DeviceId) -> Result<(), u64> {
@@ -76,12 +112,12 @@ impl WriteRateLimiter {
     fn try_acquire_at(&self, device_id: storage::DeviceId, now: Instant) -> Result<(), u64> {
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         let bucket = buckets.entry(device_id).or_insert(WriteBucket {
-            tokens: u128::from(self.burst).saturating_mul(TOKEN_SCALE),
+            tokens: u128::from(self.limits.burst).saturating_mul(TOKEN_SCALE),
             last_refill: now,
         });
         let elapsed_nanos = now.duration_since(bucket.last_refill).as_nanos();
-        let refill = elapsed_nanos.saturating_mul(u128::from(self.refill_per_second));
-        let capacity = u128::from(self.burst).saturating_mul(TOKEN_SCALE);
+        let refill = elapsed_nanos.saturating_mul(u128::from(self.limits.requests_per_second));
+        let capacity = u128::from(self.limits.burst).saturating_mul(TOKEN_SCALE);
         bucket.tokens = bucket.tokens.saturating_add(refill).min(capacity);
         bucket.last_refill = now;
         if bucket.tokens >= TOKEN_SCALE {
@@ -89,7 +125,7 @@ impl WriteRateLimiter {
             return Ok(());
         }
         let deficit = TOKEN_SCALE - bucket.tokens;
-        let rate = u128::from(self.refill_per_second);
+        let rate = u128::from(self.limits.requests_per_second);
         let refill_per_second = rate.saturating_mul(TOKEN_SCALE);
         let wait_seconds = deficit.saturating_add(refill_per_second - 1) / refill_per_second;
         Err(u64::try_from(wait_seconds).unwrap_or(u64::MAX).max(1))
@@ -326,16 +362,25 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
     authenticator: A,
     notifications: NotificationHub,
 ) -> Router {
-    router_with_write_rate(store, authenticator, notifications, WriteRateLimiter::default_limits())
+    router_with_write_rate_limits(store, authenticator, notifications, WriteRateLimits::default())
 }
 
-fn router_with_write_rate<A: SyncAuthenticator>(
+/// Build a sync router whose session advertises its enforced per-device write rate.
+///
+/// `write_rate_limits` must be constructed with [`WriteRateLimits::new`] or its default. Each
+/// router owns a process-local bucket map; cross-instance admission is not provided here.
+pub fn router_with_write_rate_limits<A: SyncAuthenticator>(
     store: Arc<SqliteStore>,
     authenticator: A,
     notifications: NotificationHub,
-    write_rate_limiter: WriteRateLimiter,
+    write_rate_limits: WriteRateLimits,
 ) -> Router {
-    let state = SyncHttpState { store, authenticator, notifications, write_rate_limiter };
+    let state = SyncHttpState {
+        store,
+        authenticator,
+        notifications,
+        write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
+    };
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
@@ -450,8 +495,8 @@ async fn session<A: SyncAuthenticator>(
             max_objects_per_vault: cardinality_limits.max_objects_per_vault,
             max_shared_vaults_per_account: cardinality_limits.max_shared_vaults_per_account,
             max_members_per_shared_vault: cardinality_limits.max_members_per_shared_vault,
-            write_requests_per_second: state.write_rate_limiter.refill_per_second,
-            write_burst: state.write_rate_limiter.burst,
+            write_requests_per_second: state.write_rate_limiter.limits.requests_per_second(),
+            write_burst: state.write_rate_limiter.limits.burst(),
         },
         vaults,
     };
@@ -1884,7 +1929,7 @@ mod tests {
 
     #[test]
     fn write_rate_bucket_enforces_burst_refill_and_device_isolation() {
-        let limiter = WriteRateLimiter::new(2, 3);
+        let limiter = WriteRateLimiter::new(WriteRateLimits::new(2, 3).expect("valid rate limits"));
         let now = Instant::now();
         for _ in 0..3 {
             assert_eq!(limiter.try_acquire_at([1; 16], now), Ok(()));
@@ -1896,15 +1941,70 @@ mod tests {
         assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_secs(10)), Ok(()));
     }
 
+    #[test]
+    fn write_rate_limits_reject_zero_and_support_positive_boundaries() {
+        assert!(WriteRateLimits::new(0, 1).unwrap_err().contains("write_requests_per_second"));
+        assert!(WriteRateLimits::new(1, 0).unwrap_err().contains("write_burst"));
+        let minimum = WriteRateLimits::new(1, 1).expect("minimum limits");
+        let now = Instant::now();
+        let limiter = WriteRateLimiter::new(minimum);
+        assert_eq!(limiter.try_acquire_at([1; 16], now), Ok(()));
+        assert_eq!(limiter.try_acquire_at([1; 16], now), Err(1));
+        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_secs(1)), Ok(()));
+
+        let maximum = WriteRateLimits::new(u64::MAX, u64::MAX).expect("unsigned limits");
+        assert_eq!(maximum.requests_per_second(), u64::MAX);
+        assert_eq!(maximum.burst(), u64::MAX);
+        let limiter =
+            WriteRateLimiter::new(WriteRateLimits::new(u64::MAX, 1).expect("maximum refill rate"));
+        assert_eq!(limiter.try_acquire_at([2; 16], now), Ok(()));
+        assert_eq!(limiter.try_acquire_at([2; 16], now), Err(1));
+        assert_eq!(limiter.try_acquire_at([2; 16], now + Duration::from_nanos(1)), Ok(()));
+    }
+
     #[tokio::test]
     async fn object_write_rate_rejects_before_reading_body_and_preserves_state() {
-        let (store, vault, device) = test_store().await;
-        let app = router_with_write_rate(
+        let directory = std::env::temp_dir().join(format!("scoplen-http-rate-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("create isolated test directory");
+        let store = Arc::new(
+            SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store"),
+        );
+        let vault = Uuid::now_v7().into_bytes();
+        let device = Uuid::now_v7().into_bytes();
+        store.create_sync_vault(vault, storage::VaultKind::Personal).await.expect("create vault");
+        let limits = WriteRateLimits::new(1, 2).expect("valid rate limits");
+        let app = router_with_write_rate_limits(
             store.clone(),
             TestAuthenticator::new(device, true),
             NotificationHub::default(),
-            WriteRateLimiter::new(1, 2),
+            limits,
         );
+        let session_request = api::SyncSessionRequest {
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            model_version: CURRENT_SCHEMA_VERSION,
+            device_id: Uuid::from_bytes(device),
+        }
+        .to_cbor()
+        .expect("session request");
+        let session_response = app
+            .clone()
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/sync/v1/session")
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(session_request))
+                .expect("session request builder"),
+            )
+            .await
+            .expect("session response");
+        assert_eq!(session_response.status(), StatusCode::OK);
+        let body = to_bytes(session_response.into_body(), MAX_REQUEST_BYTES).await.unwrap();
+        let advertised = api::SyncSessionResponse::from_cbor(&body).expect("session cbor").limits;
+        assert_eq!(advertised.write_requests_per_second, limits.requests_per_second());
+        assert_eq!(advertised.write_burst, limits.burst());
         let make_request = |authorized: bool, body: Vec<u8>| {
             let builder = Request::builder()
                 .method("POST")
@@ -1936,6 +2036,9 @@ mod tests {
         assert!(!problem.changed);
         assert!(problem.retryable);
         assert_eq!(store.sync_changes(vault, 0, 1).await.expect("changes").changes.len(), 0);
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&directory).await;
     }
 
     #[tokio::test]
@@ -2106,6 +2209,7 @@ mod tests {
         assert_eq!(advertised.max_members_per_shared_vault, limits.max_members_per_shared_vault);
         assert_eq!(advertised.max_batch_objects, storage::MAX_BATCH_OBJECTS as u64);
         assert_eq!(advertised.write_requests_per_second, WRITE_REQUESTS_PER_SECOND);
+        assert_eq!(advertised.write_burst, WRITE_BURST);
         store.pool().close().await;
         drop(store);
         remove_test_directory(&directory).await;

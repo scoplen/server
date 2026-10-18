@@ -2680,6 +2680,7 @@ dependencies = [
  "rustls-pemfile",
  "scoplen-audit",
  "scoplen-store",
+ "scoplen-sync",
  "serde",
  "sqlx",
  "thiserror 2.0.21",

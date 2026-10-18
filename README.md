@@ -39,7 +39,7 @@ validation and streaming/multipart operations; database-backed roles initialize 
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, configurable wire/body
-and rate limits, control, gateway, and console behavior are still
+limits, control, gateway, and console behavior are still
 roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
 hashing, same-transaction append helpers, checkpoint payload construction, durable checkpoints,
 and chain verification. The worker signs an advanced chain head at most hourly with an independent
@@ -58,11 +58,11 @@ are 100,000 current objects per vault (including tombstones), 1,000 shared vault
 account, and 1,000 accounts per shared vault. The K-4 session advertises the values enforced by
 that store, and quota rejection returns `413 sync.quota_exceeded` without changing state. Member
 limits cannot exceed 1,000 because epoch publication requires one key wrap per member and the
-current wire codec accepts at most 1,000 wraps. Per-device write-rate enforcement remains
-process-local at the advertised default of 50 requests per second with a burst of 200; an
-exhausted authenticated device bucket returns `429 sync.rate_limited` and `Retry-After`.
-Deployment-configurable wire/body and rate limits and multi-instance rate admission remain roadmap
-work.
+current wire codec accepts at most 1,000 wraps. The authenticated K-4 router enforces configured
+per-device write rates in a process-local token bucket and advertises those same values in the
+session (defaults: 50 requests per second, burst 200). An exhausted bucket returns
+`429 sync.rate_limited` and `Retry-After`. Deployment-configurable wire/body limits and
+multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
 owner using the shared `{keys}` response shape. Enrollment wiring, production identity, and
@@ -124,6 +124,10 @@ Set the three `[sync]` cardinality values in `spl-server.example.toml` or overri
 `SPL_SYNC_MAX_MEMBERS_PER_SHARED_VAULT`. Values must be positive; object and account limits must fit
 SQLite's signed count range, and the member limit must be at most 1,000. The baseline listener does
 not mount the K-4 router until production identity is available.
+Set `sync.write_requests_per_second` and `sync.write_burst` in the same file, or use
+`SPL_SYNC_WRITE_REQUESTS_PER_SECOND` and `SPL_SYNC_WRITE_BURST`. Both values must be positive. The
+authenticated K-4 router takes the validated write-rate settings when it is mounted; limits are
+enforced per process until shared admission is implemented.
 
 ## Security
 

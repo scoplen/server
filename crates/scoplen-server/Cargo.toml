@@ -20,6 +20,7 @@ rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
 scoplen-store = { path = "../scoplen-store" }
+scoplen-sync = { path = "../scoplen-sync" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
