@@ -5,8 +5,8 @@ use std::{path::PathBuf, time::Duration};
 use scoplen_store::{
     RelationalStore, SqliteStore,
     account_keys::{
-        AccountKeyBundlePut, AccountKeyBundleUpdate, AccountKeyStoreError, DeviceWrap,
-        MAX_DEVICE_WRAPS, MAX_KEY_ARTIFACT_BYTES,
+        AccountKeyBundlePreflight, AccountKeyBundlePut, AccountKeyBundleUpdate,
+        AccountKeyStoreError, DeviceWrap, MAX_DEVICE_WRAPS, MAX_KEY_ARTIFACT_BYTES,
     },
 };
 
@@ -108,6 +108,91 @@ async fn revision_replay_is_exact_and_conflicts_leave_state_unchanged() {
     let current = store.get_account_key_bundle(account, [1; 16]).await.expect("current bundle");
     assert_eq!(current.revision, 1);
     assert_eq!(current.account_kem_key, vec![20, 4]);
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn preflight_classifies_exact_replay_and_final_put_rechecks_a_new_revision() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let account = [13; 16];
+    let first = update(1, 20);
+    assert_eq!(
+        store
+            .preflight_account_key_bundle_update(account, &first)
+            .await
+            .expect("initial preflight"),
+        AccountKeyBundlePreflight::New
+    );
+    assert!(matches!(
+        store.preflight_account_key_bundle_update(account, &update(2, 21)).await,
+        Err(AccountKeyStoreError::Conflict { current_revision: 0 })
+    ));
+    assert!(matches!(
+        store.preflight_account_key_bundle_update(account, &update(0, 21)).await,
+        Err(AccountKeyStoreError::InvalidRevision)
+    ));
+    store.put_account_key_bundle(account, &first).await.expect("initial put");
+    assert_eq!(
+        store.preflight_account_key_bundle_update(account, &first).await.expect("exact preflight"),
+        AccountKeyBundlePreflight::Replay
+    );
+    for changed in [
+        {
+            let mut value = first.clone();
+            value.account_signing_key.push(1);
+            value
+        },
+        {
+            let mut value = first.clone();
+            value.account_kem_key.push(1);
+            value
+        },
+        {
+            let mut value = first.clone();
+            value.recovery_blob.push(1);
+            value
+        },
+        {
+            let mut value = first.clone();
+            value.signature[0] ^= 1;
+            value
+        },
+        {
+            let mut value = first.clone();
+            value.device_wraps[1].wrapped_ark.push(1);
+            value
+        },
+    ] {
+        assert!(matches!(
+            store.preflight_account_key_bundle_update(account, &changed).await,
+            Err(AccountKeyStoreError::Conflict { current_revision: 1 })
+        ));
+    }
+    assert_eq!(
+        store
+            .preflight_account_key_bundle_update(account, &update(2, 22))
+            .await
+            .expect("next revision"),
+        AccountKeyBundlePreflight::New
+    );
+    assert!(matches!(
+        store.preflight_account_key_bundle_update(account, &update(3, 23)).await,
+        Err(AccountKeyStoreError::Conflict { current_revision: 1 })
+    ));
+
+    let second = update(2, 22);
+    store.put_account_key_bundle(account, &second).await.expect("concurrent rotation");
+    assert!(matches!(
+        store.put_account_key_bundle(account, &first).await,
+        Err(AccountKeyStoreError::Conflict { current_revision: 2 })
+    ));
+    let current = store.get_account_key_bundle(account, [1; 16]).await.expect("new bundle");
+    assert_eq!(current.revision, 2);
+    assert_eq!(current.account_signing_key, second.account_signing_key);
 
     store.pool().close().await;
     drop(store);
@@ -289,6 +374,58 @@ async fn projected_response_checks_every_wrap_and_rolls_back_both_mutations() {
     store.pool().close().await;
     drop(store);
     remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_account_key_preflight_rechecks_final_put() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store =
+        scoplen_store::PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let account = uuid::Uuid::new_v4().into_bytes();
+    let first = update(1, 90);
+    assert_eq!(
+        store
+            .preflight_account_key_bundle_update(account, &first)
+            .await
+            .expect("initial preflight"),
+        AccountKeyBundlePreflight::New
+    );
+    store.put_account_key_bundle(account, &first).await.expect("initial put");
+    assert_eq!(
+        store.preflight_account_key_bundle_update(account, &first).await.expect("replay preflight"),
+        AccountKeyBundlePreflight::Replay
+    );
+    let mut changed = first.clone();
+    changed.device_wraps[0].wrapped_ark.push(1);
+    assert!(matches!(
+        store.preflight_account_key_bundle_update(account, &changed).await,
+        Err(AccountKeyStoreError::Conflict { current_revision: 1 })
+    ));
+    assert_eq!(
+        store
+            .preflight_account_key_bundle_update(account, &update(2, 91))
+            .await
+            .expect("next revision"),
+        AccountKeyBundlePreflight::New
+    );
+    store.put_account_key_bundle(account, &update(2, 91)).await.expect("concurrent rotation");
+    assert!(matches!(
+        store.put_account_key_bundle(account, &first).await,
+        Err(AccountKeyStoreError::Conflict { current_revision: 2 })
+    ));
+    assert_eq!(
+        store.get_account_key_bundle(account, [1; 16]).await.expect("new bundle").revision,
+        2
+    );
+
+    sqlx::query("DELETE FROM sync_account_key_bundles WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test bundle");
+    store.pool().close().await;
 }
 
 #[cfg(feature = "postgres-integration")]
