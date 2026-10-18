@@ -681,7 +681,7 @@ async fn create_vault<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
@@ -689,6 +689,9 @@ async fn create_vault<A: SyncAuthenticator>(
         .authenticator
         .authenticate(&method, &uri, &headers)
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let body = to_bytes(body, api::MAX_SYNC_VAULT_CREATE_BODY_BYTES).await.map_err(|_| {
+        SyncHttpError::too_large(&instance, "shared-vault creation body is too large")
+    })?;
     let request = api::SyncCreateVaultRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid shared-vault creation request: {error}"))
     })?;
@@ -2781,6 +2784,66 @@ mod tests {
         assert_eq!(problem.code.as_str(), "sync.conflict");
         assert!(!problem.changed);
         assert!(!problem.retryable);
+    }
+
+    #[tokio::test]
+    async fn shared_vault_creation_bounds_body_before_decoding_or_storage() {
+        let (store, _vault, device) = test_store().await;
+        let account = TestAuthenticator::account_id();
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request = |body| {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync/v1/vaults")
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body))
+            .expect("vault creation request")
+        };
+
+        for (size, status) in [
+            (api::MAX_SYNC_VAULT_CREATE_BODY_BYTES, StatusCode::BAD_REQUEST),
+            (api::MAX_SYNC_VAULT_CREATE_BODY_BYTES + 1, StatusCode::PAYLOAD_TOO_LARGE),
+            (MAX_REQUEST_BYTES + 1, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let response =
+                app.clone().oneshot(request(vec![0xff; size])).await.expect("bounded response");
+            assert_eq!(response.status(), status, "body size {size}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/problem+cbor"
+            );
+            let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem");
+            let problem = ProblemDetails::from_cbor(&body).expect("CBOR problem");
+            assert_eq!(problem.code.as_str(), "sync.invalid_request");
+            assert!(!problem.changed);
+            assert!(!problem.retryable);
+            assert_eq!(
+                store.list_sync_vaults_for_account(account).await.expect("vault list").len(),
+                0
+            );
+        }
+
+        let vault = Uuid::now_v7();
+        let valid = api::SyncCreateVaultRequest {
+            vault_id: vault,
+            wrapped_vault_key: vec![1; api::MAX_SYNC_VAULT_KEY_BYTES],
+        }
+        .to_cbor()
+        .expect("maximum valid wrap");
+        assert!(valid.len() <= api::MAX_SYNC_VAULT_CREATE_BODY_BYTES);
+        let response = app.oneshot(request(valid)).await.expect("maximum valid response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store
+                .get_shared_sync_vault_keys(vault.into_bytes(), account)
+                .await
+                .expect("vault keys")[0]
+                .wrapped_vault_key
+                .len(),
+            api::MAX_SYNC_VAULT_KEY_BYTES
+        );
     }
 
     #[tokio::test]
