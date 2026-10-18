@@ -178,14 +178,31 @@ fn hex_value(byte: u8) -> Result<u8, KmsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn path() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "scoplen-kms-{}-{}.key",
-            std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_nanos()
-        ))
+        std::env::temp_dir().join(format!("scoplen-kms-{}.key", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn parallel_key_file_loads_use_distinct_paths() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+        let handles = (1..=32_u8)
+            .map(|marker| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let path = path();
+                    fs::write(&path, format!("{marker:02x}").repeat(KEY_ENCRYPTION_KEY_BYTES))
+                        .expect("write parallel key");
+                    barrier.wait();
+                    let key = LocalKeyFile::load(&path).expect("load parallel key");
+                    fs::remove_file(path).expect("remove parallel key");
+                    assert_eq!(key.key_encryption_key(), &[marker; KEY_ENCRYPTION_KEY_BYTES]);
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("parallel key load");
+        }
     }
 
     #[test]
