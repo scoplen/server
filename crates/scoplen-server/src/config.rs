@@ -8,6 +8,7 @@ use std::{
 };
 
 use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig, sync::SyncCardinalityLimits};
+use scoplen_sync::http::WriteRateLimits;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -25,7 +26,7 @@ pub struct Config {
     pub roles: RoleSettings,
     /// Storage profile selected for the process.
     pub storage: StorageSettings,
-    /// SQLite sync cardinality limits.
+    /// Sync cardinality and per-device write-rate limits.
     pub sync: SyncSettings,
 }
 
@@ -193,6 +194,7 @@ impl Config {
         self.storage.object.validate()?;
         self.storage.kms.validate()?;
         self.sync.cardinality_limits().validate().map_err(ConfigError::Invalid)?;
+        self.sync.write_rate_limits()?;
         Ok(())
     }
 
@@ -342,7 +344,7 @@ impl Default for RoleSettings {
     }
 }
 
-/// SQLite cardinality limits advertised by the sync session.
+/// Sync cardinality and per-device write-rate limits advertised by the session.
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -353,15 +355,22 @@ pub struct SyncSettings {
     pub max_shared_vaults_per_account: u64,
     /// Maximum current members in one shared vault.
     pub max_members_per_shared_vault: u64,
+    /// Authenticated object-write tokens added to each device bucket per second.
+    pub write_requests_per_second: u64,
+    /// Maximum object-write tokens held by one device bucket.
+    pub write_burst: u64,
 }
 
 impl Default for SyncSettings {
     fn default() -> Self {
         let limits = SyncCardinalityLimits::default();
+        let write_rate = WriteRateLimits::default();
         Self {
             max_objects_per_vault: limits.max_objects_per_vault,
             max_shared_vaults_per_account: limits.max_shared_vaults_per_account,
             max_members_per_shared_vault: limits.max_members_per_shared_vault,
+            write_requests_per_second: write_rate.requests_per_second(),
+            write_burst: write_rate.burst(),
         }
     }
 }
@@ -389,6 +398,18 @@ impl SyncSettings {
                 )
             })?;
         }
+        if let Some(value) = env_value("SPL_SYNC_WRITE_REQUESTS_PER_SECOND") {
+            self.write_requests_per_second = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_WRITE_REQUESTS_PER_SECOND must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_WRITE_BURST") {
+            self.write_burst = value.parse().map_err(|_| {
+                ConfigError::Invalid("SPL_SYNC_WRITE_BURST must be an unsigned integer".into())
+            })?;
+        }
         Ok(())
     }
 
@@ -398,6 +419,12 @@ impl SyncSettings {
             max_shared_vaults_per_account: self.max_shared_vaults_per_account,
             max_members_per_shared_vault: self.max_members_per_shared_vault,
         }
+    }
+
+    /// Return the validated settings to pass when mounting the authenticated K-4 router.
+    pub(crate) fn write_rate_limits(&self) -> Result<WriteRateLimits, ConfigError> {
+        WriteRateLimits::new(self.write_requests_per_second, self.write_burst)
+            .map_err(ConfigError::Invalid)
     }
 }
 
@@ -683,6 +710,40 @@ mod tests {
                 .expect_err("unusable member limit")
                 .to_string()
                 .contains("epoch publication")
+        );
+    }
+
+    #[test]
+    fn sync_write_rate_settings_validate_and_reach_router_settings() {
+        let mut config: Config =
+            toml::from_str("[sync]\nwrite_requests_per_second = 1\nwrite_burst = 2\n")
+                .expect("parse write rate settings");
+        config.validate().expect("minimum write rate");
+        let limits = config.sync.write_rate_limits().expect("router settings");
+        assert_eq!(limits.requests_per_second(), 1);
+        assert_eq!(limits.burst(), 2);
+
+        config.sync.write_requests_per_second = 51;
+        config.sync.write_burst = 201;
+        config.validate().expect("above-default write rate");
+        assert_eq!(config.sync.write_rate_limits().unwrap().requests_per_second(), 51);
+        assert_eq!(config.sync.write_rate_limits().unwrap().burst(), 201);
+
+        config.sync.write_requests_per_second = u64::MAX;
+        config.sync.write_burst = u64::MAX;
+        config.validate().expect("unsigned write rate boundaries");
+        config.sync.write_requests_per_second = 0;
+        assert!(
+            config
+                .validate()
+                .expect_err("zero refill rate")
+                .to_string()
+                .contains("sync.write_requests_per_second")
+        );
+        config.sync.write_requests_per_second = 1;
+        config.sync.write_burst = 0;
+        assert!(
+            config.validate().expect_err("zero burst").to_string().contains("sync.write_burst")
         );
     }
 
