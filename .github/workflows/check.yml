@@ -80,5 +80,5 @@ jobs:
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
         run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact
-      - name: Check atomic account key response admission
-        run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_response_admission_is_atomic -- --exact
+      - name: Check account key admission and read consistency
+        run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_

@@ -107,6 +107,9 @@ device-specific `GET /sync/v1/keys` response against the fixed 4 MiB CBOR limit 
 account transaction. An update that would exceed it returns `413 sync.quota_exceeded` without
 changing the bundle or statements. Statements may precede the first bundle; that bundle must pass
 the same check before it becomes visible.
+PostgreSQL account-key GET reads the bundle, device wrap, certificates, and revocations from one
+read-only repeatable-read snapshot, so concurrent rotations cannot splice separate versions into
+a response.
 
 ## Repository shape
 
