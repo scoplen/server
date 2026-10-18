@@ -506,7 +506,7 @@ async fn session<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
@@ -514,9 +514,9 @@ async fn session<A: SyncAuthenticator>(
         .authenticator
         .authenticate(&method, &uri, &headers)
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    if body.len() > MAX_SESSION_REQUEST_BYTES {
-        return Err(SyncHttpError::too_large(&instance, "sync session request is too large"));
-    }
+    let body = to_bytes(body, MAX_SESSION_REQUEST_BYTES)
+        .await
+        .map_err(|_| SyncHttpError::too_large(&instance, "sync session request is too large"))?;
     let request = api::SyncSessionRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid session request: {error}"))
     })?;
@@ -2623,6 +2623,69 @@ mod tests {
             .await
             .expect("denied response");
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn session_bounds_body_before_decoding_and_preserves_vault_state() {
+        let (store, _personal_vault, device) = test_store().await;
+        let account = TestAuthenticator::account_id();
+        store
+            .create_shared_sync_vault(Uuid::now_v7().into_bytes(), account, &[1])
+            .await
+            .expect("shared vault");
+        let before = store.list_sync_vaults_for_account(account).await.expect("vault list");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request = |body| {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sync/v1/session")
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body))
+            .expect("session request")
+        };
+
+        for (size, status) in [
+            (MAX_SESSION_REQUEST_BYTES, StatusCode::BAD_REQUEST),
+            (MAX_SESSION_REQUEST_BYTES + 1, StatusCode::PAYLOAD_TOO_LARGE),
+            (MAX_REQUEST_BYTES + 1, StatusCode::PAYLOAD_TOO_LARGE),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(vec![0xff; size]))
+                .await
+                .expect("bounded session response");
+            assert_eq!(response.status(), status, "body size {size}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/problem+cbor"
+            );
+            let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem");
+            let problem = ProblemDetails::from_cbor(&bytes).expect("CBOR problem");
+            assert_eq!(problem.code.as_str(), "sync.invalid_request");
+            assert!(!problem.changed);
+            assert!(!problem.retryable);
+            assert_eq!(
+                store.list_sync_vaults_for_account(account).await.expect("vault list"),
+                before
+            );
+        }
+
+        let unauthenticated = Request::builder()
+            .method("POST")
+            .uri("/sync/v1/session")
+            .header(header::CONTENT_TYPE, "application/cbor")
+            .body(Body::from(vec![0xff; MAX_REQUEST_BYTES + 1]))
+            .expect("unauthenticated session request");
+        let response = app.oneshot(unauthenticated).await.expect("auth response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("auth problem");
+        assert_eq!(
+            ProblemDetails::from_cbor(&bytes).expect("auth problem CBOR").code.as_str(),
+            "auth.authentication_required"
+        );
+        assert_eq!(store.list_sync_vaults_for_account(account).await.expect("vault list"), before);
     }
 
     #[tokio::test]
