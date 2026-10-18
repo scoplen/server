@@ -2,7 +2,7 @@
 
 The workspace guidance in [`../AGENTS.md`](../AGENTS.md) is authoritative. The canonical
 contracts are in [`../scoplen-docs`](../scoplen-docs). Keep shared contract types in
-`scoplen-proto`; this repository must not read or depend on `scoplen-client` source.
+`proto`; this repository must not read or depend on `client` source.
 
 ## Commands
 

@@ -2613,6 +2613,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
+source = "git+https://github.com/scoplen/proto.git?rev=15f2a9e#15f2a9ea1113e62330d7e95e66bffeed137a8d28"
 dependencies = [
  "prost",
  "prost-build",
@@ -2659,6 +2660,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
+source = "git+https://github.com/scoplen/proto.git?rev=15f2a9e#15f2a9ea1113e62330d7e95e66bffeed137a8d28"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

@@ -19,14 +19,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: plystra/scoplen-proto
-          path: scoplen-proto
+          repository: scoplen/proto
+          path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.16.0
       - name: Validate control-plane routes
-        if: hashFiles('scoplen-proto/crates/scoplen-api/openapi/v1.yaml') != ''
-        run: node scripts/check-control-plane-routes.mjs scoplen-proto/crates/scoplen-api/openapi/v1.yaml
+        if: hashFiles('proto/crates/scoplen-api/openapi/v1.yaml') != ''
+        run: node scripts/check-control-plane-routes.mjs proto/crates/scoplen-api/openapi/v1.yaml
       - name: Show pinned toolchain
         run: rustup show active-toolchain
       - name: Format
