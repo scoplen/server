@@ -1706,6 +1706,15 @@ impl SyncHttpError {
             | key_storage::AccountKeyStoreError::DeviceWrapLimit => {
                 Self::too_large(instance, "account key bundle exceeds the configured limits")
             }
+            key_storage::AccountKeyStoreError::KeyResponseLimit => Self::known(
+                instance,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "sync.quota_exceeded",
+                "Account key response limit reached",
+                "The complete account key response would exceed 4 MiB; no data changed. Reduce the bundle or statement set before retrying.",
+                false,
+                false,
+            ),
             key_storage::AccountKeyStoreError::InvalidRevision
             | key_storage::AccountKeyStoreError::EmptyArtifact(_)
             | key_storage::AccountKeyStoreError::InvalidDeviceWraps
@@ -3969,6 +3978,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_key_response_admission_accepts_exact_limit_and_rejects_one_byte_over() {
+        let (store, _vault, _) = test_store().await;
+        let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+        ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let device_ids = [ids[0].into_bytes(), ids[1].into_bytes()];
+        let app = router(store.clone(), TestAuthenticator::new(device_ids[0], true));
+        let update = key_update(device_ids);
+        let put = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(update.to_cbor().expect("initial update")))
+        .expect("initial request");
+        assert_eq!(
+            app.clone().oneshot(put).await.expect("initial response").status(),
+            StatusCode::OK
+        );
+
+        let mut certificates: Vec<Vec<u8>> =
+            (0..63).map(|marker| vec![marker; key_storage::MAX_KEY_ARTIFACT_BYTES]).collect();
+        certificates.push(vec![63]);
+        let mut projected = api::SyncAccountKeyBundle {
+            revision: 1,
+            wrapped_ark: vec![1, 2],
+            account_signing_key: vec![5, 6],
+            account_kem_key: vec![7, 8],
+            recovery_blob: vec![9, 10],
+            certificates,
+            revocations: Vec::new(),
+        };
+        let baseline = projected.to_cbor().expect("baseline response").len();
+        let provisional_size = 1 + api::MAX_SYNC_KEY_BODY_BYTES - baseline - 5;
+        projected.certificates.last_mut().expect("last certificate").resize(provisional_size, 63);
+        let provisional = projected.to_cbor().expect("provisional response").len();
+        let exact_size = provisional_size + api::MAX_SYNC_KEY_BODY_BYTES - provisional;
+        projected.certificates.last_mut().expect("last certificate").resize(exact_size, 63);
+        assert_eq!(
+            projected.to_cbor().expect("exact response").len(),
+            api::MAX_SYNC_KEY_BODY_BYTES
+        );
+        store
+            .replace_account_key_statements(
+                TestAuthenticator::account_id(),
+                &projected.certificates,
+                &[],
+            )
+            .await
+            .expect("exact-limit statements");
+
+        let get = request_headers(Request::builder().uri("/sync/v1/keys"))
+            .body(Body::empty())
+            .expect("get request");
+        let response = app.clone().oneshot(get).await.expect("get response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body =
+            to_bytes(response.into_body(), api::MAX_SYNC_KEY_BODY_BYTES).await.expect("get body");
+        assert_eq!(body.len(), api::MAX_SYNC_KEY_BODY_BYTES);
+        api::SyncAccountKeyBundle::from_cbor(&body).expect("complete bundle");
+
+        let mut larger_statements = projected.certificates.clone();
+        larger_statements.last_mut().expect("last certificate").push(63);
+        assert!(matches!(
+            store
+                .replace_account_key_statements(
+                    TestAuthenticator::account_id(),
+                    &larger_statements,
+                    &[]
+                )
+                .await,
+            Err(key_storage::AccountKeyStoreError::KeyResponseLimit)
+        ));
+
+        let mut rotated = update.clone();
+        rotated.revision = 2;
+        rotated.account_kem_key.push(9);
+        let put = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(rotated.to_cbor().expect("rotation")))
+        .expect("rotation request");
+        let response = app.clone().oneshot(put).await.expect("rotation response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("quota problem");
+        assert_eq!(problem.code.as_str(), "sync.quota_exceeded");
+        assert!(!problem.changed);
+        assert!(!problem.retryable);
+
+        let current = store
+            .get_account_key_bundle(TestAuthenticator::account_id(), device_ids[0])
+            .await
+            .expect("unchanged bundle");
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.account_kem_key, vec![7, 8]);
+        assert_eq!(current.certificates, projected.certificates);
+    }
+
+    #[tokio::test]
     async fn account_key_errors_preserve_auth_and_not_found_boundaries() {
         let (store, _vault, _) = test_store().await;
         let device = Uuid::now_v7().into_bytes();
@@ -4581,10 +4693,17 @@ mod tests {
                 certificate
             })
             .collect::<Vec<_>>();
-        store
-            .replace_account_key_statements(TestAuthenticator::account_id(), &certificates, &[])
+        // Bypass write admission to exercise the read boundary for already-invalid stored data.
+        for certificate in certificates {
+            sqlx::query(
+                "INSERT INTO sync_account_key_certificates (account_id, certificate) VALUES (?, ?)",
+            )
+            .bind(TestAuthenticator::account_id().as_slice())
+            .bind(certificate)
+            .execute(store.pool())
             .await
-            .expect("stored certificates");
+            .expect("inject stored certificate");
+        }
         assert_invalid_stored_read(&app, "/sync/v1/keys").await;
     }
 

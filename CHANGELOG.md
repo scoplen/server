@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Enforced the fixed 4 MiB account-key GET response limit during bundle updates and statement
+  replacement for every device wrap. Oversized projections roll back atomically and PUT returns
+  `413 sync.quota_exceeded`; exact 4 MiB responses remain readable.
 - Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
   hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
   coverage. Database-backed role preparation now loads this backend before startup. Cloud

@@ -42,6 +42,10 @@ fn update(revision: u64, marker: u8) -> AccountKeyBundleUpdate {
     }
 }
 
+fn full_size_certificates(count: u8) -> Vec<Vec<u8>> {
+    (0..count).map(|marker| vec![marker; MAX_KEY_ARTIFACT_BYTES]).collect()
+}
+
 #[tokio::test]
 async fn bundle_is_scoped_to_device_and_statements_are_sorted() {
     let directory = test_directory();
@@ -198,4 +202,150 @@ async fn competing_initial_revisions_are_serialized() {
     store.pool().close().await;
     drop(store);
     remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn preexisting_statements_cannot_admit_an_oversized_first_bundle() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let account = [11; 16];
+    store
+        .replace_account_key_statements(account, &full_size_certificates(64), &[])
+        .await
+        .expect("statements can precede a bundle");
+
+    assert!(matches!(
+        store.put_account_key_bundle(account, &update(1, 50)).await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    assert!(matches!(
+        store.get_account_key_bundle(account, [1; 16]).await,
+        Err(AccountKeyStoreError::BundleNotFound)
+    ));
+
+    store.replace_account_key_statements(account, &[], &[]).await.expect("free capacity");
+    assert_eq!(
+        store.put_account_key_bundle(account, &update(1, 50)).await.expect("admit bundle"),
+        AccountKeyBundlePut::Applied { revision: 1 }
+    );
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn projected_response_checks_every_wrap_and_rolls_back_both_mutations() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let account = [12; 16];
+    let first = update(1, 60);
+    store.put_account_key_bundle(account, &first).await.expect("initial bundle");
+    let certificates = full_size_certificates(63);
+    store
+        .replace_account_key_statements(account, &certificates, &[])
+        .await
+        .expect("large admissible statement set");
+
+    let mut oversized = update(2, 61);
+    oversized.device_wraps[1].wrapped_ark = vec![61; MAX_KEY_ARTIFACT_BYTES];
+    assert!(matches!(
+        store.put_account_key_bundle(account, &oversized).await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    let current = store.get_account_key_bundle(account, [2; 16]).await.expect("old second wrap");
+    assert_eq!(current.revision, 1);
+    assert_eq!(current.wrapped_ark, vec![60, 2]);
+    assert_eq!(current.certificates.len(), 63);
+    assert_eq!(
+        store.put_account_key_bundle(account, &first).await.expect("exact replay"),
+        AccountKeyBundlePut::Replay { revision: 1 }
+    );
+
+    assert!(matches!(
+        store.replace_account_key_statements(account, &full_size_certificates(64), &[]).await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    assert!(matches!(
+        store
+            .replace_account_key_statements(
+                account,
+                &certificates,
+                &[vec![99; MAX_KEY_ARTIFACT_BYTES]],
+            )
+            .await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    let current = store.get_account_key_bundle(account, [1; 16]).await.expect("old statements");
+    assert_eq!(current.certificates.len(), 63);
+    assert_eq!(current.revocations, Vec::<Vec<u8>>::new());
+
+    store.replace_account_key_statements(account, &[], &[]).await.expect("free capacity");
+    assert_eq!(
+        store.put_account_key_bundle(account, &oversized).await.expect("retry rotation"),
+        AccountKeyBundlePut::Applied { revision: 2 }
+    );
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_account_key_response_admission_is_atomic() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store =
+        scoplen_store::PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let account = uuid::Uuid::new_v4().into_bytes();
+    let first = update(1, 70);
+    store.put_account_key_bundle(account, &first).await.expect("initial bundle");
+    let certificates = full_size_certificates(63);
+    store
+        .replace_account_key_statements(account, &certificates, &[])
+        .await
+        .expect("admissible statements");
+
+    let mut oversized = update(2, 71);
+    oversized.device_wraps[1].wrapped_ark = vec![71; MAX_KEY_ARTIFACT_BYTES];
+    assert!(matches!(
+        store.put_account_key_bundle(account, &oversized).await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    assert!(matches!(
+        store.replace_account_key_statements(account, &full_size_certificates(64), &[]).await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    assert!(matches!(
+        store
+            .replace_account_key_statements(
+                account,
+                &certificates,
+                &[vec![99; MAX_KEY_ARTIFACT_BYTES]],
+            )
+            .await,
+        Err(AccountKeyStoreError::KeyResponseLimit)
+    ));
+    let current = store.get_account_key_bundle(account, [2; 16]).await.expect("unchanged bundle");
+    assert_eq!(current.revision, 1);
+    assert_eq!(current.wrapped_ark, vec![70, 2]);
+    assert_eq!(current.certificates.len(), 63);
+    assert_eq!(current.revocations, Vec::<Vec<u8>>::new());
+    assert_eq!(
+        store.put_account_key_bundle(account, &first).await.expect("exact replay"),
+        AccountKeyBundlePut::Replay { revision: 1 }
+    );
+
+    sqlx::query("DELETE FROM sync_account_key_certificates WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test certificates");
+    sqlx::query("DELETE FROM sync_account_key_bundles WHERE account_id = $1")
+        .bind(account.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("remove test bundle");
+    store.pool().close().await;
 }
