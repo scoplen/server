@@ -65,7 +65,10 @@ session (defaults: 50 requests per second, burst 200). An exhausted bucket retur
 batch object count, and encoded batch bytes, advertises those bounds in the session, and returns
 `413 sync.invalid_request` for an oversized write before changing state. These three bounds may be
 lowered from their defaults; the current K-4 codec and SQLite store prevent raising them.
-Other route body limits and multi-instance rate admission remain roadmap work.
+Account-key updates, shared-vault epoch publication, and member addition each enforce their fixed
+4 MiB K-4 request bound before collecting the body and return `413 sync.invalid_request` when
+oversized. These bounds are not session-advertised write settings. Other route body limits and
+multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
 owner using the shared `{keys}` response shape. Enrollment wiring, production identity, and

@@ -31,7 +31,7 @@ use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
 
 /// The hard protocol ceiling for write bodies. A deployment may enforce a lower limit on the
-/// write endpoint; other route bodies retain this bound at the router layer.
+/// write endpoint; other routes use their fixed K-4 bounds or this router ceiling.
 pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 
 /// Maximum size of the first WebSocket message handed to the notification authenticator.
@@ -790,7 +790,7 @@ async fn publish_vault_epoch<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
@@ -804,6 +804,9 @@ async fn publish_vault_epoch<A: SyncAuthenticator>(
         SyncOperation::PublishVaultEpoch,
         &instance,
     )?;
+    let body = to_bytes(body, api::MAX_SYNC_VAULT_EPOCH_BODY_BYTES).await.map_err(|_| {
+        SyncHttpError::too_large(&instance, "shared-vault epoch body exceeds 4 MiB")
+    })?;
     let request = api::SyncPublishVaultEpochRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid shared-vault epoch request: {error}"))
     })?;
@@ -875,7 +878,7 @@ async fn add_vault_member<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
@@ -889,6 +892,9 @@ async fn add_vault_member<A: SyncAuthenticator>(
         SyncOperation::AddVaultMember,
         &instance,
     )?;
+    let body = to_bytes(body, api::MAX_SYNC_VAULT_MEMBER_BODY_BYTES).await.map_err(|_| {
+        SyncHttpError::too_large(&instance, "shared-vault member body exceeds 4 MiB")
+    })?;
     let request = api::SyncAddVaultMemberRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid shared-vault member request: {error}"))
     })?;
@@ -1007,7 +1013,7 @@ async fn keys_put<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
@@ -1023,9 +1029,9 @@ async fn keys_put<A: SyncAuthenticator>(
         .authenticator
         .authorize_keys(identity, account_id, SyncKeysOperation::Write)
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    if body.len() > key_storage::MAX_KEY_BUNDLE_BYTES {
-        return Err(SyncHttpError::too_large(&instance, "account key bundle exceeds 4 MiB"));
-    }
+    let body = to_bytes(body, api::MAX_SYNC_KEY_BODY_BYTES)
+        .await
+        .map_err(|_| SyncHttpError::too_large(&instance, "account key bundle exceeds 4 MiB"))?;
     let update = api::SyncAccountKeyBundleUpdate::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid account key bundle: {error}"))
     })?;
@@ -2209,6 +2215,59 @@ mod tests {
         store.pool().close().await;
         drop(store);
         remove_test_directory(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn key_and_membership_requests_bound_bodies_before_decoding() {
+        let (store, _, device) = test_store().await;
+        let vault = Uuid::now_v7().into_bytes();
+        let account = TestAuthenticator::account_id();
+        store.create_shared_sync_vault(vault, account, &[1]).await.expect("shared vault");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let routes = [
+            (Method::PUT, String::from("/sync/v1/keys"), api::MAX_SYNC_KEY_BODY_BYTES),
+            (
+                Method::POST,
+                format!("/sync/v1/vaults/{}/epochs", path(vault)),
+                api::MAX_SYNC_VAULT_EPOCH_BODY_BYTES,
+            ),
+            (
+                Method::POST,
+                format!("/sync/v1/vaults/{}/members", path(vault)),
+                api::MAX_SYNC_VAULT_MEMBER_BODY_BYTES,
+            ),
+        ];
+        for (method, uri, limit) in routes {
+            for (size, expected_status) in
+                [(limit, StatusCode::BAD_REQUEST), (limit + 1, StatusCode::PAYLOAD_TOO_LARGE)]
+            {
+                let request = request_headers(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(&uri)
+                        .header(header::CONTENT_TYPE, "application/cbor"),
+                )
+                .body(Body::from(vec![0xff; size]))
+                .expect("bounded request");
+                let response = app.clone().oneshot(request).await.expect("bounded response");
+                assert_eq!(response.status(), expected_status, "{method} {uri} at {size} bytes");
+                assert_eq!(
+                    response.headers().get(header::CONTENT_TYPE).unwrap(),
+                    "application/problem+cbor"
+                );
+                let body =
+                    to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+                let problem = ProblemDetails::from_cbor(&body).expect("problem cbor");
+                assert_eq!(problem.code.as_str(), "sync.invalid_request");
+                assert!(!problem.changed);
+                assert!(!problem.retryable);
+            }
+        }
+        assert!(store.get_account_key_bundle(account, device).await.is_err());
+        assert_eq!(
+            store.get_shared_sync_vault_keys(vault, account).await.expect("owner keys").len(),
+            1
+        );
     }
 
     #[tokio::test]
