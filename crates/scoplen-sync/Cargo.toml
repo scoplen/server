@@ -18,6 +18,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 futures-util = "0.3.34"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio-tungstenite = "0.26.2"
 tower = "0.5.2"
 
