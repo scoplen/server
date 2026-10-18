@@ -370,11 +370,13 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         operation: SyncKeysOperation,
     ) -> Result<(), AuthFailure>;
 
-    /// Validate the account-key update before storage.
+    /// Validate a new account-key revision before storage.
     ///
     /// Implementations MUST verify the signature over `update.signature_input()` with the
     /// current account signing key and require exactly one wrap for every enrolled, unrevoked
     /// device. The storage layer only enforces opaque bounds and revision replay semantics.
+    /// An authenticated and authorized exact replay of the persisted revision bypasses this
+    /// callback, since its original signature may use the key replaced by that rotation.
     ///
     /// # Errors
     ///

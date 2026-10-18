@@ -110,6 +110,10 @@ the same check before it becomes visible.
 PostgreSQL account-key GET reads the bundle, device wrap, certificates, and revocations from one
 read-only repeatable-read snapshot, so concurrent rotations cannot splice separate versions into
 a response.
+Authenticated account-key PUTs classify an exact persisted replay before validating a new update
+with the current signing key. A rotation therefore does not reject a retry signed by the previous
+key. Changed bytes at the current revision return `409 sync.conflict`; the final write transaction
+rechecks revision and exact bytes, so a concurrent rotation cannot turn a replay into a mutation.
 
 ## Repository shape
 
