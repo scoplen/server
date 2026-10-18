@@ -95,6 +95,10 @@ Shared-vault key epochs have a bounded retirement path: the authenticated sync a
 markers, keeps validated key epochs on object history, removes retired wraps atomically, and
 rejects writes that reference a retired epoch. Retirement is idempotent and refuses the newest
 served epoch or any epoch still referenced by a current object.
+Epoch publication and member addition also check that every affected member's complete key
+response remains within the fixed 64 non-retired epoch and 4 MiB encoded-response bounds. A
+mutation that would exceed either bound returns `413 sync.quota_exceeded` without changing state;
+retiring an older epoch after re-encryption or using smaller wraps can free capacity.
 
 ## Repository shape
 

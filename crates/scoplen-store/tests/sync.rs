@@ -10,9 +10,9 @@ use scoplen_store::{
     RelationalStore, SqliteStore, StoreError,
     sync::{
         MAX_MEMBERS_PER_SHARED_VAULT, MAX_OBJECTS_PER_VAULT, MAX_SHARED_VAULT_KEY_BYTES,
-        MAX_SHARED_VAULTS_PER_ACCOUNT, ObjectWrite, SharedVaultEpochWrap, SharedVaultKey,
-        SyncCardinalityLimits, SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS,
-        VaultKind,
+        MAX_SHARED_VAULT_KEY_EPOCHS, MAX_SHARED_VAULTS_PER_ACCOUNT, ObjectWrite,
+        SharedVaultEpochWrap, SharedVaultKey, SyncCardinalityLimits, SyncStoreError,
+        TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
     },
 };
 
@@ -451,6 +451,160 @@ async fn shared_vault_epoch_retirement_is_safe_and_idempotent() {
     let history = store.sync_versions(vault, [1; 16]).await.expect("history");
     assert_eq!(history[0].key_epoch, 1);
     assert_eq!(history[1].key_epoch, 2);
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn shared_vault_key_count_limit_rolls_back_and_retirement_reopens_capacity() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [51; 16];
+    let admin = [52; 16];
+    let new_member = [53; 16];
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create vault");
+    for epoch in 2..=MAX_SHARED_VAULT_KEY_EPOCHS as u64 {
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![1] }],
+            )
+            .await
+            .expect("publish within epoch limit");
+    }
+    let rejected_epoch = MAX_SHARED_VAULT_KEY_EPOCHS as u64 + 1;
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                rejected_epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+            )
+            .await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    let keys = store.get_shared_sync_vault_keys(vault, admin).await.expect("unchanged keys");
+    assert_eq!(keys.len(), MAX_SHARED_VAULT_KEY_EPOCHS);
+    assert_eq!(keys.last().expect("latest key").epoch, rejected_epoch - 1);
+    let state = sqlx::query("SELECT m.key_epoch, v.rotation_pending FROM sync_vault_members AS m JOIN sync_vaults AS v ON v.vault_id = m.vault_id WHERE m.vault_id = ? AND m.account_id = ?")
+        .bind(vault.as_slice())
+        .bind(admin.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("unchanged vault state");
+    assert_eq!(
+        state.get::<i64, _>("key_epoch"),
+        i64::try_from(rejected_epoch - 1).expect("test epoch fits SQLite")
+    );
+    assert_eq!(state.get::<i64, _>("rotation_pending"), 0);
+
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("retire old epoch");
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            rejected_epoch,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("retirement reopens capacity");
+    let keys = store.get_shared_sync_vault_keys(vault, admin).await.expect("current keys");
+    assert_eq!(keys.len(), MAX_SHARED_VAULT_KEY_EPOCHS);
+    assert_eq!(keys.first().expect("first key").epoch, 2);
+    assert_eq!(keys.last().expect("last key").epoch, rejected_epoch);
+
+    let oversized_member_keys = (2..=rejected_epoch)
+        .map(|epoch| SharedVaultKey {
+            epoch,
+            wrapped_vault_key: vec![3; MAX_SHARED_VAULT_KEY_BYTES],
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        store.add_shared_sync_vault_member(vault, new_member, &oversized_member_keys).await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, new_member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_member_keys WHERE vault_id = ? AND account_id = ?"
+        )
+        .bind(vault.as_slice())
+        .bind(new_member.as_slice())
+        .fetch_one(store.pool())
+        .await
+        .expect("new member wrap count"),
+        0
+    );
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn shared_vault_key_body_limit_rejects_oversized_publication() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [61; 16];
+    let admin = [62; 16];
+    let member = [63; 16];
+    let maximum_wrap = vec![1; MAX_SHARED_VAULT_KEY_BYTES];
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create vault");
+    for epoch in 2..MAX_SHARED_VAULT_KEY_EPOCHS as u64 {
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![1] }],
+            )
+            .await
+            .expect("publish below body limit");
+    }
+    let member_keys = (1..MAX_SHARED_VAULT_KEY_EPOCHS as u64)
+        .map(|epoch| SharedVaultKey { epoch, wrapped_vault_key: maximum_wrap.clone() })
+        .collect::<Vec<_>>();
+    store.add_shared_sync_vault_member(vault, member, &member_keys).await.expect("add member");
+    let final_epoch = MAX_SHARED_VAULT_KEY_EPOCHS as u64;
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                final_epoch,
+                &[
+                    SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] },
+                    SharedVaultEpochWrap { account_id: member, wrapped_vault_key: maximum_wrap },
+                ],
+            )
+            .await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    for account in [admin, member] {
+        let keys = store.get_shared_sync_vault_keys(vault, account).await.expect("unchanged keys");
+        assert_eq!(keys.len(), MAX_SHARED_VAULT_KEY_EPOCHS - 1);
+        assert_eq!(keys.last().expect("last key").epoch, final_epoch - 1);
+    }
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            final_epoch,
+            &[
+                SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] },
+                SharedVaultEpochWrap { account_id: member, wrapped_vault_key: vec![2] },
+            ],
+        )
+        .await
+        .expect("smaller wrap fits body limit");
+    for account in [admin, member] {
+        assert_eq!(
+            store.get_shared_sync_vault_keys(vault, account).await.expect("deliverable keys").len(),
+            MAX_SHARED_VAULT_KEY_EPOCHS
+        );
+    }
+
     store.pool().close().await;
     drop(store);
     remove_test_directory(directory).await;
