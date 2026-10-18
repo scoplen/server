@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Fixed PostgreSQL schema verification for composite foreign keys by pairing referenced columns
+  with their source columns in constraint order, and synchronized its migration-count and job-time
+  assertions with current migrations and queue behavior.
+- Made KMS test key files unique across parallel tests so one test cannot overwrite another's
+  fixture on platforms with coarse clock resolution.
 - Added a strict local deployment-key-file backend behind `KeyManagementService`, with bounded
   hexadecimal parsing, zero-key rejection, secret zeroization, redacted debug output, and failure
   coverage. Database-backed role preparation now loads this backend before startup. Cloud
