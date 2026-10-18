@@ -154,7 +154,16 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
             .expose();
         (None, Some(PostgresStore::connect(&database_url).await?))
     } else {
-        (Some(SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?), None)
+        (
+            Some(
+                SqliteStore::open_with_sync_limits(
+                    &config.server.data_dir.join("scoplen.sqlite"),
+                    config.sync.cardinality_limits(),
+                )
+                .await?,
+            ),
+            None,
+        )
     };
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
@@ -928,6 +937,24 @@ mod tests {
         assert!(prepared.store.is_some());
         assert!(prepared.object_storage.is_some());
         assert!(data_dir.join("objects").is_dir());
+        drop(prepared);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn prepare_roles_passes_sync_cardinality_limits_to_sqlite() {
+        let data_dir = std::env::temp_dir()
+            .join(format!("scoplen-sync-limits-runtime-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.sync.max_objects_per_vault = 100_001;
+        config.sync.max_shared_vaults_per_account = 1_001;
+        config.sync.max_members_per_shared_vault = 2;
+        let prepared = prepare_roles(&config, &[Role::Api]).await.expect("prepare api role");
+        assert_eq!(
+            prepared.store.as_ref().expect("sqlite store").sync_cardinality_limits(),
+            config.sync.cardinality_limits()
+        );
         drop(prepared);
         remove_test_directory(&data_dir).await;
     }

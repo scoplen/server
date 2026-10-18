@@ -17,6 +17,13 @@ trusted_proxies = []
 [roles]
 names = ["all"]
 
+[sync]
+# SQLite cardinality limits. Session handshakes advertise the values enforced by the store.
+max_objects_per_vault = 100000
+max_shared_vaults_per_account = 1000
+# Keep this at or below 1000 so a new epoch can include one wrap per member.
+max_members_per_shared_vault = 1000
+
 [storage]
 # SQLite is required by api and edge. The worker can also use PostgreSQL with database_url.
 backend = "sqlite"

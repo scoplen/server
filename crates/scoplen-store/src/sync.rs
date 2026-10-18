@@ -43,6 +43,50 @@ pub const MAX_SHARED_VAULTS_PER_ACCOUNT: u64 = 1_000;
 /// Maximum number of current account members in a shared vault.
 pub const MAX_MEMBERS_PER_SHARED_VAULT: u64 = 1_000;
 
+/// SQLite sync cardinality limits selected for one deployment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SyncCardinalityLimits {
+    pub max_objects_per_vault: u64,
+    pub max_shared_vaults_per_account: u64,
+    pub max_members_per_shared_vault: u64,
+}
+
+impl Default for SyncCardinalityLimits {
+    fn default() -> Self {
+        Self {
+            max_objects_per_vault: MAX_OBJECTS_PER_VAULT,
+            max_shared_vaults_per_account: MAX_SHARED_VAULTS_PER_ACCOUNT,
+            max_members_per_shared_vault: MAX_MEMBERS_PER_SHARED_VAULT,
+        }
+    }
+}
+
+impl SyncCardinalityLimits {
+    /// Validate values before opening a store or advertising them to clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns the invalid setting and its supported range.
+    pub fn validate(self) -> Result<(), String> {
+        for (name, value) in [
+            ("sync.max_objects_per_vault", self.max_objects_per_vault),
+            ("sync.max_shared_vaults_per_account", self.max_shared_vaults_per_account),
+        ] {
+            if value == 0 || value > i64::MAX as u64 {
+                return Err(format!("{name} must be between 1 and {}", i64::MAX));
+            }
+        }
+        if self.max_members_per_shared_vault == 0
+            || self.max_members_per_shared_vault > MAX_SHARED_VAULT_EPOCH_WRAPS as u64
+        {
+            return Err(format!(
+                "sync.max_members_per_shared_vault must be between 1 and {MAX_SHARED_VAULT_EPOCH_WRAPS}; epoch publication requires one wrap per member"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
 /// A 16-byte object identifier.
@@ -547,7 +591,7 @@ impl SqliteStore {
         .fetch_one(&mut *transaction)
         .await?;
         if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
-            >= MAX_SHARED_VAULTS_PER_ACCOUNT
+            >= self.sync_cardinality_limits().max_shared_vaults_per_account
         {
             return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
         }
@@ -742,7 +786,7 @@ impl SqliteStore {
         .fetch_one(&mut *transaction)
         .await?;
         if u64::try_from(member_count).map_err(|_| SyncStoreError::CorruptRow("member_count"))?
-            >= MAX_MEMBERS_PER_SHARED_VAULT
+            >= self.sync_cardinality_limits().max_members_per_shared_vault
         {
             return Err(SyncStoreError::QuotaExceeded("members per shared vault"));
         }
@@ -755,7 +799,7 @@ impl SqliteStore {
         .fetch_one(&mut *transaction)
         .await?;
         if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
-            >= MAX_SHARED_VAULTS_PER_ACCOUNT
+            >= self.sync_cardinality_limits().max_shared_vaults_per_account
         {
             return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
         }
@@ -1060,7 +1104,7 @@ impl SqliteStore {
                 u64::try_from(new_objects).map_err(|_| SyncStoreError::SequenceExhausted)?;
             if object_count
                 .checked_add(new_objects)
-                .is_none_or(|count| count > MAX_OBJECTS_PER_VAULT)
+                .is_none_or(|count| count > self.sync_cardinality_limits().max_objects_per_vault)
             {
                 return Err(SyncStoreError::QuotaExceeded("objects per vault"));
             }

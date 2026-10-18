@@ -50,6 +50,7 @@ pub trait RelationalStore {
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    sync_cardinality_limits: sync::SyncCardinalityLimits,
 }
 
 impl SqliteStore {
@@ -60,6 +61,19 @@ impl SqliteStore {
     /// Returns an error if the parent directory cannot be created, the database cannot be
     /// opened, or a migration fails. A failed migration prevents server startup.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        Self::open_with_sync_limits(path, sync::SyncCardinalityLimits::default()).await
+    }
+
+    /// Open SQLite with validated per-deployment sync cardinality limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, an unusable path, database failure, or migration failure.
+    pub async fn open_with_sync_limits(
+        path: &Path,
+        sync_cardinality_limits: sync::SyncCardinalityLimits,
+    ) -> Result<Self, StoreError> {
+        sync_cardinality_limits.validate().map_err(StoreError::InvalidSyncLimits)?;
         if path.as_os_str().is_empty() {
             return Err(StoreError::EmptyPath);
         }
@@ -75,7 +89,13 @@ impl SqliteStore {
             .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(5).connect_with(options).await?;
         SQLITE_MIGRATIONS.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, sync_cardinality_limits })
+    }
+
+    /// Return the limits enforced by this SQLite store.
+    #[must_use]
+    pub fn sync_cardinality_limits(&self) -> sync::SyncCardinalityLimits {
+        self.sync_cardinality_limits
     }
 
     /// Check whether the database can execute a query for readiness checks.
@@ -140,6 +160,9 @@ impl RelationalStore for PostgresStore {
 /// Storage initialization errors.
 #[derive(Debug, Error)]
 pub enum StoreError {
+    /// The configured SQLite sync limits cannot be enforced safely.
+    #[error("invalid sync cardinality limits: {0}")]
+    InvalidSyncLimits(String),
     /// The database path was empty.
     #[error("storage database path must not be empty")]
     EmptyPath,
