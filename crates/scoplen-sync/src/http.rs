@@ -1531,6 +1531,15 @@ impl SyncHttpError {
                 instance,
                 "shared-vault epoch wraps must contain exactly one entry for every current member",
             ),
+            storage::SyncStoreError::VaultKeyResponseLimit => Self::known(
+                instance,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "sync.quota_exceeded",
+                "Shared-vault key limit reached",
+                "The full key response would exceed the fixed wire limit; no data changed. Retire an older epoch after re-encryption or use smaller key wraps before retrying.",
+                false,
+                false,
+            ),
             storage::SyncStoreError::InvalidEpochWraps => {
                 Self::invalid(instance, "shared-vault epoch wraps are invalid")
             }
@@ -2057,6 +2066,33 @@ mod tests {
 
     fn path(id: storage::VaultId) -> String {
         Uuid::from_bytes(id).to_string()
+    }
+
+    fn max_deliverable_vault_wrap_bytes(keys: &[storage::SharedVaultKey], epoch: u64) -> usize {
+        let mut smallest = 1;
+        let mut largest = api::MAX_SYNC_VAULT_KEY_BYTES;
+        while smallest < largest {
+            let candidate_len = (smallest + largest).div_ceil(2);
+            let candidate = api::SyncVaultKeysResponse {
+                keys: keys
+                    .iter()
+                    .map(|key| api::SyncVaultKey {
+                        epoch: key.epoch,
+                        wrapped_vault_key: key.wrapped_vault_key.clone(),
+                    })
+                    .chain(std::iter::once(api::SyncVaultKey {
+                        epoch,
+                        wrapped_vault_key: vec![2; candidate_len],
+                    }))
+                    .collect(),
+            };
+            if candidate.to_cbor().is_ok() {
+                smallest = candidate_len;
+            } else {
+                largest = candidate_len - 1;
+            }
+        }
+        smallest
     }
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
@@ -3038,6 +3074,111 @@ mod tests {
         let keys =
             store.get_shared_sync_vault_keys(vault.into_bytes(), account).await.expect("keys");
         assert_eq!(keys, vec![storage::SharedVaultKey { epoch: 2, wrapped_vault_key: vec![2] }]);
+    }
+
+    #[tokio::test]
+    async fn shared_vault_epoch_admission_keeps_key_responses_encodable() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let admin = TestAuthenticator::account_id();
+        let maximum_wrap = vec![1; api::MAX_SYNC_VAULT_KEY_BYTES];
+        store
+            .create_shared_sync_vault(vault.into_bytes(), admin, &maximum_wrap)
+            .await
+            .expect("create shared vault");
+        for epoch in 2..api::MAX_SYNC_VAULT_KEY_EPOCHS as u64 {
+            store
+                .publish_shared_sync_vault_epoch(
+                    vault.into_bytes(),
+                    epoch,
+                    &[storage::SharedVaultEpochWrap {
+                        account_id: admin,
+                        wrapped_vault_key: maximum_wrap.clone(),
+                    }],
+                )
+                .await
+                .expect("seed deliverable epochs");
+        }
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let publish = |epoch, wrapped_vault_key| {
+            let body = api::SyncPublishVaultEpochRequest {
+                epoch,
+                wrapped_keys: vec![api::SyncVaultEpochWrap {
+                    account_id: Uuid::from_bytes(admin),
+                    wrapped_vault_key,
+                }],
+            }
+            .to_cbor()
+            .expect("epoch request body");
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sync/v1/vaults/{}/epochs", path(vault.into_bytes())))
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body))
+            .expect("epoch request")
+        };
+        let final_epoch = api::MAX_SYNC_VAULT_KEY_EPOCHS as u64;
+        let response = app
+            .clone()
+            .oneshot(publish(final_epoch, maximum_wrap))
+            .await
+            .expect("oversized response rejection");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("quota problem");
+        assert_eq!(problem.code.as_str(), "sync.quota_exceeded");
+        assert!(!problem.changed && !problem.retryable);
+
+        let current_keys = store
+            .get_shared_sync_vault_keys(vault.into_bytes(), admin)
+            .await
+            .expect("unchanged keys");
+        let maximum_deliverable = max_deliverable_vault_wrap_bytes(&current_keys, final_epoch);
+        assert!(maximum_deliverable < api::MAX_SYNC_VAULT_KEY_BYTES);
+        let response = app
+            .clone()
+            .oneshot(publish(final_epoch, vec![2; maximum_deliverable + 1]))
+            .await
+            .expect("one-byte-over-limit rejection");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let response = app
+            .clone()
+            .oneshot(publish(final_epoch, vec![2; maximum_deliverable]))
+            .await
+            .expect("exact-boundary wrap response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(publish(final_epoch + 1, vec![3]))
+            .await
+            .expect("epoch-count rejection");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("quota problem");
+        assert_eq!(problem.code.as_str(), "sync.quota_exceeded");
+        assert!(!problem.changed && !problem.retryable);
+
+        let response = app
+            .oneshot(
+                request_headers(
+                    Request::builder()
+                        .uri(format!("/sync/v1/vaults/{}/keys", path(vault.into_bytes()))),
+                )
+                .body(Body::empty())
+                .expect("keys request"),
+            )
+            .await
+            .expect("keys response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), api::MAX_SYNC_VAULT_KEYS_BODY_BYTES)
+            .await
+            .expect("bounded keys response");
+        assert_eq!(body.len(), api::MAX_SYNC_VAULT_KEYS_BODY_BYTES);
+        let keys = api::SyncVaultKeysResponse::from_cbor(&body).expect("deliverable keys");
+        assert_eq!(keys.keys.len(), api::MAX_SYNC_VAULT_KEY_EPOCHS);
+        assert_eq!(keys.keys.last().expect("last key").epoch, final_epoch);
     }
 
     #[tokio::test]

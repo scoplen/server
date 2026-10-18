@@ -34,8 +34,12 @@ pub const TOMBSTONE_PURGE_AFTER_DAYS: i64 = 180;
 pub const MAX_SHARED_VAULT_KEY_BYTES: usize = 64 * 1024;
 /// Maximum number of member wraps in one epoch publication.
 pub const MAX_SHARED_VAULT_EPOCH_WRAPS: usize = 1_000;
+/// Maximum number of non-retired epochs in a shared-vault key response.
+pub const MAX_SHARED_VAULT_KEY_EPOCHS: usize = 64;
 /// Maximum number of non-retired epochs supplied when adding a member.
-pub const MAX_SHARED_VAULT_MEMBER_EPOCHS: usize = 64;
+pub const MAX_SHARED_VAULT_MEMBER_EPOCHS: usize = MAX_SHARED_VAULT_KEY_EPOCHS;
+/// Maximum encoded size of one shared-vault key response.
+pub const MAX_SHARED_VAULT_KEYS_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum number of current object ids in a vault, including tombstones.
 pub const MAX_OBJECTS_PER_VAULT: u64 = 100_000;
 /// Maximum number of shared vaults visible to one account.
@@ -267,6 +271,9 @@ pub enum SyncStoreError {
     /// The supplied wraps do not exactly match the current member set.
     #[error("sync vault epoch member set does not match current members")]
     MemberSetMismatch,
+    /// A mutation would make a member's complete key response exceed the wire bounds.
+    #[error("shared-vault key response would exceed the fixed protocol bounds")]
+    VaultKeyResponseLimit,
     /// The target account is already a member of the vault.
     #[error("sync vault member already exists")]
     MemberAlreadyExists,
@@ -677,8 +684,9 @@ impl SqliteStore {
     /// # Errors
     ///
     /// Returns a conflict when the epoch is not the next value, a member-set error when the
-    /// supplied wraps do not exactly match current members, validation errors for malformed wraps,
-    /// and a storage error when the transaction cannot commit.
+    /// supplied wraps do not exactly match current members, a key-response limit error when the
+    /// next epoch would exceed the wire bounds, validation errors for malformed wraps, and a
+    /// storage error when the transaction cannot commit.
     pub async fn publish_shared_sync_vault_epoch(
         &self,
         vault_id: VaultId,
@@ -722,6 +730,7 @@ impl SqliteStore {
         if supplied != members {
             return Err(SyncStoreError::MemberSetMismatch);
         }
+        check_epoch_key_response_capacity(&mut transaction, vault_id, epoch, wraps).await?;
         for wrap in wraps {
             sqlx::query(
                 "INSERT INTO sync_vault_member_keys
@@ -758,8 +767,10 @@ impl SqliteStore {
     /// # Errors
     ///
     /// Returns [`SyncStoreError::MemberAlreadyExists`] for an existing member,
-    /// [`SyncStoreError::MemberEpochMismatch`] when the epoch list is not exact, validation errors
-    /// for malformed wraps, and a storage error when the transaction cannot commit.
+    /// [`SyncStoreError::MemberEpochMismatch`] when the epoch list is not exact,
+    /// [`SyncStoreError::VaultKeyResponseLimit`] when its key response would exceed the wire
+    /// bounds, validation errors for malformed wraps, and a storage error when the transaction
+    /// cannot commit.
     pub async fn add_shared_sync_vault_member(
         &self,
         vault_id: VaultId,
@@ -821,6 +832,13 @@ impl SqliteStore {
         let supplied_epochs: Vec<u64> = wraps.iter().map(|wrap| wrap.epoch).collect();
         if supplied_epochs != epochs {
             return Err(SyncStoreError::MemberEpochMismatch);
+        }
+        if vault_keys_response_bytes(
+            wraps.iter().map(|wrap| (wrap.epoch, wrap.wrapped_vault_key.len())),
+            wraps.len(),
+        ) > MAX_SHARED_VAULT_KEYS_BODY_BYTES
+        {
+            return Err(SyncStoreError::VaultKeyResponseLimit);
         }
         let current = wraps.last().ok_or(SyncStoreError::InvalidMemberWraps)?;
         sqlx::query(
@@ -1727,6 +1745,77 @@ fn validate_member_wraps(wraps: &[SharedVaultKey]) -> Result<(), SyncStoreError>
         previous = wrap.epoch;
     }
     Ok(())
+}
+
+async fn check_epoch_key_response_capacity(
+    transaction: &mut Transaction<'_, Sqlite>,
+    vault_id: VaultId,
+    epoch: u64,
+    wraps: &[SharedVaultEpochWrap],
+) -> Result<(), SyncStoreError> {
+    let rows = sqlx::query(
+        "SELECT k.account_id, k.epoch, length(k.wrapped_vault_key) AS wrap_bytes
+         FROM sync_vault_member_keys AS k
+         JOIN sync_vault_members AS m
+           ON m.vault_id = k.vault_id AND m.account_id = k.account_id
+         WHERE k.vault_id = ? AND NOT EXISTS (
+           SELECT 1 FROM sync_vault_retired_epochs AS r
+           WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+         )",
+    )
+    .bind(vault_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut member_keys = HashMap::<AccountId, Vec<(u64, usize)>>::new();
+    let mut active_epochs = HashSet::new();
+    for row in rows {
+        let account_id = id_from_bytes(&row.try_get::<Vec<u8>, _>("account_id")?, "account_id")?;
+        let served_epoch = epoch_from_sql(row.try_get("epoch")?)?;
+        let wrap_bytes = usize::try_from(row.try_get::<i64, _>("wrap_bytes")?)
+            .map_err(|_| SyncStoreError::CorruptRow("wrapped_vault_key"))?;
+        if !(1..=MAX_SHARED_VAULT_KEY_BYTES).contains(&wrap_bytes) {
+            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        }
+        member_keys.entry(account_id).or_default().push((served_epoch, wrap_bytes));
+        active_epochs.insert(served_epoch);
+    }
+    if active_epochs.len() >= MAX_SHARED_VAULT_KEY_EPOCHS {
+        return Err(SyncStoreError::VaultKeyResponseLimit);
+    }
+    for wrap in wraps {
+        let existing = member_keys.get(&wrap.account_id).map(Vec::as_slice).unwrap_or_default();
+        let projected = vault_keys_response_bytes(
+            existing.iter().copied().chain(std::iter::once((epoch, wrap.wrapped_vault_key.len()))),
+            existing.len() + 1,
+        );
+        if projected > MAX_SHARED_VAULT_KEYS_BODY_BYTES {
+            return Err(SyncStoreError::VaultKeyResponseLimit);
+        }
+    }
+    Ok(())
+}
+
+fn vault_keys_response_bytes(keys: impl Iterator<Item = (u64, usize)>, count: usize) -> usize {
+    // Deterministic CBOR for {"keys": [{"epoch": uint, "wrapped_vault_key": bstr}, ...]}.
+    // The fixed map and text keys occupy 6 and 25 bytes respectively.
+    6 + cbor_argument_bytes(count as u64)
+        + keys
+            .map(|(epoch, wrap_bytes)| {
+                25 + cbor_argument_bytes(epoch)
+                    + cbor_argument_bytes(wrap_bytes as u64)
+                    + wrap_bytes
+            })
+            .sum::<usize>()
+}
+
+fn cbor_argument_bytes(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=255 => 2,
+        256..=65_535 => 3,
+        65_536..=4_294_967_295 => 5,
+        _ => 9,
+    }
 }
 
 fn map_constraint(error: sqlx::Error) -> SyncStoreError {
