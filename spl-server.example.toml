@@ -18,6 +18,10 @@ trusted_proxies = []
 names = ["all"]
 
 [sync]
+# Write bounds can be lowered, but cannot exceed these codec and storage ceilings.
+max_envelope_bytes = 266240
+max_batch_objects = 500
+max_batch_bytes = 4194304
 # SQLite cardinality limits. Session handshakes advertise the values enforced by the store.
 max_objects_per_vault = 100000
 max_shared_vaults_per_account = 1000
