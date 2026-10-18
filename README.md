@@ -73,7 +73,9 @@ body and returns `413 sync.invalid_request` for an oversized request. Member rem
 retirement reject any non-empty request body with a CBOR `400 sync.invalid_request` problem before
 changing state. Acknowledgements collect at most 17 bytes, the maximum canonical `{cursor: uint}`
 encoding, and reject larger bodies with a CBOR `400 sync.invalid_request` problem after authorization.
-These limits are not session-advertised write settings. Other route body limits and
+Change-feed and snapshot reads accept at most 37 query bytes for canonical `after` and `limit`
+parameters, rejecting longer queries with a CBOR `400 sync.invalid_request` problem after
+authorization. These limits are not session-advertised write settings. Other route body limits and
 multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
