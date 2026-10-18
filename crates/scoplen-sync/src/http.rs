@@ -810,12 +810,19 @@ async fn remove_vault_member<A: SyncAuthenticator>(
         account_id: Uuid::from_bytes(account_id),
         rotation_pending: true,
     };
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
+    let response_body = response.to_cbor().map_err(|error| {
         SyncHttpError::invalid(
             &instance,
             format!("could not encode shared-vault member removal response: {error}"),
         )
-    })?))
+    })?;
+    publish_vault_notification(
+        &state,
+        vault,
+        &api::SyncNotification::RotationPending { vault: Uuid::from_bytes(vault) },
+        "rotation_pending",
+    );
+    Ok(cbor_response(response_body))
 }
 
 async fn keys_get<A: SyncAuthenticator>(
@@ -1108,7 +1115,20 @@ fn publish_vault_advanced<A: SyncAuthenticator>(
     vault: storage::VaultId,
     seq: u64,
 ) {
-    let event = api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(vault), seq };
+    publish_vault_notification(
+        state,
+        vault,
+        &api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(vault), seq },
+        "vault_advanced",
+    );
+}
+
+fn publish_vault_notification<A: SyncAuthenticator>(
+    state: &SyncHttpState<A>,
+    vault: storage::VaultId,
+    event: &api::SyncNotification,
+    event_type: &'static str,
+) {
     for device_id in state.notifications.active_devices() {
         let recipient = AuthenticatedDevice { device_id };
         if state.authenticator.authorize_notifications(recipient).is_err()
@@ -1116,8 +1136,8 @@ fn publish_vault_advanced<A: SyncAuthenticator>(
         {
             continue;
         }
-        if state.notifications.publish(device_id, &event).is_err() {
-            tracing::warn!(event_type = "vault_advanced", "could not encode sync notification");
+        if state.notifications.publish(device_id, event).is_err() {
+            tracing::warn!(event_type, "could not encode sync notification");
         }
     }
 }
@@ -2614,6 +2634,97 @@ mod tests {
             .await
             .expect("malformed account response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn committed_member_removal_notifies_only_current_vault_readers() {
+        let (store, _personal_vault, admin_device) = test_store().await;
+        let vault = Uuid::now_v7();
+        let member = Uuid::now_v7();
+        store
+            .create_shared_sync_vault(vault.into_bytes(), TestAuthenticator::account_id(), &[1])
+            .await
+            .expect("create shared vault");
+        store
+            .add_shared_sync_vault_member(
+                vault.into_bytes(),
+                member.into_bytes(),
+                &[storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![2] }],
+            )
+            .await
+            .expect("add member");
+
+        let remaining_reader = Uuid::now_v7().into_bytes();
+        let removed_reader = Uuid::now_v7().into_bytes();
+        let revoked_reader = Uuid::now_v7().into_bytes();
+        let hub = NotificationHub::default();
+        let mut admin_events = hub.subscribe(admin_device);
+        let mut remaining_events = hub.subscribe(remaining_reader);
+        let mut removed_events = hub.subscribe(removed_reader);
+        let mut revoked_events = hub.subscribe(revoked_reader);
+        let mut authenticator = TestAuthenticator::new(admin_device, true);
+        authenticator.denied_read = Some((removed_reader, vault.into_bytes()));
+        authenticator.denied_notifications = Some(revoked_reader);
+        let app = router_with_notifications(store.clone(), authenticator, hub);
+        let removal_request = |account: Uuid| {
+            request_headers(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/sync/v1/vaults/{}/members/{account}", path(vault.into_bytes()))),
+            )
+            .body(Body::empty())
+            .expect("removal request builder")
+        };
+
+        let response = app
+            .clone()
+            .oneshot(removal_request(Uuid::from_bytes(TestAuthenticator::account_id())))
+            .await
+            .expect("last admin response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response = app
+            .clone()
+            .oneshot(removal_request(Uuid::now_v7()))
+            .await
+            .expect("missing member response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(matches!(admin_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+
+        let response = app.clone().oneshot(removal_request(member)).await.expect("remove member");
+        assert_eq!(response.status(), StatusCode::OK);
+        let expected = api::SyncNotification::RotationPending { vault };
+        assert_eq!(
+            api::SyncNotification::from_cbor(&admin_events.try_recv().expect("admin event")),
+            Ok(expected.clone())
+        );
+        assert_eq!(
+            api::SyncNotification::from_cbor(&remaining_events.try_recv().expect("reader event")),
+            Ok(expected)
+        );
+        assert!(matches!(removed_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(revoked_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+
+        let response = app.clone().oneshot(removal_request(member)).await.expect("repeat removal");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(matches!(admin_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+
+        let next_member = Uuid::now_v7();
+        store
+            .add_shared_sync_vault_member(
+                vault.into_bytes(),
+                next_member.into_bytes(),
+                &[storage::SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] }],
+            )
+            .await
+            .expect("add next member");
+        drop(admin_events);
+        drop(remaining_events);
+        drop(removed_events);
+        drop(revoked_events);
+        let response =
+            app.oneshot(removal_request(next_member)).await.expect("remove without peers");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
