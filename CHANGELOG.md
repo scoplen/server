@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Enforced the fixed 4 MiB account-key GET response limit during bundle updates and statement
+  replacement for every device wrap. Oversized projections roll back atomically and PUT returns
+  `413 sync.quota_exceeded`; exact 4 MiB responses remain readable.
 - Fixed PostgreSQL schema verification for composite foreign keys by pairing referenced columns
   with their source columns in constraint order, and synchronized its migration-count and job-time
   assertions with current migrations and queue behavior.

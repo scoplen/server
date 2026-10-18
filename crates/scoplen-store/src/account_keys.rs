@@ -107,6 +107,9 @@ pub enum AccountKeyStoreError {
     /// Device wraps exceed the K-4 count bound.
     #[error("account key device wraps exceed {MAX_DEVICE_WRAPS} entries")]
     DeviceWrapLimit,
+    /// A mutation would make an authenticated account-key response exceed its fixed wire bound.
+    #[error("account key response exceeds {MAX_KEY_BUNDLE_BYTES} bytes")]
+    KeyResponseLimit,
     /// The 64-byte Ed25519 signature was not representable by the public input type.
     #[error("account key signature must contain exactly 64 bytes")]
     InvalidSignature,
@@ -283,6 +286,7 @@ impl SqliteStore {
             .await
             .map_err(map_write_error)?;
         }
+        check_sqlite_key_response_capacity(&mut transaction, account_id).await?;
         transaction.commit().await?;
         Ok(AccountKeyBundlePut::Applied { revision: update.revision })
     }
@@ -336,6 +340,7 @@ impl SqliteStore {
             .await
             .map_err(map_write_error)?;
         }
+        check_sqlite_key_response_capacity(&mut transaction, account_id).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -499,6 +504,7 @@ impl PostgresStore {
             .await
             .map_err(map_write_error)?;
         }
+        check_postgres_key_response_capacity(&mut transaction, account_id).await?;
         transaction.commit().await?;
         Ok(AccountKeyBundlePut::Applied { revision: update.revision })
     }
@@ -553,6 +559,7 @@ impl PostgresStore {
             .await
             .map_err(map_write_error)?;
         }
+        check_postgres_key_response_capacity(&mut transaction, account_id).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -694,6 +701,143 @@ async fn read_postgres_statements(
 ) -> Result<Vec<Vec<u8>>, AccountKeyStoreError> {
     let rows = sqlx::query(query).bind(account_id.as_slice()).fetch_all(&mut **transaction).await?;
     rows.into_iter().map(|row| validate_artifact(row.try_get(field)?, field)).collect()
+}
+
+async fn check_sqlite_key_response_capacity(
+    transaction: &mut Transaction<'_, Sqlite>,
+    account_id: AccountId,
+) -> Result<(), AccountKeyStoreError> {
+    let row = sqlx::query(
+        "SELECT revision, length(account_signing_key) AS signing_len,
+                length(account_kem_key) AS kem_len, length(recovery_blob) AS recovery_len
+         FROM sync_account_key_bundles WHERE account_id = ?",
+    )
+    .bind(account_id.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else { return Ok(()) };
+    let wraps = sqlx::query_scalar::<_, i64>(
+        "SELECT length(wrapped_ark) FROM sync_account_key_device_wraps WHERE account_id = ?",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let certificates = sqlx::query_scalar::<_, i64>(
+        "SELECT length(certificate) FROM sync_account_key_certificates WHERE account_id = ?",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let revocations = sqlx::query_scalar::<_, i64>(
+        "SELECT length(revocation) FROM sync_account_key_revocations WHERE account_id = ?",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    check_key_response_capacity(
+        revision_from_sql(row.try_get("revision")?)?,
+        [row.try_get("signing_len")?, row.try_get("kem_len")?, row.try_get("recovery_len")?],
+        &wraps,
+        &certificates,
+        &revocations,
+    )
+}
+
+async fn check_postgres_key_response_capacity(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: AccountId,
+) -> Result<(), AccountKeyStoreError> {
+    let row = sqlx::query(
+        "SELECT revision, octet_length(account_signing_key)::bigint AS signing_len,
+                octet_length(account_kem_key)::bigint AS kem_len,
+                octet_length(recovery_blob)::bigint AS recovery_len
+         FROM sync_account_key_bundles WHERE account_id = $1",
+    )
+    .bind(account_id.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else { return Ok(()) };
+    let wraps = sqlx::query_scalar::<_, i64>(
+        "SELECT octet_length(wrapped_ark)::bigint FROM sync_account_key_device_wraps WHERE account_id = $1",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let certificates = sqlx::query_scalar::<_, i64>(
+        "SELECT octet_length(certificate)::bigint FROM sync_account_key_certificates WHERE account_id = $1",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let revocations = sqlx::query_scalar::<_, i64>(
+        "SELECT octet_length(revocation)::bigint FROM sync_account_key_revocations WHERE account_id = $1",
+    )
+    .bind(account_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    check_key_response_capacity(
+        revision_from_sql(row.try_get("revision")?)?,
+        [row.try_get("signing_len")?, row.try_get("kem_len")?, row.try_get("recovery_len")?],
+        &wraps,
+        &certificates,
+        &revocations,
+    )
+}
+
+fn check_key_response_capacity(
+    revision: u64,
+    keys: [i64; 3],
+    wraps: &[i64],
+    certificates: &[i64],
+    revocations: &[i64],
+) -> Result<(), AccountKeyStoreError> {
+    if wraps.is_empty() {
+        return Err(AccountKeyStoreError::CorruptRow("device_wraps"));
+    }
+    // Deterministic CBOR: one seven-entry map, its text keys, one uint, four bstrs,
+    // and two arrays of bstrs. The map header and seven text keys occupy 97 bytes.
+    let mut base = 97 + cbor_argument_bytes(revision);
+    for (field, length) in
+        ["account_signing_key", "account_kem_key", "recovery_blob"].into_iter().zip(keys)
+    {
+        base = base.saturating_add(cbor_bstr_bytes(stored_artifact_length(length, field)?));
+    }
+    for (field, lengths) in [("certificate", certificates), ("revocation", revocations)] {
+        base = base.saturating_add(cbor_argument_bytes(lengths.len() as u64));
+        for &length in lengths {
+            base = base.saturating_add(cbor_bstr_bytes(stored_artifact_length(length, field)?));
+        }
+    }
+    for &length in wraps {
+        let size =
+            base.saturating_add(cbor_bstr_bytes(stored_artifact_length(length, "wrapped_ark")?));
+        if size > MAX_KEY_BUNDLE_BYTES {
+            return Err(AccountKeyStoreError::KeyResponseLimit);
+        }
+    }
+    Ok(())
+}
+
+fn stored_artifact_length(length: i64, field: &'static str) -> Result<usize, AccountKeyStoreError> {
+    let length = usize::try_from(length).map_err(|_| AccountKeyStoreError::CorruptRow(field))?;
+    if !(1..=MAX_KEY_ARTIFACT_BYTES).contains(&length) {
+        return Err(AccountKeyStoreError::CorruptRow(field));
+    }
+    Ok(length)
+}
+
+fn cbor_bstr_bytes(length: usize) -> usize {
+    cbor_argument_bytes(length as u64) + length
+}
+
+fn cbor_argument_bytes(value: u64) -> usize {
+    match value {
+        0..=23 => 1,
+        24..=255 => 2,
+        256..=65_535 => 3,
+        65_536..=4_294_967_295 => 5,
+        _ => 9,
+    }
 }
 
 fn artifact_from_row(

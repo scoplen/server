@@ -102,6 +102,11 @@ Epoch publication and member addition also check that every affected member's co
 response remains within the fixed 64 non-retired epoch and 4 MiB encoded-response bounds. A
 mutation that would exceed either bound returns `413 sync.quota_exceeded` without changing state;
 retiring an older epoch after re-encryption or using smaller wraps can free capacity.
+Account-key bundle updates and certificate/revocation replacement also check every resulting
+device-specific `GET /sync/v1/keys` response against the fixed 4 MiB CBOR limit inside the same
+account transaction. An update that would exceed it returns `413 sync.quota_exceeded` without
+changing the bundle or statements. Statements may precede the first bundle; that bundle must pass
+the same check before it becomes visible.
 
 ## Repository shape
 
