@@ -53,6 +53,9 @@ validates the local backend before startup. Bootstrap also creates the independe
 For a stale object-write batch, the sync adapter returns every conflicting object in request order
 with its current change or an explicit absent value. If a stored change cannot be encoded within
 the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomplete conflict body.
+Authenticated change, snapshot, object-version, account-key, and vault-key reads also return
+`503 sync.storage_unavailable` when persisted data cannot form a valid complete response; malformed
+caller input retains its request error and no partial success body is sent.
 The SQLite sync store enforces configured cardinality limits in the mutation transaction. Defaults
 are 100,000 current objects per vault (including tombstones), 1,000 shared vault memberships per
 account, and 1,000 accounts per shared vault. The K-4 session advertises the values enforced by

@@ -786,9 +786,9 @@ async fn vault_keys<A: SyncAuthenticator>(
             })
             .collect(),
     };
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode vault keys: {error}"))
-    })?))
+    Ok(cbor_response(
+        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn publish_vault_epoch<A: SyncAuthenticator>(
@@ -1010,9 +1010,9 @@ async fn keys_get<A: SyncAuthenticator>(
         certificates: bundle.certificates,
         revocations: bundle.revocations,
     };
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode account key bundle: {error}"))
-    })?))
+    Ok(cbor_response(
+        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn keys_put<A: SyncAuthenticator>(
@@ -1088,13 +1088,13 @@ async fn changes<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
-    response.validate_for_query(&query).map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("invalid change page: {error}"))
-    })?;
+    response
+        .validate_for_query(&query)
+        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode change page: {error}"))
-    })?))
+    Ok(cbor_response(
+        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn snapshot<A: SyncAuthenticator>(
@@ -1119,13 +1119,13 @@ async fn snapshot<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
-    response.validate_for_query(&query).map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("invalid snapshot page: {error}"))
-    })?;
+    response
+        .validate_for_query(&query)
+        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode snapshot page: {error}"))
-    })?))
+    Ok(cbor_response(
+        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn versions<A: SyncAuthenticator>(
@@ -1147,13 +1147,13 @@ async fn versions<A: SyncAuthenticator>(
         .map_err(|error| SyncHttpError::from_store(error, &instance))?;
     let response =
         api::SyncVersionsResponse { versions: versions.into_iter().map(change_to_api).collect() };
-    response.validate_for_object(Uuid::from_bytes(object)).map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("invalid version response: {error}"))
-    })?;
+    response
+        .validate_for_object(Uuid::from_bytes(object))
+        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode versions: {error}"))
-    })?))
+    Ok(cbor_response(
+        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn objects<A: SyncAuthenticator>(
@@ -1736,6 +1736,18 @@ impl SyncHttpError {
             detail,
             false,
             false,
+        )
+    }
+
+    fn invalid_stored_response(instance: &str) -> Box<Self> {
+        Self::known(
+            instance,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync.storage_unavailable",
+            "Sync service unavailable",
+            "The server could not construct a valid response from stored sync data; no data changed and retrying may help.",
+            false,
+            true,
         )
     }
 
@@ -4459,6 +4471,146 @@ mod tests {
         let problem = ProblemDetails::from_cbor(&body).expect("storage problem");
         assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
         assert!(api::SyncConflictProblem::from_cbor(&body).is_err());
+    }
+
+    async fn assert_invalid_stored_read(app: &Router, uri: &str) {
+        let request = request_headers(Request::builder().uri(uri))
+            .body(Body::empty())
+            .expect("authenticated read request");
+        let response = app.clone().oneshot(request).await.expect("read response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).expect("problem content type"),
+            "application/problem+cbor"
+        );
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("complete problem body");
+        assert_eq!(problem.code.as_str(), "sync.storage_unavailable", "{uri}");
+        assert!(!problem.changed, "{uri}");
+        assert!(problem.retryable, "{uri}");
+    }
+
+    #[tokio::test]
+    async fn invalid_stored_object_records_fail_closed_for_all_read_routes() {
+        let (store, vault, device) = test_store().await;
+        let valid_object = Uuid::now_v7().into_bytes();
+        let invalid_object = Uuid::now_v7().into_bytes();
+        store
+            .write_sync_batch(
+                vault,
+                &[
+                    storage::ObjectWrite {
+                        object_id: valid_object,
+                        base_sequence: None,
+                        envelope: vec![1],
+                        key_epoch: 1,
+                        tombstone: false,
+                        signer_device_id: Some(device),
+                    },
+                    storage::ObjectWrite {
+                        object_id: invalid_object,
+                        base_sequence: None,
+                        envelope: vec![2],
+                        key_epoch: 1,
+                        tombstone: false,
+                        signer_device_id: Some([1; 16]),
+                    },
+                ],
+            )
+            .await
+            .expect("stored objects");
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        for uri in [
+            format!("/sync/v1/vaults/{}/changes?after=0&limit=10", path(vault)),
+            format!("/sync/v1/vaults/{}/snapshot?after=0&limit=10", path(vault)),
+            format!("/sync/v1/vaults/{}/objects/{}/versions", path(vault), path(invalid_object)),
+        ] {
+            assert_invalid_stored_read(&app, &uri).await;
+        }
+
+        let mut connection = store.pool().acquire().await.expect("test SQLite connection");
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&mut *connection)
+            .await
+            .expect("allow legacy corrupt row");
+        sqlx::query(
+            "UPDATE sync_objects SET signer_device_id = ? WHERE vault_id = ? AND object_id = ?",
+        )
+        .bind([1_u8].as_slice())
+        .bind(vault.as_slice())
+        .bind(invalid_object.as_slice())
+        .execute(&mut *connection)
+        .await
+        .expect("corrupt stored signer id");
+        sqlx::query("PRAGMA ignore_check_constraints = OFF")
+            .execute(&mut *connection)
+            .await
+            .expect("restore constraints");
+        drop(connection);
+        assert_invalid_stored_read(
+            &app,
+            &format!("/sync/v1/vaults/{}/changes?after=0&limit=10", path(vault)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn oversized_stored_account_key_response_is_unavailable() {
+        let (store, _vault, _) = test_store().await;
+        let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+        ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let device_ids = [ids[0].into_bytes(), ids[1].into_bytes()];
+        let device = device_ids[0];
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(key_update(device_ids).to_cbor().expect("key update")))
+        .expect("key update request");
+        assert_eq!(
+            app.clone().oneshot(request).await.expect("key update response").status(),
+            StatusCode::OK
+        );
+        let certificates = (0..65)
+            .map(|value| {
+                let mut certificate = vec![0; key_storage::MAX_KEY_ARTIFACT_BYTES];
+                certificate[0] = value;
+                certificate
+            })
+            .collect::<Vec<_>>();
+        store
+            .replace_account_key_statements(TestAuthenticator::account_id(), &certificates, &[])
+            .await
+            .expect("stored certificates");
+        assert_invalid_stored_read(&app, "/sync/v1/keys").await;
+    }
+
+    #[tokio::test]
+    async fn excessive_stored_vault_key_epochs_are_unavailable() {
+        let (store, _personal_vault, device) = test_store().await;
+        let vault = Uuid::now_v7().into_bytes();
+        let account = TestAuthenticator::account_id();
+        store.create_shared_sync_vault(vault, account, &[1]).await.expect("shared vault");
+        let excess_epoch =
+            i64::try_from(api::MAX_SYNC_VAULT_KEY_EPOCHS).expect("bounded epochs") + 1;
+        for epoch in 2..=excess_epoch {
+            sqlx::query(
+                "INSERT INTO sync_vault_member_keys (vault_id, account_id, epoch, wrapped_vault_key) \
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(vault.as_slice())
+            .bind(account.as_slice())
+            .bind(epoch)
+            .bind([1_u8].as_slice())
+            .execute(store.pool())
+            .await
+            .expect("legacy key epoch");
+        }
+        let app = router(store, TestAuthenticator::new(device, true));
+        assert_invalid_stored_read(&app, &format!("/sync/v1/vaults/{}/keys", path(vault))).await;
     }
 
     #[tokio::test]

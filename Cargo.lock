@@ -2719,6 +2719,7 @@ dependencies = [
  "scoplen-model",
  "scoplen-store",
  "semver",
+ "sqlx",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tower",
