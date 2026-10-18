@@ -12,3 +12,9 @@ Signed-off-by: Your Name <you@example.com>
 ```
 
 Do not commit generated secrets, local data, `.env` files, or deployment credentials.
+
+The DCO workflow treats the signed repository-import snapshot in
+`DCO_IMPORT_BASELINE` as the boundary of the imported history. Initial pushes and new branches
+check that snapshot and every descendant commit, including merges. Later pushes and pull requests
+check their full event range. A signed branch tip cannot hide an unsigned intermediate commit.
+Run `bash scripts/test-dco.sh` to verify these cases locally.
