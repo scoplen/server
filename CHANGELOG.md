@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Fixed account-key PUT retries after signing-key rotation. An authenticated, authorized exact
+  replay skips current-key signature verification, while altered replays conflict and new
+  revisions still require valid signatures. SQLite and PostgreSQL classify one read snapshot;
+  the final mutation transaction rechecks revision and exact bytes against concurrent rotations.
 - Enforced the fixed 4 MiB account-key GET response limit during bundle updates and statement
   replacement for every device wrap. Oversized projections roll back atomically and PUT returns
   `413 sync.quota_exceeded`; exact 4 MiB responses remain readable.

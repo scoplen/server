@@ -370,11 +370,13 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         operation: SyncKeysOperation,
     ) -> Result<(), AuthFailure>;
 
-    /// Validate the account-key update before storage.
+    /// Validate a new account-key revision before storage.
     ///
     /// Implementations MUST verify the signature over `update.signature_input()` with the
     /// current account signing key and require exactly one wrap for every enrolled, unrevoked
     /// device. The storage layer only enforces opaque bounds and revision replay semantics.
+    /// An authenticated and authorized exact replay of the persisted revision bypasses this
+    /// callback, since its original signature may use the key replaced by that rotation.
     ///
     /// # Errors
     ///
@@ -1042,14 +1044,21 @@ async fn keys_put<A: SyncAuthenticator>(
     let update = api::SyncAccountKeyBundleUpdate::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid account key bundle: {error}"))
     })?;
-    state
-        .authenticator
-        .validate_key_bundle_update(identity, account_id, &update)
-        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    let update = account_key_update_to_storage(update, &instance)?;
+    let stored_update = account_key_update_to_storage(update.clone(), &instance)?;
+    let preflight = state
+        .store
+        .preflight_account_key_bundle_update(account_id, &stored_update)
+        .await
+        .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
+    if preflight == key_storage::AccountKeyBundlePreflight::New {
+        state
+            .authenticator
+            .validate_key_bundle_update(identity, account_id, &update)
+            .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    }
     let result = state
         .store
-        .put_account_key_bundle(account_id, &update)
+        .put_account_key_bundle(account_id, &stored_update)
         .await
         .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
     let revision = match result {
@@ -1851,7 +1860,10 @@ impl IntoResponse for Box<SyncHttpError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicU8, Ordering},
+    };
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, header::AUTHORIZATION};
@@ -1874,6 +1886,7 @@ mod tests {
         denied_notifications: Option<storage::DeviceId>,
         /// Test-only stand-in for the crypto and membership validator injected in production.
         reject_writes: bool,
+        expected_key_signature: Option<Arc<AtomicU8>>,
         seen_requests: Arc<Mutex<Vec<(String, String)>>>,
     }
 
@@ -1885,6 +1898,7 @@ mod tests {
                 denied_read: None,
                 denied_notifications: None,
                 reject_writes: false,
+                expected_key_signature: None,
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -2010,9 +2024,13 @@ mod tests {
             &self,
             _identity: AuthenticatedDevice,
             _account_id: key_storage::AccountId,
-            _update: &api::SyncAccountKeyBundleUpdate,
+            update: &api::SyncAccountKeyBundleUpdate,
         ) -> Result<(), AuthFailure> {
-            if self.reject_writes {
+            if self.reject_writes
+                || self.expected_key_signature.as_ref().is_some_and(|expected| {
+                    update.signature.first().copied() != Some(expected.load(Ordering::SeqCst))
+                })
+            {
                 Err(AuthFailure::new(
                     StatusCode::BAD_REQUEST,
                     "sync.invalid_request",
@@ -3975,6 +3993,92 @@ mod tests {
             to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("conflict body");
         let problem = ProblemDetails::from_cbor(&response_body).expect("conflict problem");
         assert_eq!(problem.code.as_str(), "sync.conflict");
+    }
+
+    #[tokio::test]
+    async fn account_key_exact_replay_survives_signing_key_rotation() {
+        let (store, _vault, _) = test_store().await;
+        let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+        ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let device_ids = [ids[0].into_bytes(), ids[1].into_bytes()];
+        let expected_signature = Arc::new(AtomicU8::new(0x11));
+        let mut authenticator = TestAuthenticator::new(device_ids[0], true);
+        authenticator.expected_key_signature = Some(Arc::clone(&expected_signature));
+        let app = router(store.clone(), authenticator);
+        let update = key_update(device_ids);
+        let body = update.to_cbor().expect("key update");
+
+        let put = |body: Vec<u8>| {
+            request_headers(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/sync/v1/keys")
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body))
+            .expect("key update request")
+        };
+        assert_eq!(
+            app.clone().oneshot(put(body.clone())).await.expect("first update").status(),
+            StatusCode::OK
+        );
+        expected_signature.store(0x22, Ordering::SeqCst);
+        assert_eq!(
+            app.clone().oneshot(put(body.clone())).await.expect("exact replay").status(),
+            StatusCode::OK
+        );
+
+        let mut changed = update.clone();
+        changed.account_kem_key.push(0x33);
+        let response = app
+            .clone()
+            .oneshot(put(changed.to_cbor().expect("changed update")))
+            .await
+            .expect("changed replay");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let problem = ProblemDetails::from_cbor(
+            &to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("conflict body"),
+        )
+        .expect("conflict problem");
+        assert_eq!(problem.code.as_str(), "sync.conflict");
+
+        let mut next = update;
+        next.revision = 2;
+        let response = app
+            .clone()
+            .oneshot(put(next.to_cbor().expect("next update")))
+            .await
+            .expect("old-signer next revision");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let problem = ProblemDetails::from_cbor(
+            &to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("signature body"),
+        )
+        .expect("signature problem");
+        assert_eq!(problem.code.as_str(), "sync.invalid_request");
+
+        let unauthenticated = Request::builder()
+            .method("PUT")
+            .uri("/sync/v1/keys")
+            .header(header::CONTENT_TYPE, "application/cbor")
+            .body(Body::from(body.clone()))
+            .expect("unauthenticated replay");
+        assert_eq!(
+            app.clone().oneshot(unauthenticated).await.expect("unauthenticated response").status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let denied = router(store.clone(), TestAuthenticator::new(device_ids[0], false));
+        assert_eq!(
+            denied.oneshot(put(body)).await.expect("denied replay").status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            store
+                .get_account_key_bundle(TestAuthenticator::account_id(), device_ids[0])
+                .await
+                .expect("stored bundle")
+                .revision,
+            1
+        );
     }
 
     #[tokio::test]

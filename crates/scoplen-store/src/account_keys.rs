@@ -82,6 +82,16 @@ pub enum AccountKeyBundlePut {
     Replay { revision: u64 },
 }
 
+/// Read-only classification of an authenticated bundle update before signature validation.
+/// The subsequent PUT transaction remains the authority if the revision changes meanwhile.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AccountKeyBundlePreflight {
+    /// The update targets the next revision and requires current-key signature validation.
+    New,
+    /// The exact signed bytes are already stored at the current revision.
+    Replay,
+}
+
 /// Persistence failures for account key bundles.
 #[derive(Debug, Error)]
 pub enum AccountKeyStoreError {
@@ -199,6 +209,50 @@ impl SqliteStore {
             certificates,
             revocations,
         })
+    }
+
+    /// Classify a candidate update against one read snapshot without changing storage.
+    ///
+    /// Authentication and account authorization must precede this call. A `Replay` result only
+    /// permits skipping current-key signature validation; the final PUT must still recheck it.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, revision-conflict, or database errors.
+    pub async fn preflight_account_key_bundle_update(
+        &self,
+        account_id: AccountId,
+        update: &AccountKeyBundleUpdate,
+    ) -> Result<AccountKeyBundlePreflight, AccountKeyStoreError> {
+        validate_update(update)?;
+        let mut transaction = self.pool().begin().await?;
+        let existing = sqlx::query(
+            "SELECT revision, account_signing_key, account_kem_key, recovery_blob, signature
+             FROM sync_account_key_bundles WHERE account_id = ?",
+        )
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let result = if let Some(row) = existing {
+            let current_revision = revision_from_sql(row.try_get("revision")?)?;
+            if update.revision == current_revision {
+                if update_matches_current(&mut transaction, account_id, update, &row).await? {
+                    Ok(AccountKeyBundlePreflight::Replay)
+                } else {
+                    Err(AccountKeyStoreError::Conflict { current_revision })
+                }
+            } else if current_revision.checked_add(1) == Some(update.revision) {
+                Ok(AccountKeyBundlePreflight::New)
+            } else {
+                Err(AccountKeyStoreError::Conflict { current_revision })
+            }
+        } else if update.revision == 1 {
+            Ok(AccountKeyBundlePreflight::New)
+        } else {
+            Err(AccountKeyStoreError::Conflict { current_revision: 0 })
+        };
+        transaction.commit().await?;
+        result
     }
 
     /// Atomically apply a signed account key rotation with revision compare-and-swap semantics.
@@ -418,6 +472,55 @@ impl PostgresStore {
             certificates,
             revocations,
         })
+    }
+
+    /// Classify a candidate update against one read-only repeatable-read snapshot.
+    ///
+    /// Authentication and account authorization must precede this call. A `Replay` result only
+    /// permits skipping current-key signature validation; the final PUT must still recheck it.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, revision-conflict, or database errors.
+    pub async fn preflight_account_key_bundle_update(
+        &self,
+        account_id: AccountId,
+        update: &AccountKeyBundleUpdate,
+    ) -> Result<AccountKeyBundlePreflight, AccountKeyStoreError> {
+        validate_update(update)?;
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let existing = sqlx::query(
+            "SELECT revision, account_signing_key, account_kem_key, recovery_blob, signature
+             FROM sync_account_key_bundles WHERE account_id = $1",
+        )
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let result = if let Some(row) = existing {
+            let current_revision = revision_from_sql(row.try_get("revision")?)?;
+            if update.revision == current_revision {
+                if update_matches_current_postgres(&mut transaction, account_id, update, &row)
+                    .await?
+                {
+                    Ok(AccountKeyBundlePreflight::Replay)
+                } else {
+                    Err(AccountKeyStoreError::Conflict { current_revision })
+                }
+            } else if current_revision.checked_add(1) == Some(update.revision) {
+                Ok(AccountKeyBundlePreflight::New)
+            } else {
+                Err(AccountKeyStoreError::Conflict { current_revision })
+            }
+        } else if update.revision == 1 {
+            Ok(AccountKeyBundlePreflight::New)
+        } else {
+            Err(AccountKeyStoreError::Conflict { current_revision: 0 })
+        };
+        transaction.commit().await?;
+        result
     }
 
     /// Atomically apply a signed account key rotation with PostgreSQL revision CAS semantics.
