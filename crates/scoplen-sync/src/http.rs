@@ -1094,9 +1094,32 @@ async fn objects<A: SyncAuthenticator>(
     response.validate_for_batch(&batch).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid write assignment: {error}"))
     })?;
-    Ok(cbor_response(response.to_cbor().map_err(|error| {
+    let response_body = response.to_cbor().map_err(|error| {
         SyncHttpError::invalid(&instance, format!("could not encode write assignment: {error}"))
-    })?))
+    })?;
+    if let Some(seq) = response.assignments.iter().map(|assignment| assignment.seq).max() {
+        publish_vault_advanced(&state, vault, seq);
+    }
+    Ok(cbor_response(response_body))
+}
+
+fn publish_vault_advanced<A: SyncAuthenticator>(
+    state: &SyncHttpState<A>,
+    vault: storage::VaultId,
+    seq: u64,
+) {
+    let event = api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(vault), seq };
+    for device_id in state.notifications.active_devices() {
+        let recipient = AuthenticatedDevice { device_id };
+        if state.authenticator.authorize_notifications(recipient).is_err()
+            || state.authenticator.authorize(recipient, vault, SyncOperation::Read).is_err()
+        {
+            continue;
+        }
+        if state.notifications.publish(device_id, &event).is_err() {
+            tracing::warn!(event_type = "vault_advanced", "could not encode sync notification");
+        }
+    }
 }
 
 async fn ack<A: SyncAuthenticator>(
@@ -1603,6 +1626,8 @@ mod tests {
     struct TestAuthenticator {
         device_id: storage::DeviceId,
         allowed: bool,
+        denied_read: Option<(storage::DeviceId, storage::VaultId)>,
+        denied_notifications: Option<storage::DeviceId>,
         /// Test-only stand-in for the crypto and membership validator injected in production.
         reject_writes: bool,
         seen_requests: Arc<Mutex<Vec<(String, String)>>>,
@@ -1613,6 +1638,8 @@ mod tests {
             Self {
                 device_id,
                 allowed,
+                denied_read: None,
+                denied_notifications: None,
                 reject_writes: false,
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -1652,11 +1679,14 @@ mod tests {
 
         fn authorize(
             &self,
-            _identity: AuthenticatedDevice,
-            _vault: storage::VaultId,
-            _operation: SyncOperation,
+            identity: AuthenticatedDevice,
+            vault: storage::VaultId,
+            operation: SyncOperation,
         ) -> Result<(), AuthFailure> {
-            if self.allowed {
+            if self.allowed
+                && !(operation == SyncOperation::Read
+                    && self.denied_read == Some((identity.device_id, vault)))
+            {
                 Ok(())
             } else {
                 Err(AuthFailure::new(
@@ -1773,9 +1803,9 @@ mod tests {
 
         fn authorize_notifications(
             &self,
-            _identity: AuthenticatedDevice,
+            identity: AuthenticatedDevice,
         ) -> Result<(), AuthFailure> {
-            if self.allowed {
+            if self.allowed && self.denied_notifications != Some(identity.device_id) {
                 Ok(())
             } else {
                 Err(AuthFailure::new(
@@ -1805,6 +1835,17 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    fn write_request(vault: storage::VaultId, batch: &SyncWriteBatch) -> Request<Body> {
+        request_headers(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sync/v1/vaults/{}/objects", path(vault)))
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(batch.to_cbor().expect("encode write batch")))
+        .expect("write request")
     }
 
     #[test]
@@ -2683,6 +2724,165 @@ mod tests {
         assert_eq!(api::SyncNotification::from_cbor(&payload).expect("notification cbor"), event);
         socket.close(None).await.expect("close notification websocket");
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn committed_writes_notify_only_current_readers_of_the_written_vault() {
+        let (store, first_vault, writer) = test_store().await;
+        let second_vault = Uuid::now_v7().into_bytes();
+        store
+            .create_sync_vault(second_vault, storage::VaultKind::Personal)
+            .await
+            .expect("create second vault");
+        let removed_reader = Uuid::now_v7().into_bytes();
+        let revoked_reader = Uuid::now_v7().into_bytes();
+        let hub = NotificationHub::default();
+        let mut writer_events = hub.subscribe(writer);
+        let mut removed_events = hub.subscribe(removed_reader);
+        let mut revoked_events = hub.subscribe(revoked_reader);
+        let mut authenticator = TestAuthenticator::new(writer, true);
+        authenticator.denied_read = Some((removed_reader, first_vault));
+        authenticator.denied_notifications = Some(revoked_reader);
+        let app = router_with_notifications(store, authenticator, hub.clone());
+
+        let first_batch = SyncWriteBatch {
+            writes: (0..2)
+                .map(|_| api::SyncWrite {
+                    object_id: Uuid::now_v7(),
+                    base_seq: None,
+                    payload: vec![1],
+                    tombstone: false,
+                })
+                .collect(),
+        };
+        let response = app
+            .clone()
+            .oneshot(write_request(first_vault, &first_batch))
+            .await
+            .expect("first write response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("first body");
+        let assignments = SyncWriteBatchResponse::from_cbor(&body).expect("first assignments");
+        assert_eq!(assignments.assignments.len(), 2);
+        assert_eq!(assignments.assignments[1].seq, 2);
+        assert_eq!(
+            api::SyncNotification::from_cbor(&writer_events.try_recv().expect("writer event")),
+            Ok(api::SyncNotification::VaultAdvanced {
+                vault: Uuid::from_bytes(first_vault),
+                seq: 2
+            })
+        );
+        assert!(matches!(removed_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(revoked_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+
+        let second_batch = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                object_id: Uuid::now_v7(),
+                base_seq: None,
+                payload: vec![2],
+                tombstone: false,
+            }],
+        };
+        let response = app
+            .oneshot(write_request(second_vault, &second_batch))
+            .await
+            .expect("second write response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let second_event =
+            api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(second_vault), seq: 1 };
+        assert_eq!(
+            api::SyncNotification::from_cbor(&writer_events.try_recv().expect("writer event")),
+            Ok(second_event.clone())
+        );
+        assert_eq!(
+            api::SyncNotification::from_cbor(&removed_events.try_recv().expect("reader event")),
+            Ok(second_event)
+        );
+        assert!(matches!(revoked_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn rejected_writes_never_notify_and_disconnected_receivers_do_not_fail_writes() {
+        let (store, vault, writer) = test_store().await;
+        let hub = NotificationHub::default();
+        let mut events = hub.subscribe(writer);
+        let app = router_with_notifications(
+            store.clone(),
+            TestAuthenticator::new(writer, true),
+            hub.clone(),
+        );
+        let first_batch = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                object_id: Uuid::now_v7(),
+                base_seq: None,
+                payload: vec![1],
+                tombstone: false,
+            }],
+        };
+        let response = app
+            .clone()
+            .oneshot(write_request(vault, &first_batch))
+            .await
+            .expect("initial write response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = events.try_recv().expect("initial notification");
+
+        let response = app
+            .clone()
+            .oneshot(write_request(vault, &first_batch))
+            .await
+            .expect("conflicting write response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let rejected_batch = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                object_id: Uuid::now_v7(),
+                base_seq: None,
+                payload: vec![2],
+                tombstone: false,
+            }],
+        };
+        let mut rejecting_authenticator = TestAuthenticator::new(writer, true);
+        rejecting_authenticator.reject_writes = true;
+        let rejecting_app =
+            router_with_notifications(store.clone(), rejecting_authenticator, hub.clone());
+        let response = rejecting_app
+            .oneshot(write_request(vault, &rejected_batch))
+            .await
+            .expect("rejected write response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let denied_app = router_with_notifications(
+            store.clone(),
+            TestAuthenticator::new(writer, false),
+            hub.clone(),
+        );
+        let response = denied_app
+            .oneshot(write_request(vault, &rejected_batch))
+            .await
+            .expect("denied write response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let unauthenticated = Request::builder()
+            .method("POST")
+            .uri(format!("/sync/v1/vaults/{}/objects", path(vault)))
+            .header(header::CONTENT_TYPE, "application/cbor")
+            .body(Body::from(rejected_batch.to_cbor().expect("encode write batch")))
+            .expect("unauthenticated request");
+        let response =
+            app.clone().oneshot(unauthenticated).await.expect("unauthenticated write response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+
+        drop(events);
+        let response = app
+            .oneshot(write_request(vault, &rejected_batch))
+            .await
+            .expect("write without receiver response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("write body");
+        let assignments = SyncWriteBatchResponse::from_cbor(&body).expect("write assignments");
+        assert_eq!(assignments.assignments[0].seq, 2);
     }
 
     #[tokio::test]

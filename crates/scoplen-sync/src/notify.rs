@@ -45,6 +45,13 @@ impl NotificationHub {
             .map_or(0, broadcast::Sender::receiver_count)
     }
 
+    /// List connected devices for authorization before local publication.
+    pub(crate) fn active_devices(&self) -> Vec<DeviceId> {
+        let mut channels = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        channels.retain(|_, sender| sender.receiver_count() > 0);
+        channels.keys().copied().collect()
+    }
+
     /// Encode and publish one event to all current connections for a device.
     ///
     /// The return value is the number of receivers that accepted the event. Publishing to a
@@ -96,5 +103,18 @@ mod tests {
         let hub = NotificationHub::default();
         let event = SyncNotification::DeviceRevoked;
         assert_eq!(hub.publish([3; 16], &event).expect("event encodes"), 0);
+    }
+
+    #[test]
+    fn active_devices_excludes_closed_connections() {
+        let hub = NotificationHub::default();
+        let first_device = [1; 16];
+        let second_device = [2; 16];
+        let first = hub.subscribe(first_device);
+        let _second = hub.subscribe(second_device);
+        drop(first);
+
+        assert_eq!(hub.active_devices(), vec![second_device]);
+        assert_eq!(hub.receiver_count(first_device), 0);
     }
 }

@@ -25,7 +25,10 @@ account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
 `/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
 applies an injected device policy, and fans out deterministic CBOR events through a caller-owned
-local hub. It requires an injected authenticator that binds DPoP proofs to the request method and
+local hub. Committed object writes publish a vault-advancement hint to connected devices that
+still pass notification and vault-read authorization; notification delivery cannot roll back a
+write, and clients can fall back to polling. This fan-out remains process-local. The router
+requires an injected authenticator that binds DPoP proofs to the request method and
 URI, authorizes vault, account-key, and notification operations, records the creator's initial
 shared-vault membership and opaque epoch-1 key wrap, adds and removes members with historical
 opaque wraps, validates account-key signatures and active-device wraps, and validates encrypted

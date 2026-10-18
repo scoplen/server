@@ -13,6 +13,7 @@ scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "1
 scoplen-store = { path = "../scoplen-store" }
 semver.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
