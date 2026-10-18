@@ -67,7 +67,8 @@ batch object count, and encoded batch bytes, advertises those bounds in the sess
 lowered from their defaults; the current K-4 codec and SQLite store prevent raising them.
 Account-key updates, shared-vault epoch publication, and member addition each enforce their fixed
 4 MiB K-4 request bound before collecting the body and return `413 sync.invalid_request` when
-oversized. These bounds are not session-advertised write settings. Other route body limits and
+oversized. Shared-vault creation enforces its fixed 64 KiB wrap plus 256-byte encoded-body bound
+the same way. These bounds are not session-advertised write settings. Other route body limits and
 multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
