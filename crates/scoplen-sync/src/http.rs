@@ -17,7 +17,7 @@ use std::{
 use crate::notify::NotificationHub;
 use axum::{
     Router,
-    body::{Body, Bytes, to_bytes},
+    body::{Body, to_bytes},
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     extract::{Path, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header},
@@ -38,6 +38,8 @@ pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
 /// Maximum encoded session handshake request size.
 pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
+// A one-entry CBOR map, the text key "cursor", and the largest encoded u64.
+const MAX_ACK_REQUEST_BYTES: usize = 1 + 7 + 9;
 /// Default authenticated object-write refill rate advertised by the session handshake.
 pub const WRITE_REQUESTS_PER_SECOND: u64 = 50;
 /// Default authenticated object-write burst advertised by the session handshake.
@@ -1316,13 +1318,16 @@ async fn ack<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
         authorize(&state, &method, &uri, &headers, vault, SyncOperation::Acknowledge, &instance)?;
+    let body = to_bytes(body, MAX_ACK_REQUEST_BYTES)
+        .await
+        .map_err(|_| SyncHttpError::invalid(&instance, "acknowledgement request is too large"))?;
     let request = api::SyncAckRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid acknowledgement: {error}"))
     })?;
@@ -3843,6 +3848,68 @@ mod tests {
             seen_requests.lock().expect("request recorder lock").as_slice(),
             &[("POST".into(), uri)]
         );
+    }
+
+    #[tokio::test]
+    async fn acknowledgement_bounds_body_after_authentication_without_advancing_cursor() {
+        let (store, vault, device) = test_store().await;
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let uri = format!("/sync/v1/vaults/{}/ack", path(vault));
+        let request = |body| {
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(body))
+            .expect("ack request")
+        };
+
+        assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("initial ack"), 0);
+        let largest_valid = SyncAckRequest { cursor: u64::MAX }.to_cbor().expect("largest ack");
+        assert_eq!(largest_valid.len(), MAX_ACK_REQUEST_BYTES);
+        let response = app.clone().oneshot(request(largest_valid)).await.expect("ahead response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("ahead body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&bytes).expect("ahead problem").code.as_str(),
+            "sync.cursor_ahead"
+        );
+
+        for size in [MAX_ACK_REQUEST_BYTES + 1, MAX_REQUEST_BYTES + 1] {
+            let response = app
+                .clone()
+                .oneshot(request(vec![0xff; size]))
+                .await
+                .expect("oversized ack response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "body size {size}");
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/problem+cbor"
+            );
+            let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem");
+            let problem = ProblemDetails::from_cbor(&bytes).expect("CBOR problem");
+            assert_eq!(problem.code.as_str(), "sync.invalid_request");
+            assert!(!problem.changed);
+            assert!(!problem.retryable);
+            assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("stored ack"), 0);
+        }
+
+        let unauthenticated = Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header(header::CONTENT_TYPE, "application/cbor")
+            .body(Body::from(vec![0xff; MAX_REQUEST_BYTES + 1]))
+            .expect("unauthenticated ack request");
+        let response = app.oneshot(unauthenticated).await.expect("auth response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("auth body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&bytes).expect("auth problem").code.as_str(),
+            "auth.authentication_required"
+        );
+        assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("stored ack"), 0);
     }
 
     #[tokio::test]
