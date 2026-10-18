@@ -71,7 +71,9 @@ oversized. Shared-vault creation enforces its fixed 64 KiB wrap plus 256-byte en
 the same way. The session handshake enforces its fixed 4 KiB request limit before collecting the
 body and returns `413 sync.invalid_request` for an oversized request. Member removal and epoch
 retirement reject any non-empty request body with a CBOR `400 sync.invalid_request` problem before
-changing state. These limits are not session-advertised write settings. Other route body limits and
+changing state. Acknowledgements collect at most 17 bytes, the maximum canonical `{cursor: uint}`
+encoding, and reject larger bodies with a CBOR `400 sync.invalid_request` problem after authorization.
+These limits are not session-advertised write settings. Other route body limits and
 multi-instance rate admission remain roadmap work.
 The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
 ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
