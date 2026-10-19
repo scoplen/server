@@ -13,6 +13,11 @@ TLS-ALPN-01, persists the ACME account and certificate cache below the data dire
 the same ALPN set for application connections. The gateway protocol is reserved for the managed
 data-path gate and is not accepted by the baseline listener yet.
 
+The trusted public HTTPS origin comes from canonical `server.public_host` and external
+`server.public_port`, independently of the local `server.listen_port`. The shared K-3 origin
+validator rejects ambiguous hosts before startup. Bootstrap uses this origin for setup links;
+incoming Host and forwarding headers do not determine it.
+
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request
 responses or logs.
