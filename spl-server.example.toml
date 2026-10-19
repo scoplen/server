@@ -32,7 +32,7 @@ write_requests_per_second = 50
 write_burst = 200
 
 [storage]
-# SQLite is required by api and edge. The worker can also use PostgreSQL with database_url.
+# Database-backed roles can use PostgreSQL with database_url; sync routes are not mounted yet.
 backend = "sqlite"
 # database_url = "postgres://scoplen:change-me@db.example.com/scoplen"
 

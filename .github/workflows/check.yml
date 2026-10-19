@@ -82,3 +82,5 @@ jobs:
         run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact
       - name: Check account key admission and read consistency
         run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_
+      - name: Check PostgreSQL API and edge readiness
+        run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_api_edge_readiness_follows_selected_database -- --exact

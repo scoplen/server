@@ -42,7 +42,7 @@ pub struct BootstrapResult {
 pub struct PreparedRoles {
     /// Database pool for roles that need relational storage.
     pub store: Option<SqliteStore>,
-    /// PostgreSQL pool for worker-only high-availability deployments.
+    /// PostgreSQL pool for database-backed high-availability roles.
     pub postgres_store: Option<PostgresStore>,
     /// Object storage backend for roles that need relational storage.
     pub object_storage: Option<ObjectStorage>,
@@ -52,6 +52,22 @@ pub struct PreparedRoles {
     pub audit_signer: Option<LocalAuditSigner>,
     /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<String>,
+}
+
+#[derive(Clone)]
+enum ListenerDatabase {
+    Sqlite(Arc<SqliteStore>),
+    Postgres(Arc<PostgresStore>),
+}
+
+impl ListenerDatabase {
+    async fn ping(&self) -> Result<(), scoplen_store::StoreError> {
+        match self {
+            Self::Sqlite(store) => store.ping().await?,
+            Self::Postgres(store) => store.ping().await?,
+        }
+        Ok(())
+    }
 }
 
 /// Create the data directory, deployment key, internal CA, and one-time setup link as needed.
@@ -213,12 +229,18 @@ pub async fn run_roles(
     let object_storage = object_storage.map(Arc::new);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
-        let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+        let database = if config.storage.backend.eq_ignore_ascii_case("postgres") {
+            ListenerDatabase::Postgres(
+                postgres_store.as_ref().ok_or(ServerError::MissingStore)?.clone(),
+            )
+        } else {
+            ListenerDatabase::Sqlite(store.as_ref().ok_or(ServerError::MissingStore)?.clone())
+        };
         let object_storage = object_storage.as_ref().ok_or(ServerError::MissingStore)?.clone();
         tasks.push(tokio::spawn(run_public_listener(
             config.clone(),
             roles.clone(),
-            store,
+            database,
             object_storage,
         )));
     }
@@ -630,16 +652,16 @@ async fn worker_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
     Ok(written)
 }
 
-fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Router {
+fn api_router(database: ListenerDatabase, object_storage: Arc<ObjectStorage>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/readyz",
             get(move || {
-                let store = store.clone();
+                let database = database.clone();
                 let object_storage = object_storage.clone();
                 async move {
-                    match (store.ping().await, object_storage.check().await) {
+                    match (database.ping().await, object_storage.check().await) {
                         (Ok(()), Ok(())) => (StatusCode::OK, "ready"),
                         (Err(error), _) => {
                             error!(%error, "readiness database query failed");
@@ -665,7 +687,7 @@ fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Ro
 async fn run_public_listener(
     config: Config,
     roles: Vec<Role>,
-    store: Arc<SqliteStore>,
+    database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
 ) -> Result<(), ServerError> {
     let address = config.listen_address();
@@ -678,7 +700,7 @@ async fn run_public_listener(
                     "edge role is configured behind plain HTTP; gateway ALPN requires direct TLS"
                 );
             }
-            axum::serve(listener, api_router(store, object_storage))
+            axum::serve(listener, api_router(database, object_storage))
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?;
         }
@@ -687,7 +709,7 @@ async fn run_public_listener(
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
-                let router = api_router(store.clone(), object_storage.clone());
+                let router = api_router(database.clone(), object_storage.clone());
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
@@ -701,7 +723,7 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            run_acme_listener(config, listener, store, object_storage).await?;
+            run_acme_listener(config, listener, database, object_storage).await?;
         }
     }
     Ok(())
@@ -744,7 +766,7 @@ fn tls_config(config: &Config) -> Result<ServerConfig, ServerError> {
 async fn run_acme_listener(
     config: Config,
     listener: TcpListener,
-    store: Arc<SqliteStore>,
+    database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
 ) -> Result<(), ServerError> {
     let email = config
@@ -767,7 +789,7 @@ async fn run_acme_listener(
             .1
             .alpn_protocol()
             .is_some_and(|protocol| protocol == b"spl-gw/1");
-        let router = api_router(store.clone(), object_storage.clone());
+        let router = api_router(database.clone(), object_storage.clone());
         tokio::spawn(async move {
             if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
                 error!(%error, "ACME TLS connection failed");
@@ -877,7 +899,10 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                api_router(Arc::new(server_store), Arc::new(server_object_storage)),
+                api_router(
+                    ListenerDatabase::Sqlite(Arc::new(server_store)),
+                    Arc::new(server_object_storage),
+                ),
             )
             .await
             .expect("serve readiness endpoint");
@@ -892,6 +917,60 @@ mod tests {
 
         store.pool().close().await;
         assert!(http_readiness(address).await.starts_with("HTTP/1.1 503 Service Unavailable"));
+        server.abort();
+        let _ = server.await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_api_edge_readiness_follows_selected_database() {
+        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-postgres-ready-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.storage.backend = "postgres".into();
+        config.storage.database_url =
+            Some(toml::Value::String(database_url).try_into().expect("PostgreSQL URL setting"));
+        let prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
+            .await
+            .expect("prepare PostgreSQL API and edge roles");
+        assert!(prepared.store.is_none(), "PostgreSQL roles must not open SQLite");
+        let store = prepared.postgres_store.expect("PostgreSQL pool");
+        let object_storage = prepared.object_storage.expect("object storage");
+        let object_root = data_dir.join("objects");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
+        let address = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn({
+            let store = store.clone();
+            async move {
+                axum::serve(
+                    listener,
+                    api_router(
+                        ListenerDatabase::Postgres(Arc::new(store)),
+                        Arc::new(object_storage),
+                    ),
+                )
+                .await
+                .expect("serve PostgreSQL readiness endpoint");
+            }
+        });
+        assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+
+        fs::remove_dir(&object_root).expect("remove empty object root");
+        let unavailable = http_readiness(address).await;
+        assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(unavailable.contains("object storage unavailable"));
+        fs::create_dir_all(&object_root).expect("restore object root");
+        assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+
+        store.pool().close().await;
+        let unavailable = http_readiness(address).await;
+        assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(unavailable.contains("database unavailable"));
         server.abort();
         let _ = server.await;
         drop(store);
@@ -1185,7 +1264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_and_edge_require_sqlite_when_selected() {
+    async fn api_and_edge_require_the_configured_database() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
         fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
         let mut config = Config::default();
