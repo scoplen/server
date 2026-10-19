@@ -6,6 +6,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "postgres-integration")]
+use scoplen_store::PostgresStore;
 use scoplen_store::{
     RelationalStore, SqliteStore, StoreError,
     sync::{
@@ -103,6 +105,125 @@ async fn personal_vault_provisioning_is_unique_atomic_and_account_scoped() {
     store.pool().close().await;
     drop(store);
     remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_vault_provisioning_is_atomic_and_account_scoped() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let owner = uuid::Uuid::new_v4().into_bytes();
+    let other = uuid::Uuid::new_v4().into_bytes();
+    let mut shared = uuid::Uuid::new_v4().into_bytes();
+    let mut personal = shared;
+    shared[15] = 1;
+    personal[15] = 2;
+    store.create_personal_sync_vault(personal, owner, &[7, 8]).await.expect("personal vault");
+    sqlx::query(
+        "INSERT INTO sync_vaults (vault_id, kind, current_seq, rotation_pending)
+         VALUES ($1, 'shared', 3, TRUE)",
+    )
+    .bind(shared.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("shared vault metadata");
+    sqlx::query(
+        "INSERT INTO sync_vault_members (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+         VALUES ($1, $2, 'admin', 2, $3)",
+    )
+    .bind(shared.as_slice())
+    .bind(owner.as_slice())
+    .bind([9_u8].as_slice())
+    .execute(store.pool())
+    .await
+    .expect("shared membership");
+
+    assert_eq!(
+        store.get_personal_sync_vault_key(owner).await.expect("owner key"),
+        (personal, vec![7, 8])
+    );
+    assert!(matches!(
+        store.get_personal_sync_vault_key(other).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    let listed = store.list_sync_vaults_for_account(owner).await.expect("owner vaults");
+    assert_eq!(listed.iter().map(|item| item.vault_id).collect::<Vec<_>>(), vec![shared, personal]);
+    assert_eq!(listed[0].kind, VaultKind::Shared);
+    assert_eq!(listed[0].sequence, 3);
+    assert_eq!(listed[0].key_epoch, 2);
+    assert!(listed[0].rotation_pending);
+    assert_eq!(listed[1].kind, VaultKind::Personal);
+    assert_eq!(listed[1].sequence, 0);
+    assert_eq!(listed[1].key_epoch, 1);
+    assert!(!listed[1].rotation_pending);
+    assert_eq!(store.list_sync_vaults_for_account(other).await.expect("other vaults"), Vec::new());
+
+    let orphan = uuid::Uuid::new_v4().into_bytes();
+    assert!(matches!(
+        store.create_personal_sync_vault(orphan, owner, &[1]).await,
+        Err(SyncStoreError::VaultAlreadyExists)
+    ));
+    let orphan_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_vaults WHERE vault_id = $1")
+            .bind(orphan.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("check rolled-back vault row");
+    assert_eq!(orphan_count, 0);
+    assert!(matches!(
+        store.create_personal_sync_vault(personal, other, &[1]).await,
+        Err(SyncStoreError::VaultAlreadyExists)
+    ));
+    assert!(matches!(
+        store.create_personal_sync_vault(orphan, other, &[]).await,
+        Err(SyncStoreError::EmptyVaultKey)
+    ));
+    assert!(matches!(
+        store
+            .create_personal_sync_vault(orphan, other, &vec![1; MAX_SHARED_VAULT_KEY_BYTES + 1])
+            .await,
+        Err(SyncStoreError::VaultKeyTooLarge)
+    ));
+    assert!(matches!(
+        store.get_personal_sync_vault_key(other).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_vault_concurrent_provisioning_has_one_winner() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let account = uuid::Uuid::new_v4().into_bytes();
+    let left = uuid::Uuid::new_v4().into_bytes();
+    let right = uuid::Uuid::new_v4().into_bytes();
+    let (left_result, right_result) = tokio::join!(
+        store.create_personal_sync_vault(left, account, &[1]),
+        store.create_personal_sync_vault(right, account, &[2]),
+    );
+    assert_eq!(usize::from(left_result.is_ok()) + usize::from(right_result.is_ok()), 1);
+    assert!(left_result.is_ok() || matches!(left_result, Err(SyncStoreError::VaultAlreadyExists)));
+    assert!(
+        right_result.is_ok() || matches!(right_result, Err(SyncStoreError::VaultAlreadyExists))
+    );
+    let winner = if left_result.is_ok() { (left, vec![1]) } else { (right, vec![2]) };
+    assert_eq!(store.get_personal_sync_vault_key(account).await.expect("winner key"), winner);
+    let vaults = store.list_sync_vaults_for_account(account).await.expect("one owner vault");
+    assert_eq!(vaults.len(), 1);
+    assert_eq!(vaults[0].vault_id, winner.0);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_vaults WHERE vault_id = $1 OR vault_id = $2")
+            .bind(left.as_slice())
+            .bind(right.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("check losing transaction rollback");
+    assert_eq!(rows, 1);
+    store.pool().close().await;
 }
 
 #[tokio::test]
