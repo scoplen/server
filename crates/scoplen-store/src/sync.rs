@@ -1431,6 +1431,116 @@ impl SqliteStore {
 }
 
 impl PostgresStore {
+    /// List owned personal and current shared vaults in stable vault-id order.
+    ///
+    /// The account id must come from an authenticated device, never from a request body.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error if metadata cannot be read safely.
+    pub async fn list_sync_vaults_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<AccountVaultDescriptor>, SyncStoreError> {
+        let rows = sqlx::query(
+            "SELECT v.vault_id, v.kind, v.current_seq, p.key_epoch, v.rotation_pending
+             FROM sync_personal_vaults AS p
+             JOIN sync_vaults AS v ON v.vault_id = p.vault_id
+             WHERE p.account_id = $1 AND v.kind = 'personal'
+             UNION ALL
+             SELECT v.vault_id, v.kind, v.current_seq, m.key_epoch, v.rotation_pending
+             FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = $2 AND v.kind = 'shared'
+             ORDER BY 1 ASC",
+        )
+        .bind(account_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let kind = match row.try_get::<&str, _>("kind")? {
+                    "personal" => VaultKind::Personal,
+                    "shared" => VaultKind::Shared,
+                    _ => return Err(SyncStoreError::CorruptRow("kind")),
+                };
+                Ok(AccountVaultDescriptor {
+                    vault_id: id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id")?,
+                    kind,
+                    sequence: sequence_from_sql(row.try_get("current_seq")?)?,
+                    key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
+                    rotation_pending: row.try_get("rotation_pending")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
+    ///
+    /// The account and client-generated vault id must be validated by the enrollment service.
+    /// A duplicate account or vault id leaves no partial vault row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultAlreadyExists`] for an existing account or vault id,
+    /// validation errors for an invalid wrap, or a storage error on failed persistence.
+    pub async fn create_personal_sync_vault(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+        wrapped_vault_key: &[u8],
+    ) -> Result<(), SyncStoreError> {
+        if wrapped_vault_key.is_empty() {
+            return Err(SyncStoreError::EmptyVaultKey);
+        }
+        if wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
+            return Err(SyncStoreError::VaultKeyTooLarge);
+        }
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES ($1, 'personal')")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_personal_vault_insert_error)?;
+        sqlx::query(
+            "INSERT INTO sync_personal_vaults (account_id, vault_id, wrapped_vault_key)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(account_id.as_slice())
+        .bind(vault_id.as_slice())
+        .bind(wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_personal_vault_insert_error)?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Read the ARK-wrapped personal vault key only for its owning account.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultNotFound`] if the account owns no personal vault.
+    pub async fn get_personal_sync_vault_key(
+        &self,
+        account_id: AccountId,
+    ) -> Result<(VaultId, Vec<u8>), SyncStoreError> {
+        let row = sqlx::query(
+            "SELECT vault_id, wrapped_vault_key FROM sync_personal_vaults WHERE account_id = $1",
+        )
+        .bind(account_id.as_slice())
+        .fetch_optional(self.pool())
+        .await?
+        .ok_or(SyncStoreError::VaultNotFound)?;
+        let vault_id = id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id")?;
+        let wrapped_key: Vec<u8> = row.try_get("wrapped_vault_key")?;
+        if wrapped_key.is_empty() || wrapped_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
+            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        }
+        Ok((vault_id, wrapped_key))
+    }
+
     /// List a bounded, stable page of vault identifiers for retention scheduling.
     ///
     /// # Errors
@@ -1822,6 +1932,16 @@ fn map_constraint(error: sqlx::Error) -> SyncStoreError {
     match error {
         sqlx::Error::Database(_) => SyncStoreError::Constraint(error),
         other => SyncStoreError::Database(other),
+    }
+}
+
+fn map_personal_vault_insert_error(error: sqlx::Error) -> SyncStoreError {
+    if error.as_database_error().and_then(sqlx::error::DatabaseError::code).as_deref()
+        == Some("23505")
+    {
+        SyncStoreError::VaultAlreadyExists
+    } else {
+        map_constraint(error)
     }
 }
 

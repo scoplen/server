@@ -118,8 +118,6 @@ impl RelationalStore for SqliteStore {
 }
 
 /// PostgreSQL storage connection with the parallel forward migration set applied.
-///
-/// Server roles continue to select SQLite until their queries also support PostgreSQL.
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
