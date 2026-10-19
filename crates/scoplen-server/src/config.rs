@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn postgres_backend_requires_a_url_for_every_database_role() {
         let mut config = Config::default();
-        config.storage.backend = "postgres".into();
+        config.storage.backend = " PoStGrEs ".into();
         for role in [crate::Role::Api, crate::Role::Edge, crate::Role::Worker] {
             let missing = config
                 .validate_for_roles(&[role])

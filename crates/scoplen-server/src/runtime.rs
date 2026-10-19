@@ -139,6 +139,10 @@ fn hex_bytes(bytes: &[u8]) -> String {
     value
 }
 
+fn uses_postgres(config: &Config) -> bool {
+    config.storage.backend.trim().eq_ignore_ascii_case("postgres")
+}
+
 /// Prepare only the resources required by the selected roles.
 ///
 /// # Errors
@@ -157,7 +161,7 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
             setup_link: None,
         });
     }
-    let (store, postgres_store) = if config.storage.backend.eq_ignore_ascii_case("postgres") {
+    let (store, postgres_store) = if uses_postgres(config) {
         let database_url = config
             .storage
             .database_url
@@ -227,9 +231,10 @@ pub async fn run_roles(
     let store = store.map(Arc::new);
     let postgres_store = postgres_store.map(Arc::new);
     let object_storage = object_storage.map(Arc::new);
+    let postgres = uses_postgres(&config);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
-        let database = if config.storage.backend.eq_ignore_ascii_case("postgres") {
+        let database = if postgres {
             ListenerDatabase::Postgres(
                 postgres_store.as_ref().ok_or(ServerError::MissingStore)?.clone(),
             )
@@ -246,12 +251,12 @@ pub async fn run_roles(
     }
     if roles.contains(&Role::Worker) {
         let signer = audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?;
-        if let Some(store) = store.as_ref() {
-            tasks.push(tokio::spawn(run_worker_role(store.clone(), Arc::new(signer.clone()))));
-        } else if let Some(store) = postgres_store.as_ref() {
-            tasks.push(tokio::spawn(run_worker_role(store.clone(), Arc::new(signer.clone()))));
+        if postgres {
+            let store = postgres_store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+            tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
         } else {
-            return Err(ServerError::MissingStore);
+            let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+            tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
         }
     }
     if roles.contains(&Role::Ca) {
@@ -932,7 +937,7 @@ mod tests {
             std::env::temp_dir().join(format!("scoplen-postgres-ready-{}", uuid::Uuid::new_v4()));
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
-        config.storage.backend = "postgres".into();
+        config.storage.backend = " PoStGrEs ".into();
         config.storage.database_url =
             Some(toml::Value::String(database_url).try_into().expect("PostgreSQL URL setting"));
         let prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
