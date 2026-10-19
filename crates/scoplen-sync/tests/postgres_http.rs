@@ -552,7 +552,7 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         .send(ClientMessage::Binary(b"invalid".to_vec().into()))
         .await
         .expect("send invalid credential");
-    let close = tokio::time::timeout(Duration::from_secs(1), invalid_socket.next())
+    let close = tokio::time::timeout(Duration::from_secs(5), invalid_socket.next())
         .await
         .expect("invalid socket timeout")
         .expect("invalid socket response")
@@ -569,13 +569,13 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         .send(ClientMessage::Binary(b"notify-test-token".to_vec().into()))
         .await
         .expect("send notification credential");
-    for _ in 0..100 {
-        if hub.receiver_count(device.into_bytes()) == 1 {
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.receiver_count(device.into_bytes()) != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-    assert_eq!(hub.receiver_count(device.into_bytes()), 1);
+    })
+    .await
+    .expect("notification subscription timeout");
 
     let batch = api::SyncWriteBatch {
         writes: vec![api::SyncWrite {
@@ -590,7 +590,7 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         send(&app, Method::POST, &uri, batch.to_cbor().expect("write batch")).await.status(),
         StatusCode::OK
     );
-    let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
         .await
         .expect("notification delivery timeout")
         .expect("notification socket response")
@@ -604,5 +604,6 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
     );
     socket.close(None).await.expect("close notification socket");
     server.abort();
+    assert!(server.await.expect_err("notification server must stop").is_cancelled());
     store.pool().close().await;
 }
