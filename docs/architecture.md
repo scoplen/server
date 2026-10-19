@@ -17,12 +17,12 @@ The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracin
 material is written only under the configured data directory and is never included in request
 responses or logs.
 
-The relational storage boundary supports SQLite for `api`, `worker`, and `edge`, and PostgreSQL for
-the `worker` role. SQLite roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys
-on pooled connections, and apply embedded forward migrations before generating first-run material.
-The PostgreSQL worker uses `storage.database_url` and applies the parallel migrations before
-generating first-run material. The
-migrations establish the organization table plus the sync storage foundation: vault counters,
+The relational storage boundary supports SQLite or PostgreSQL for `api`, `worker`, and `edge`.
+SQLite roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys on pooled
+connections, and apply embedded forward migrations before generating first-run material.
+PostgreSQL roles use `storage.database_url` and apply the parallel migrations before generating
+first-run material. The migrations establish the organization table plus the sync storage
+foundation: vault counters,
 current opaque object envelopes, retained version rows, per-device acknowledgement cursors, the
 account key-bundle tables, and per-organization audit events and signed checkpoints. Account key
 artifacts remain opaque at this boundary; the store
@@ -44,9 +44,10 @@ or multipart access. Database-backed roles initialize the configured object back
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration run through the same
-bounded worker paths on SQLite and PostgreSQL. PostgreSQL API/edge query support and sync-router
-porting, application-level column encryption, control-plane audit event
-producers, and other worker jobs remain roadmap work. The storage boundary defines a redacted
+bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
+are available; PostgreSQL sync query and sync-router porting, application-level column encryption,
+control-plane audit event producers, and other worker jobs remain roadmap work. The storage
+boundary defines a redacted
 local deployment-key-file backend behind a KMS trait; cloud adapters, column encryption, and
 external KMS readiness remain open. Database-backed role preparation loads and validates the local
 backend before startup; bootstrap creates an independent Ed25519 `audit-signing.key`, and the

@@ -36,8 +36,8 @@ envelopes before storage; the baseline listener
 does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
-filtering, membership-aware purge orchestration, multi-instance
+backend and include it in `/readyz`. PostgreSQL sync API queries, production identity/authentication,
+policy filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
 roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
@@ -88,10 +88,11 @@ owner using the shared `{keys}` response shape. Enrollment wiring, production id
 personal-key rotation remain open. A session lists a personal vault only after provisioning
 succeeds.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
-against the SQLite set. The worker role can select PostgreSQL with `storage.backend = "postgres"`
-and `storage.database_url`; its queue, sync-retention, account-key, and audit query paths share the
-same bounded semantics. The API and edge roles still require SQLite because the sync HTTP adapter
-and listener readiness state have not yet been generalized to both backends.
+against the SQLite set. The API, edge, and worker roles can select PostgreSQL with
+`storage.backend = "postgres"` and `storage.database_url`; the listener's `/readyz` checks the
+selected database and object store. Worker queue, sync-retention, account-key, and audit queries
+use PostgreSQL. The sync HTTP adapter and its remaining sync queries are still SQLite-only and are
+not mounted by the baseline listener.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
@@ -147,10 +148,10 @@ certificates are cached below `server.data_dir/acme-cache`; keep the data direct
 operator storage. The `tls.acme_production` setting defaults to `true`; set it to `false` only when
 testing against the Let's Encrypt staging directory.
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
-roles start, and a migration failure stops startup. The worker may instead use PostgreSQL by
-setting `storage.backend = "postgres"` and `storage.database_url` (or
-`SPL_STORAGE_DATABASE_URL`); API and edge continue to require SQLite. Object storage is initialized
-alongside the database for database-backed roles. The default `storage.object.backend = "filesystem"` stores below
+roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
+PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or
+`SPL_STORAGE_DATABASE_URL`). Object storage is initialized alongside the database for
+database-backed roles. The default `storage.object.backend = "filesystem"` stores below
 `server.data_dir/objects`; an S3-compatible backend can be selected with the nested S3 settings
 in `spl-server.example.toml` or their `SPL_STORAGE_OBJECT_*` environment overrides. `/readyz`
 checks both the database and the configured object-storage backend.

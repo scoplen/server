@@ -4,6 +4,8 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- API and edge roles can start with PostgreSQL; their public listener checks the selected database
+  and object store through `/readyz`. The authenticated sync router remains SQLite-only and unmounted.
 - Fixed account-key PUT retries after signing-key rotation. An authenticated, authorized exact
   replay skips current-key signature verification, while altered replays conflict and new
   revisions still require valid signatures. SQLite and PostgreSQL classify one read snapshot;
