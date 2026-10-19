@@ -40,7 +40,15 @@ URI, authorizes vault, account-key, and notification operations, records the cre
 shared-vault membership and opaque epoch-1 key wrap, adds and removes members with historical
 opaque wraps, validates account-key signatures and active-device wraps, and validates encrypted
 envelopes before storage; the baseline listener
-does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
+does not mount this router. The `scoplen-identity` crate verifies a decoded D-101 first-device
+enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
+proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
+canonical artifacts for a future atomic redemption transaction. It neither checks invitation
+state nor enrolls a device; operator authorization, durable identity, challenge/device token
+exchange, and the production enrollment route remain incomplete. All server proto dependencies
+are pinned to `scoplen-proto@e288515` for this shared contract.
+
+The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. The remaining PostgreSQL sync queries, production identity

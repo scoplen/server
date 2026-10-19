@@ -3348,13 +3348,14 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e94db5a#e94db5aeaccb243be73b114888091024304daf66"
+source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
 dependencies = [
  "base64 0.22.1",
  "prost",
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
+ "scoplen-crypto",
  "scoplen-model",
  "serde",
  "serde_json",
@@ -3385,7 +3386,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e94db5a#e94db5aeaccb243be73b114888091024304daf66"
+source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3422,11 +3423,18 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-identity"
 version = "0.1.0"
+dependencies = [
+ "scoplen-api",
+ "scoplen-crypto",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "uuid",
+]
 
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e94db5a#e94db5aeaccb243be73b114888091024304daf66"
+source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

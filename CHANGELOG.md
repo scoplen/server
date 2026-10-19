@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a `scoplen-identity` verifier for D-101 first-device enrollment. It checks the K-4 account
+  signature, K-2 certificate, and origin-bound device possession proof, returning only a redacted
+  verified value for later atomic redemption. Synchronized all server proto pins to `e288515`.
+  Invitation state, persistence, operator authorization, production routes, and device-token
+  authentication remain incomplete.
 - Validated the configured public HTTPS origin against the shared K-3 rules, with an external
   `server.public_port` separate from the listener port. Setup links now use this trusted origin;
   invalid hosts and ports fail startup and configuration checks. Operator setup and production
