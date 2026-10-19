@@ -84,5 +84,7 @@ jobs:
         run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_
       - name: Check PostgreSQL personal vault ownership and concurrency
         run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_personal_vault_
+      - name: Check PostgreSQL personal sync writes, changes, and acknowledgements
+        run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_personal_sync_
       - name: Check PostgreSQL API and edge readiness
         run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_api_edge_readiness_follows_selected_database -- --exact

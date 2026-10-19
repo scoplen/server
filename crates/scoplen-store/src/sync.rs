@@ -1431,6 +1431,236 @@ impl SqliteStore {
 }
 
 impl PostgresStore {
+    /// Return the kind of one sync vault for service-level authorization checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncStoreError::VaultNotFound` when the vault does not exist or a storage error
+    /// when its metadata cannot be read.
+    pub async fn sync_vault_kind(&self, vault_id: VaultId) -> Result<VaultKind, SyncStoreError> {
+        let kind =
+            sqlx::query_scalar::<_, String>("SELECT kind FROM sync_vaults WHERE vault_id = $1")
+                .bind(vault_id.as_slice())
+                .fetch_optional(self.pool())
+                .await?
+                .ok_or(SyncStoreError::VaultNotFound)?;
+        match kind.as_str() {
+            "personal" => Ok(VaultKind::Personal),
+            "shared" => Ok(VaultKind::Shared),
+            "organization" => Ok(VaultKind::Organization),
+            _ => Err(SyncStoreError::CorruptRow("kind")),
+        }
+    }
+
+    /// Write one authenticated batch atomically using compare-and-swap bases.
+    ///
+    /// The vault row lock serializes writers before conflict and quota checks. Rejected batches
+    /// leave both current objects and the sequence counter unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, conflict, quota, or database errors without a partial write.
+    #[allow(clippy::too_many_lines)]
+    pub async fn write_sync_batch(
+        &self,
+        vault_id: VaultId,
+        writes: &[ObjectWrite],
+    ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
+        validate_batch(writes)?;
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let (current_seq, _) = vault_state_postgres(&mut transaction, vault_id).await?;
+        for write in writes {
+            let retired = sqlx::query_scalar::<_, i64>(
+                "SELECT 1::BIGINT FROM sync_vault_retired_epochs WHERE vault_id = $1 AND epoch = $2",
+            )
+            .bind(vault_id.as_slice())
+            .bind(sequence_to_sql(write.key_epoch)?)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .is_some();
+            if retired {
+                return Err(SyncStoreError::EpochRetired { epoch: write.key_epoch });
+            }
+        }
+
+        let mut current = HashMap::with_capacity(writes.len());
+        for write in writes {
+            let row = sqlx::query(
+                "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch
+                 FROM sync_objects WHERE vault_id = $1 AND object_id = $2",
+            )
+            .bind(vault_id.as_slice())
+            .bind(write.object_id.as_slice())
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(row) = row {
+                current.insert(write.object_id, change_from_postgres_row(write.object_id, &row)?);
+            }
+        }
+
+        let conflicts = writes
+            .iter()
+            .filter_map(|write| {
+                let existing = current.get(&write.object_id);
+                let matches = match (write.base_sequence, existing) {
+                    (None, None) => true,
+                    (Some(base), Some(change)) => base == change.sequence,
+                    _ => false,
+                };
+                (!matches).then(|| ConflictEntry {
+                    object_id: write.object_id,
+                    current: existing.cloned(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if !conflicts.is_empty() {
+            return Err(SyncStoreError::Conflict { conflicts });
+        }
+
+        let new_objects = writes.len() - current.len();
+        if new_objects > 0 {
+            let object_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sync_objects WHERE vault_id = $1",
+            )
+            .bind(vault_id.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            let object_count = u64::try_from(object_count)
+                .map_err(|_| SyncStoreError::CorruptRow("object_count"))?;
+            let new_objects =
+                u64::try_from(new_objects).map_err(|_| SyncStoreError::SequenceExhausted)?;
+            if object_count
+                .checked_add(new_objects)
+                .is_none_or(|count| count > self.sync_cardinality_limits().max_objects_per_vault)
+            {
+                return Err(SyncStoreError::QuotaExceeded("objects per vault"));
+            }
+        }
+
+        let batch_len =
+            u64::try_from(writes.len()).map_err(|_| SyncStoreError::SequenceExhausted)?;
+        let first_sequence = current_seq.checked_add(1).ok_or(SyncStoreError::SequenceExhausted)?;
+        let last_sequence =
+            current_seq.checked_add(batch_len).ok_or(SyncStoreError::SequenceExhausted)?;
+        let mut receipts = Vec::with_capacity(writes.len());
+        for (offset, write) in writes.iter().enumerate() {
+            let offset = u64::try_from(offset).map_err(|_| SyncStoreError::SequenceExhausted)?;
+            let sequence =
+                first_sequence.checked_add(offset).ok_or(SyncStoreError::SequenceExhausted)?;
+            let sequence_sql = sequence_to_sql(sequence)?;
+            let written_at_ms = now_ms()?;
+            let change = SyncChange {
+                object_id: write.object_id,
+                sequence,
+                envelope: write.envelope.clone(),
+                key_epoch: write.key_epoch,
+                tombstone: write.tombstone,
+                signer_device_id: write.signer_device_id,
+            };
+            insert_version_postgres(&mut transaction, vault_id, &change, written_at_ms).await?;
+            sqlx::query(
+                "INSERT INTO sync_objects
+                 (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, key_epoch, written_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (vault_id, object_id) DO UPDATE SET
+                   sequence = EXCLUDED.sequence, envelope = EXCLUDED.envelope,
+                   tombstone = EXCLUDED.tombstone, signer_device_id = EXCLUDED.signer_device_id,
+                   key_epoch = EXCLUDED.key_epoch, written_at_ms = EXCLUDED.written_at_ms",
+            )
+            .bind(vault_id.as_slice())
+            .bind(write.object_id.as_slice())
+            .bind(sequence_sql)
+            .bind(&write.envelope)
+            .bind(write.tombstone)
+            .bind(write.signer_device_id.as_ref().map(<DeviceId>::as_slice))
+            .bind(sequence_to_sql(write.key_epoch)?)
+            .bind(written_at_ms)
+            .execute(&mut *transaction)
+            .await?;
+            receipts.push(WriteReceipt { object_id: write.object_id, sequence });
+        }
+        sqlx::query("UPDATE sync_vaults SET current_seq = $1 WHERE vault_id = $2")
+            .bind(sequence_to_sql(last_sequence)?)
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(receipts)
+    }
+
+    /// Read current object versions after a cursor at one consistent vault snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns vault, cursor, page-size, or database errors when the request cannot be served.
+    pub async fn sync_changes(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+    ) -> Result<ChangePage, SyncStoreError> {
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(SyncStoreError::InvalidPageSize);
+        }
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let page = read_current_page_postgres(&mut transaction, vault_id, after, limit).await?;
+        transaction.commit().await?;
+        Ok(page)
+    }
+
+    /// Record a device cursor after the client has applied changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-vault or ahead-cursor error, or a database error when persistence fails.
+    /// Lower cursors are idempotent no-ops returning the stored maximum.
+    pub async fn ack_sync_cursor(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        cursor: u64,
+    ) -> Result<u64, SyncStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let (current_seq, _) = vault_state_postgres(&mut transaction, vault_id).await?;
+        if cursor > current_seq {
+            return Err(SyncStoreError::CursorAhead { cursor, current: current_seq });
+        }
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT cursor FROM sync_acks WHERE vault_id = $1 AND device_id = $2",
+        )
+        .bind(vault_id.as_slice())
+        .bind(device_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .map(sequence_from_sql)
+        .transpose()?;
+        if let Some(existing) = existing
+            && cursor <= existing
+        {
+            transaction.commit().await?;
+            return Ok(existing);
+        }
+        sqlx::query(
+            "INSERT INTO sync_acks (vault_id, device_id, cursor, acknowledged_at_ms)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (vault_id, device_id) DO UPDATE SET
+               cursor = EXCLUDED.cursor, acknowledged_at_ms = EXCLUDED.acknowledged_at_ms",
+        )
+        .bind(vault_id.as_slice())
+        .bind(device_id.as_slice())
+        .bind(sequence_to_sql(cursor)?)
+        .bind(now_ms()?)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(cursor)
+    }
+
     /// List owned personal and current shared vaults in stable vault-id order.
     ///
     /// The account id must come from an authenticated device, never from a request body.
@@ -1705,6 +1935,52 @@ async fn read_current_page(
     Ok(ChangePage { changes, next_cursor, more })
 }
 
+async fn read_current_page_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+    after: u64,
+    limit: u16,
+) -> Result<ChangePage, SyncStoreError> {
+    let row = sqlx::query("SELECT current_seq, purge_horizon FROM sync_vaults WHERE vault_id = $1")
+        .bind(vault_id.as_slice())
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(SyncStoreError::VaultNotFound)?;
+    let current_seq = sequence_from_sql(row.try_get("current_seq")?)?;
+    let purge_horizon = sequence_from_sql(row.try_get("purge_horizon")?)?;
+    if after < purge_horizon {
+        return Err(SyncStoreError::CursorExpired { purge_horizon });
+    }
+    if after > current_seq {
+        return Err(SyncStoreError::CursorAhead { cursor: after, current: current_seq });
+    }
+
+    let rows = sqlx::query(
+        "SELECT object_id, sequence, envelope, tombstone, signer_device_id, key_epoch
+         FROM sync_objects WHERE vault_id = $1 AND sequence > $2
+         ORDER BY sequence ASC LIMIT $3",
+    )
+    .bind(vault_id.as_slice())
+    .bind(sequence_to_sql(after)?)
+    .bind(i64::from(limit) + 1)
+    .fetch_all(&mut **transaction)
+    .await?;
+    let more = rows.len() > usize::from(limit);
+    let changes = rows
+        .into_iter()
+        .take(usize::from(limit))
+        .map(|row| {
+            let object_id_bytes: Vec<u8> = row.try_get("object_id")?;
+            let object_id = id_from_bytes(&object_id_bytes, "object_id")?;
+            change_from_postgres_row(object_id, &row)
+        })
+        .collect::<Result<Vec<_>, SyncStoreError>>()?;
+    let next_cursor = changes
+        .last()
+        .map_or(current_seq, |change| if more { change.sequence } else { current_seq });
+    Ok(ChangePage { changes, next_cursor, more })
+}
+
 async fn lock_vault(
     transaction: &mut Transaction<'_, Sqlite>,
     vault_id: VaultId,
@@ -1782,6 +2058,30 @@ async fn insert_version(
     .bind(sequence_to_sql(change.sequence)?)
     .bind(&change.envelope)
     .bind(i64::from(change.tombstone))
+    .bind(change.signer_device_id.as_ref().map(<DeviceId>::as_slice))
+    .bind(sequence_to_sql(change.key_epoch)?)
+    .bind(written_at_ms)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_version_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+    change: &SyncChange,
+    written_at_ms: i64,
+) -> Result<(), SyncStoreError> {
+    sqlx::query(
+        "INSERT INTO sync_object_versions
+         (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, key_epoch, written_at_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(vault_id.as_slice())
+    .bind(change.object_id.as_slice())
+    .bind(sequence_to_sql(change.sequence)?)
+    .bind(&change.envelope)
+    .bind(change.tombstone)
     .bind(change.signer_device_id.as_ref().map(<DeviceId>::as_slice))
     .bind(sequence_to_sql(change.key_epoch)?)
     .bind(written_at_ms)
@@ -1955,6 +2255,23 @@ fn change_from_row(
         envelope: row.try_get("envelope")?,
         key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
         tombstone: bool_from_sql(row.try_get("tombstone")?)?,
+        signer_device_id: row
+            .try_get::<Option<Vec<u8>>, _>("signer_device_id")?
+            .map(|bytes| id_from_bytes(&bytes, "signer_device_id"))
+            .transpose()?,
+    })
+}
+
+fn change_from_postgres_row(
+    object_id: ObjectId,
+    row: &sqlx::postgres::PgRow,
+) -> Result<SyncChange, SyncStoreError> {
+    Ok(SyncChange {
+        object_id,
+        sequence: sequence_from_sql(row.try_get("sequence")?)?,
+        envelope: row.try_get("envelope")?,
+        key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
+        tombstone: row.try_get("tombstone")?,
         signer_device_id: row
             .try_get::<Option<Vec<u8>>, _>("signer_device_id")?
             .map(|bytes| id_from_bytes(&bytes, "signer_device_id"))
