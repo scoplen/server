@@ -39,8 +39,10 @@ requires an injected authenticator that binds DPoP proofs to the request method 
 URI, authorizes vault, account-key, and notification operations, records the creator's initial
 shared-vault membership and opaque epoch-1 key wrap, adds and removes members with historical
 opaque wraps, validates account-key signatures and active-device wraps, and validates encrypted
-envelopes before storage; the baseline listener
-does not mount this router. The `scoplen-identity` crate verifies a decoded D-101 first-device
+envelopes before storage. The caller selects a SQLite or PostgreSQL store for the entire
+authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR against PostgreSQL
+17; the baseline listener does not mount either backend without production identity. The
+`scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
 canonical artifacts for a future atomic redemption transaction. It neither checks invitation
@@ -51,7 +53,7 @@ are pinned to `scoplen-proto@e288515` for this shared contract.
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. PostgreSQL sync-router adoption, production identity
+backend and include it in `/readyz`. Production identity
 and authentication, policy filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
@@ -74,7 +76,7 @@ caller input retains its request error and no partial success body is sent.
 The SQLite and PostgreSQL sync stores enforce configured current-object, shared-vault-per-account,
 and member-per-vault cardinality limits in mutation transactions. Defaults are 100,000 current
 objects per vault (including tombstones), 1,000
-shared vault memberships per account, and 1,000 accounts per shared vault. The SQLite-backed K-4
+shared vault memberships per account, and 1,000 accounts per shared vault. The K-4
 session advertises these limits. Quota rejection returns `413 sync.quota_exceeded` without changing
 state. Member limits cannot exceed 1,000 because epoch publication requires one key wrap per member
 and the current wire codec accepts at most 1,000 wraps. The authenticated K-4 router enforces configured
@@ -100,9 +102,9 @@ ahead of the sequence remains `400 sync.cursor_ahead`. These limits are not sess
 settings. Other route body limits and multi-instance rate admission remain roadmap work.
 The SQLite and PostgreSQL stores atomically provision one personal vault per account with an opaque
 ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
-vault and current shared memberships. The SQLite-backed authenticated K-4 vault-key route delivers
-that key only to its owner using the shared `{keys}` response shape. Enrollment wiring, production
-identity, and personal-key rotation remain open; the injected sync router still uses SQLite.
+vault and current shared memberships. The authenticated K-4 vault-key route delivers that key only
+to its owner using the shared `{keys}` response shape on either backend. Enrollment wiring,
+production identity, and personal-key rotation remain open.
 Both stores also atomically create a shared vault with its admin membership and epoch-one wrap,
 list current shared memberships in vault-id order, and return only a member's non-retired wraps.
 Both stores publish the next epoch for exactly the current member set, add members with every
@@ -116,8 +118,8 @@ selected database and object store. Worker queue, sync-retention, account-key, a
 vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also supports atomic CAS
 batches with gap-free vault sequences, current change and full-reconciliation snapshot pages from
 one read transaction, bounded retained-version reads, and monotone device acknowledgements. The
-runtime passes the configured object limit to that writer. The sync HTTP adapter still uses
-SQLite; the baseline listener does not mount the sync router.
+runtime passes the configured object limit to that writer. The injected sync HTTP adapter selects
+SQLite or PostgreSQL consistently for all K-4 routes; the baseline listener does not mount it.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement

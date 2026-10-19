@@ -26,7 +26,7 @@ use axum::{
 };
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
 use scoplen_model::CURRENT_SCHEMA_VERSION;
-use scoplen_store::{SqliteStore, account_keys as key_storage, sync as storage};
+use scoplen_store::{PostgresStore, SqliteStore, account_keys as key_storage, sync as storage};
 use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
 
@@ -421,11 +421,172 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     }
 }
 
+/// Durable backend selected for one authenticated sync router.
+#[derive(Clone)]
+pub enum SyncBackend {
+    /// Single-node SQLite storage.
+    Sqlite(Arc<SqliteStore>),
+    /// PostgreSQL storage shared by API instances.
+    Postgres(Arc<PostgresStore>),
+}
+
+impl From<Arc<SqliteStore>> for SyncBackend {
+    fn from(store: Arc<SqliteStore>) -> Self {
+        Self::Sqlite(store)
+    }
+}
+
+impl From<Arc<PostgresStore>> for SyncBackend {
+    fn from(store: Arc<PostgresStore>) -> Self {
+        Self::Postgres(store)
+    }
+}
+
+macro_rules! backend_async {
+    ($name:ident($($arg:ident: $arg_type:ty),* $(,)?) -> $result:ty) => {
+        async fn $name(&self, $($arg: $arg_type),*) -> $result {
+            match self {
+                Self::Sqlite(store) => store.$name($($arg),*).await,
+                Self::Postgres(store) => store.$name($($arg),*).await,
+            }
+        }
+    };
+}
+
+impl SyncBackend {
+    fn sync_cardinality_limits(&self) -> storage::SyncCardinalityLimits {
+        match self {
+            Self::Sqlite(store) => store.sync_cardinality_limits(),
+            Self::Postgres(store) => store.sync_cardinality_limits(),
+        }
+    }
+
+    backend_async!(
+        list_sync_vaults_for_account(
+            account_id: key_storage::AccountId,
+        ) -> Result<
+            Vec<storage::AccountVaultDescriptor>,
+            storage::SyncStoreError,
+        >
+    );
+    backend_async!(
+        create_shared_sync_vault(
+            vault_id: storage::VaultId,
+            account_id: key_storage::AccountId,
+            wrapped_vault_key: &[u8],
+        ) -> Result<(), storage::SyncStoreError>
+    );
+    backend_async!(
+        sync_vault_kind(
+            vault_id: storage::VaultId,
+        ) -> Result<storage::VaultKind, storage::SyncStoreError>
+    );
+    backend_async!(
+        get_shared_sync_vault_keys(
+            vault_id: storage::VaultId,
+            account_id: key_storage::AccountId,
+        )
+            -> Result<Vec<storage::SharedVaultKey>, storage::SyncStoreError>
+    );
+    backend_async!(
+        get_personal_sync_vault_key(
+            account_id: key_storage::AccountId,
+        )
+            -> Result<(storage::VaultId, Vec<u8>), storage::SyncStoreError>
+    );
+    backend_async!(
+        publish_shared_sync_vault_epoch(
+            vault_id: storage::VaultId,
+            epoch: u64,
+            wraps: &[storage::SharedVaultEpochWrap],
+        ) -> Result<(), storage::SyncStoreError>
+    );
+    backend_async!(
+        retire_shared_sync_vault_epoch(
+            vault_id: storage::VaultId,
+            epoch: u64,
+        ) -> Result<(), storage::SyncStoreError>
+    );
+    backend_async!(
+        add_shared_sync_vault_member(
+            vault_id: storage::VaultId,
+            account_id: key_storage::AccountId,
+            wraps: &[storage::SharedVaultKey],
+        ) -> Result<(), storage::SyncStoreError>
+    );
+    backend_async!(
+        remove_shared_sync_vault_member(
+            vault_id: storage::VaultId,
+            account_id: key_storage::AccountId,
+        ) -> Result<(), storage::SyncStoreError>
+    );
+    backend_async!(
+        get_account_key_bundle(
+            account_id: key_storage::AccountId,
+            device_id: storage::DeviceId,
+        ) -> Result<
+            key_storage::AccountKeyBundle,
+            key_storage::AccountKeyStoreError,
+        >
+    );
+    backend_async!(
+        preflight_account_key_bundle_update(
+            account_id: key_storage::AccountId,
+            update: &key_storage::AccountKeyBundleUpdate,
+        ) -> Result<
+            key_storage::AccountKeyBundlePreflight,
+            key_storage::AccountKeyStoreError,
+        >
+    );
+    backend_async!(
+        put_account_key_bundle(
+            account_id: key_storage::AccountId,
+            update: &key_storage::AccountKeyBundleUpdate,
+        ) -> Result<
+            key_storage::AccountKeyBundlePut,
+            key_storage::AccountKeyStoreError,
+        >
+    );
+    backend_async!(
+        sync_changes(
+            vault_id: storage::VaultId,
+            after: u64,
+            limit: u16,
+        ) -> Result<storage::ChangePage, storage::SyncStoreError>
+    );
+    backend_async!(
+        sync_snapshot(
+            vault_id: storage::VaultId,
+            after: u64,
+            limit: u16,
+        ) -> Result<storage::SnapshotPage, storage::SyncStoreError>
+    );
+    backend_async!(
+        sync_versions(
+            vault_id: storage::VaultId,
+            object_id: storage::ObjectId,
+        ) -> Result<Vec<storage::SyncChange>, storage::SyncStoreError>
+    );
+    backend_async!(
+        write_sync_batch(
+            vault_id: storage::VaultId,
+            writes: &[storage::ObjectWrite],
+        ) -> Result<Vec<storage::WriteReceipt>, storage::SyncStoreError>
+    );
+    backend_async!(
+        ack_sync_cursor(
+            vault_id: storage::VaultId,
+            device_id: storage::DeviceId,
+            cursor: u64,
+        ) -> Result<u64, storage::SyncStoreError>
+    );
+}
+
 /// Build the K-4 router with an explicit authentication implementation.
 ///
 /// The returned router is not mounted by the baseline server listener until identity V3 is
 /// available. Tests and a future identity service can mount it with their own authenticator.
-pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -> Router {
+pub fn router<A: SyncAuthenticator>(store: impl Into<SyncBackend>, authenticator: A) -> Router {
     router_with_notifications(store, authenticator, NotificationHub::default())
 }
 
@@ -435,7 +596,7 @@ pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -
 /// intentionally local to one process; PostgreSQL fan-out for multi-instance deployments remains
 /// a V5 operation-layer concern.
 pub fn router_with_notifications<A: SyncAuthenticator>(
-    store: Arc<SqliteStore>,
+    store: impl Into<SyncBackend>,
     authenticator: A,
     notifications: NotificationHub,
 ) -> Router {
@@ -447,7 +608,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
 /// `write_rate_limits` must be constructed with [`WriteRateLimits::new`] or its default. Each
 /// router owns a process-local bucket map; cross-instance admission is not provided here.
 pub fn router_with_write_rate_limits<A: SyncAuthenticator>(
-    store: Arc<SqliteStore>,
+    store: impl Into<SyncBackend>,
     authenticator: A,
     notifications: NotificationHub,
     write_rate_limits: WriteRateLimits,
@@ -466,14 +627,14 @@ pub fn router_with_write_rate_limits<A: SyncAuthenticator>(
 /// The session advertises the same bounds that the write endpoint enforces. Both settings must
 /// be validated with their constructors before this router is mounted.
 pub fn router_with_limits<A: SyncAuthenticator>(
-    store: Arc<SqliteStore>,
+    store: impl Into<SyncBackend>,
     authenticator: A,
     notifications: NotificationHub,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
 ) -> Router {
     let state = SyncHttpState {
-        store,
+        store: store.into(),
         authenticator,
         notifications,
         write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
@@ -500,7 +661,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
 
 #[derive(Clone)]
 struct SyncHttpState<A> {
-    store: Arc<SqliteStore>,
+    store: SyncBackend,
     authenticator: A,
     notifications: NotificationHub,
     write_rate_limiter: WriteRateLimiter,

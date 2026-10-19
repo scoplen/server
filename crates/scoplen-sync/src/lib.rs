@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Synchronization storage boundary and HTTP contract adapter.
 //!
-//! The HTTP adapter implements the K-4 CBOR request/response boundary over the durable SQLite
-//! primitives. Authentication remains an explicit trait boundary: no production authenticator is
-//! provided until the V3 `DPoP` identity implementation exists.
+//! The HTTP adapter implements the K-4 CBOR request/response boundary over the selected durable
+//! SQLite or PostgreSQL backend. Authentication remains an explicit trait boundary: no production
+//! authenticator is provided until the V3 `DPoP` identity implementation exists.
 
 #![forbid(unsafe_code)]
 

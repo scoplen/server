@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- The authenticated K-4 HTTP/CBOR router now accepts either SQLite or PostgreSQL as one selected
+  durable backend for all sync, shared-vault, and account-key routes. PostgreSQL 17 integration
+  tests cover successful and rejected requests, account isolation, conflicts, quotas, and local
+  notifications. The baseline listener still does not mount the router; production identity and
+  multi-instance notification fan-out remain open.
 - Pinned migration SQL checkouts to LF so Windows and Unix builds embed identical migration
   bytes and SQLx checksums. Existing databases created with noncanonical bytes still require
   their matching build; recorded migration checksums are not rewritten.
