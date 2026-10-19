@@ -63,9 +63,10 @@ locking the vault, so concurrent joins across vaults cannot exceed the account l
 wraps cascade when a member is removed, and retired epochs stay unavailable to new writes.
 A migration error
 prevents startup. `/readyz` queries the database and returns 503 when the query fails. Public
-HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router covers
-the account-key, object-sync, and local notification boundaries but still delegates authentication,
-signature verification, membership, and policy decisions to the service. Notification events are
+HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router selects
+one SQLite or PostgreSQL backend for its account-key, object-sync, and shared-vault operations.
+It covers local notifications but still delegates authentication, signature verification,
+membership, and policy decisions to the service. Notification events are
 encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
 process-local broadcast hub. A parallel PostgreSQL migration set is checked against the SQLite
 logical schema in tests; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
@@ -77,7 +78,7 @@ bounded opaque payloads, claims jobs with owner-checked leases, records retries,
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration run through the same
 bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
-are available; PostgreSQL sync-router porting, application-level
+are available; production sync-router mounting, application-level
 column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
 The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;
 cloud adapters, column encryption, and external KMS readiness remain open. Database-backed role

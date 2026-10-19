@@ -90,3 +90,5 @@ jobs:
         run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_personal_sync_
       - name: Check PostgreSQL API and edge readiness
         run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_api_edge_readiness_follows_selected_database -- --exact
+      - name: Check PostgreSQL authenticated sync router
+        run: cargo test -p scoplen-sync --test postgres_http --features postgres-integration
