@@ -1,0 +1,1 @@
+crates/scoplen-store/migrations/**/*.sql text eol=lf

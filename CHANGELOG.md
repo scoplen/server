@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Pinned migration SQL checkouts to LF so Windows and Unix builds embed identical migration
+  bytes and SQLx checksums. Existing databases created with noncanonical bytes still require
+  their matching build; recorded migration checksums are not rewritten.
 - Added PostgreSQL parity for shared-vault epoch publication, member addition/removal, and safe
   epoch retirement. Per-vault serialization and a shared account quota lock protect concurrent
   mutations; key-response bounds and late-failure rollback are covered against PostgreSQL 17.

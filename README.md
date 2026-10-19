@@ -149,6 +149,12 @@ hold deployment and operational material as those roadmap gates become implement
 
 ## Development
 
+SQL migrations use LF line endings on every platform. SQLx embeds and hashes the exact SQL
+bytes, so keep the repository's migration attributes when creating a checkout. A database made
+by an earlier build with different migration bytes can fail with a checksum mismatch; retain
+the matching build and back up its data before rebuilding the database. Do not edit historical
+SQL or recorded migration checksums to bypass the failure.
+
 ```text
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
