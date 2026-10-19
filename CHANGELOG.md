@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added PostgreSQL Personal sync storage for atomic compare-and-swap batches, gap-free sequences,
+  current change pages, and monotone device acknowledgements. The runtime passes configured
+  current-object limits to PostgreSQL, and real database tests cover concurrency, rollback,
+  conflicts, cursor bounds, and quota rejection. The sync router remains unmounted and SQLite-only.
 - Added PostgreSQL parity for atomic, one-per-account personal-vault provisioning, owner-scoped
   wrapped-key reads, and account-scoped personal/shared vault listings. Duplicate and concurrent
   creation attempts leave no orphan vault row. The sync router and remaining sync queries still

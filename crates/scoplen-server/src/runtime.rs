@@ -172,7 +172,16 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
                 ))
             })?
             .expose();
-        (None, Some(PostgresStore::connect(&database_url).await?))
+        (
+            None,
+            Some(
+                PostgresStore::connect_with_sync_limits(
+                    &database_url,
+                    config.sync.cardinality_limits(),
+                )
+                .await?,
+            ),
+        )
     } else {
         (
             Some(
@@ -938,6 +947,7 @@ mod tests {
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
         config.storage.backend = " PoStGrEs ".into();
+        config.sync.max_objects_per_vault = 2;
         config.storage.database_url =
             Some(toml::Value::String(database_url).try_into().expect("PostgreSQL URL setting"));
         let prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
@@ -945,6 +955,7 @@ mod tests {
             .expect("prepare PostgreSQL API and edge roles");
         assert!(prepared.store.is_none(), "PostgreSQL roles must not open SQLite");
         let store = prepared.postgres_store.expect("PostgreSQL pool");
+        assert_eq!(store.sync_cardinality_limits().max_objects_per_vault, 2);
         let object_storage = prepared.object_storage.expect("object storage");
         let object_root = data_dir.join("objects");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");

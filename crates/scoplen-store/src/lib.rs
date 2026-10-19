@@ -121,6 +121,7 @@ impl RelationalStore for SqliteStore {
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
+    sync_cardinality_limits: sync::SyncCardinalityLimits,
 }
 
 impl PostgresStore {
@@ -131,9 +132,28 @@ impl PostgresStore {
     /// Returns an error when the connection or migration fails. A failed migration prevents
     /// callers from using the store.
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
+        Self::connect_with_sync_limits(database_url, sync::SyncCardinalityLimits::default()).await
+    }
+
+    /// Connect to PostgreSQL with validated per-deployment sync cardinality limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid limits, connection failure, or migration failure.
+    pub async fn connect_with_sync_limits(
+        database_url: &str,
+        sync_cardinality_limits: sync::SyncCardinalityLimits,
+    ) -> Result<Self, StoreError> {
+        sync_cardinality_limits.validate().map_err(StoreError::InvalidSyncLimits)?;
         let pool = PgPoolOptions::new().max_connections(5).connect(database_url).await?;
         POSTGRES_MIGRATIONS.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, sync_cardinality_limits })
+    }
+
+    /// Return the limits enforced by this PostgreSQL store.
+    #[must_use]
+    pub fn sync_cardinality_limits(&self) -> sync::SyncCardinalityLimits {
+        self.sync_cardinality_limits
     }
 
     /// Check whether the database can execute a query for readiness checks.

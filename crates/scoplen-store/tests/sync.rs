@@ -226,6 +226,198 @@ async fn postgres_personal_vault_concurrent_provisioning_has_one_winner() {
     store.pool().close().await;
 }
 
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_personal_sync_write_change_ack_round_trip() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let limits = SyncCardinalityLimits { max_objects_per_vault: 2, ..Default::default() };
+    let store = PostgresStore::connect_with_sync_limits(&database_url, limits)
+        .await
+        .expect("open PostgreSQL with custom limits");
+    assert_eq!(store.sync_cardinality_limits(), limits);
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let account = uuid::Uuid::new_v4().into_bytes();
+    store.create_personal_sync_vault(vault, account, &[7]).await.expect("personal vault");
+    assert_eq!(store.sync_vault_kind(vault).await.expect("vault kind"), VaultKind::Personal);
+    assert!(matches!(store.sync_vault_kind([0; 16]).await, Err(SyncStoreError::VaultNotFound)));
+
+    let receipts = store
+        .write_sync_batch(vault, &[write(1, None, 10), write(2, None, 20)])
+        .await
+        .expect("initial batch");
+    assert_eq!(receipts.iter().map(|receipt| receipt.sequence).collect::<Vec<_>>(), vec![1, 2]);
+    let first_page = store.sync_changes(vault, 0, 1).await.expect("first page");
+    assert_eq!(first_page.changes[0].object_id, [1; 16]);
+    assert!(first_page.more);
+    assert_eq!(first_page.next_cursor, 1);
+    let second_page = store.sync_changes(vault, 1, 1).await.expect("second page");
+    assert_eq!(second_page.changes[0].object_id, [2; 16]);
+    assert!(!second_page.more);
+    assert_eq!(second_page.next_cursor, 2);
+
+    let updated = store.write_sync_batch(vault, &[write(1, Some(1), 30)]).await.expect("update");
+    assert_eq!(updated[0].sequence, 3);
+    let current = store.sync_changes(vault, 0, 10).await.expect("current versions");
+    assert_eq!(
+        current.changes.iter().map(|change| change.sequence).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(current.next_cursor, 3);
+    assert!(!current.more);
+    assert_eq!(current.changes[1].signer_device_id, Some([9; 16]));
+    let versions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_object_versions WHERE vault_id = $1")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("version history");
+    assert_eq!(versions, 3);
+    assert!(matches!(
+        store.write_sync_batch(vault, &[write(3, None, 40)]).await,
+        Err(SyncStoreError::QuotaExceeded("objects per vault"))
+    ));
+    let current_seq: i64 =
+        sqlx::query_scalar("SELECT current_seq FROM sync_vaults WHERE vault_id = $1")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged sequence");
+    assert_eq!(current_seq, 3);
+
+    let device = uuid::Uuid::new_v4().into_bytes();
+    assert_eq!(store.ack_sync_cursor(vault, device, 3).await.expect("ack"), 3);
+    assert_eq!(store.ack_sync_cursor(vault, device, 2).await.expect("lower ack"), 3);
+    assert!(matches!(
+        store.ack_sync_cursor(vault, device, 4).await,
+        Err(SyncStoreError::CursorAhead { cursor: 4, current: 3 })
+    ));
+    assert!(matches!(
+        store.ack_sync_cursor([0; 16], device, 0).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert!(matches!(store.sync_changes(vault, 0, 0).await, Err(SyncStoreError::InvalidPageSize)));
+    assert!(matches!(store.sync_changes([0; 16], 0, 1).await, Err(SyncStoreError::VaultNotFound)));
+    sqlx::query("UPDATE sync_vaults SET purge_horizon = 2 WHERE vault_id = $1")
+        .bind(vault.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("advance purge horizon");
+    assert!(matches!(
+        store.sync_changes(vault, 0, 10).await,
+        Err(SyncStoreError::CursorExpired { purge_horizon: 2 })
+    ));
+    assert!(matches!(
+        store.sync_changes(vault, 4, 10).await,
+        Err(SyncStoreError::CursorAhead { cursor: 4, current: 3 })
+    ));
+    assert_eq!(store.sync_changes(vault, 3, 10).await.expect("caught up").next_cursor, 3);
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_sync_conflicts_rollback_in_request_order() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[7])
+        .await
+        .expect("personal vault");
+    store
+        .write_sync_batch(vault, &[write(1, None, 10), write(2, None, 20)])
+        .await
+        .expect("initial batch");
+    let error = store
+        .write_sync_batch(vault, &[write(2, Some(99), 30), write(1, None, 40), write(3, None, 50)])
+        .await
+        .expect_err("stale batch");
+    let SyncStoreError::Conflict { conflicts } = error else { panic!("expected CAS conflict") };
+    assert_eq!(
+        conflicts.iter().map(|item| item.object_id).collect::<Vec<_>>(),
+        vec![[2; 16], [1; 16]]
+    );
+    assert_eq!(conflicts[0].current.as_ref().map(|item| item.sequence), Some(2));
+    assert_eq!(conflicts[1].current.as_ref().map(|item| item.sequence), Some(1));
+    assert_eq!(
+        store.write_sync_batch(vault, &[write(3, None, 50)]).await.expect("next write")[0].sequence,
+        3
+    );
+    assert!(matches!(store.write_sync_batch(vault, &[]).await, Err(SyncStoreError::EmptyBatch)));
+    assert!(matches!(
+        store.write_sync_batch(vault, &[write(4, None, 60), write(4, None, 70)]).await,
+        Err(SyncStoreError::DuplicateObject)
+    ));
+    sqlx::query("INSERT INTO sync_vault_retired_epochs (vault_id, epoch) VALUES ($1, 1)")
+        .bind(vault.as_slice())
+        .execute(store.pool())
+        .await
+        .expect("retire test epoch");
+    assert!(matches!(
+        store.write_sync_batch(vault, &[write(4, None, 60)]).await,
+        Err(SyncStoreError::EpochRetired { epoch: 1 })
+    ));
+    let page = store.sync_changes(vault, 0, 10).await.expect("unchanged state");
+    assert_eq!(page.changes.iter().map(|item| item.sequence).collect::<Vec<_>>(), vec![1, 2, 3]);
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_sync_concurrent_writes_and_acks_are_monotone() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[7])
+        .await
+        .expect("personal vault");
+    let left_write = [write(1, None, 10)];
+    let right_write = [write(2, None, 20)];
+    let (left, right) = tokio::join!(
+        store.write_sync_batch(vault, &left_write),
+        store.write_sync_batch(vault, &right_write),
+    );
+    let mut sequences = vec![left.expect("left")[0].sequence, right.expect("right")[0].sequence];
+    sequences.sort_unstable();
+    assert_eq!(sequences, vec![1, 2]);
+
+    let left_write = [write(3, None, 30)];
+    let right_write = [write(3, None, 40)];
+    let (left, right) = tokio::join!(
+        store.write_sync_batch(vault, &left_write),
+        store.write_sync_batch(vault, &right_write),
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    for result in [left, right] {
+        match result {
+            Ok(receipts) => assert_eq!(receipts[0].sequence, 3),
+            Err(SyncStoreError::Conflict { conflicts }) => {
+                assert_eq!(conflicts[0].current.as_ref().map(|item| item.sequence), Some(3));
+            }
+            Err(error) => panic!("unexpected concurrent write failure: {error}"),
+        }
+    }
+    assert_eq!(
+        store.write_sync_batch(vault, &[write(4, None, 50)]).await.expect("next")[0].sequence,
+        4
+    );
+    let device = uuid::Uuid::new_v4().into_bytes();
+    let (low, high) = tokio::join!(
+        store.ack_sync_cursor(vault, device, 2),
+        store.ack_sync_cursor(vault, device, 4),
+    );
+    assert!(low.is_ok());
+    assert_eq!(high.expect("high ack"), 4);
+    assert_eq!(store.ack_sync_cursor(vault, device, 1).await.expect("stored maximum"), 4);
+    assert_eq!(store.sync_changes(vault, 0, 10).await.expect("all current").next_cursor, 4);
+    store.pool().close().await;
+}
+
 #[tokio::test]
 async fn shared_session_descriptors_follow_current_membership_and_rotation() {
     let directory = test_directory();

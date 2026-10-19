@@ -56,12 +56,13 @@ the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomple
 Authenticated change, snapshot, object-version, account-key, and vault-key reads also return
 `503 sync.storage_unavailable` when persisted data cannot form a valid complete response; malformed
 caller input retains its request error and no partial success body is sent.
-The SQLite sync store enforces configured cardinality limits in the mutation transaction. Defaults
-are 100,000 current objects per vault (including tombstones), 1,000 shared vault memberships per
-account, and 1,000 accounts per shared vault. The K-4 session advertises the values enforced by
-that store, and quota rejection returns `413 sync.quota_exceeded` without changing state. Member
-limits cannot exceed 1,000 because epoch publication requires one key wrap per member and the
-current wire codec accepts at most 1,000 wraps. The authenticated K-4 router enforces configured
+The SQLite sync store enforces all configured cardinality limits in mutation transactions. The
+PostgreSQL object writer enforces the configured current-object limit; shared-vault mutations have
+not been ported. Defaults are 100,000 current objects per vault (including tombstones), 1,000
+shared vault memberships per account, and 1,000 accounts per shared vault. The SQLite-backed K-4
+session advertises these limits. Quota rejection returns `413 sync.quota_exceeded` without changing
+state. Member limits cannot exceed 1,000 because epoch publication requires one key wrap per member
+and the current wire codec accepts at most 1,000 wraps. The authenticated K-4 router enforces configured
 per-device write rates in a process-local token bucket and advertises those same values in the
 session (defaults: 50 requests per second, burst 200). An exhausted bucket returns
 `429 sync.rate_limited` and `Retry-After`. The router also enforces configured envelope bytes,
@@ -91,8 +92,11 @@ The storage crate also carries a parallel PostgreSQL migration set and a logical
 against the SQLite set. The API, edge, and worker roles can select PostgreSQL with
 `storage.backend = "postgres"` and `storage.database_url`; the listener's `/readyz` checks the
 selected database and object store. Worker queue, sync-retention, account-key, audit, account-scoped
-vault-list, and personal-vault key queries use PostgreSQL. The sync HTTP adapter and its remaining
-sync queries are still SQLite-only; the baseline listener does not mount the sync router.
+vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also supports atomic CAS
+batches with gap-free vault sequences, current change pages from one snapshot, and monotone device
+acknowledgements. The runtime passes the configured object limit to that writer. The sync HTTP
+adapter, snapshot/version queries, and shared-vault mutation queries still use SQLite; the baseline
+listener does not mount the sync router.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
