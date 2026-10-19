@@ -4,7 +4,7 @@
 `edge`, and `gateway`; `all` expands to those roles in a stable order. The process loads one TOML
 configuration, applies non-empty `SPL_` environment overrides, and validates local invariants.
 It creates first-run material when a database-backed role is selected, then starts the selected
-roles. Standalone `ca` and `gateway` roles do not open SQLite or create Personal setup material.
+roles. Standalone `ca` and `gateway` roles do not open a database or create Personal setup material.
 
 The public listener is one TCP port. In `plain` mode it is intended to sit behind a trusted TLS
 terminator. In `files` mode it terminates TLS itself and advertises `h2`, `http/1.1`, and
@@ -27,12 +27,14 @@ current opaque object envelopes, retained version rows, per-device acknowledgeme
 account key-bundle tables, and per-organization audit events and signed checkpoints. Account key
 artifacts remain opaque at this boundary; the store
 scopes wrapped-ARK reads to the authenticated device and applies atomic revision replay rules.
-`scoplen-store` allocates a contiguous sequence range inside a write transaction, checks every
-compare-and-swap base before changing state, and exposes current change and full-reconciliation
-snapshot pages without interpreting envelope bytes. A migration error prevents those roles from
-starting. `/readyz` queries the database and returns 503 when the query fails. Public HTTP/auth
-endpoints are still unmounted by the baseline listener; the injected sync router now covers the
-account-key, object-sync, and local notification boundaries but still delegates authentication,
+The SQLite sync store allocates a contiguous sequence range inside a write transaction, checks
+every compare-and-swap base before changing state, and exposes current change and
+full-reconciliation snapshot pages without interpreting envelope bytes. Both relational stores
+atomically provision one personal vault and its opaque wrapped key per account, scope key reads to
+the owner, and list the account's personal vault and current shared memberships. A migration error
+prevents startup. `/readyz` queries the database and returns 503 when the query fails. Public
+HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router covers
+the account-key, object-sync, and local notification boundaries but still delegates authentication,
 signature verification, membership, and policy decisions to the service. Notification events are
 encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
 process-local broadcast hub. A parallel PostgreSQL migration set is checked against the SQLite
@@ -45,12 +47,12 @@ bounded opaque payloads, claims jobs with owner-checked leases, records retries,
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration run through the same
 bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
-are available; PostgreSQL sync query and sync-router porting, application-level column encryption,
-control-plane audit event producers, and other worker jobs remain roadmap work. The storage
-boundary defines a redacted
-local deployment-key-file backend behind a KMS trait; cloud adapters, column encryption, and
-external KMS readiness remain open. Database-backed role preparation loads and validates the local
-backend before startup; bootstrap creates an independent Ed25519 `audit-signing.key`, and the
-worker writes hourly idempotent checkpoints for advanced audit heads. `storage.kms.backend`,
+are available; the remaining PostgreSQL sync queries and sync-router porting, application-level
+column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
+The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;
+cloud adapters, column encryption, and external KMS readiness remain open. Database-backed role
+preparation loads and validates the local backend before startup. Bootstrap creates an independent
+Ed25519 `audit-signing.key`; the worker writes hourly idempotent checkpoints for advanced audit
+heads. `storage.kms.backend`,
 `storage.kms.key_file`, and `storage.kms.audit_key_file` are also available through the documented
 TOML and environment configuration. Audit retention/export integration remains open.

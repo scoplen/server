@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added PostgreSQL parity for atomic, one-per-account personal-vault provisioning, owner-scoped
+  wrapped-key reads, and account-scoped personal/shared vault listings. Duplicate and concurrent
+  creation attempts leave no orphan vault row. The sync router and remaining sync queries still
+  use SQLite.
 - API and edge roles can start with PostgreSQL; their public listener checks the selected database
   and object store through `/readyz`. The authenticated sync router remains SQLite-only and unmounted.
 - Fixed account-key PUT retries after signing-key rotation. An authenticated, authorized exact

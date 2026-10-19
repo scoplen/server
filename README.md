@@ -8,16 +8,16 @@ Scoplen is a Plystra project. This repository is licensed under AGPL-3.0-only.
 Maturity: Exploration. Maintenance: Active. The repository baseline (roadmap V1) is complete. The
 current binary provides role selection, validated TOML and `SPL_` environment configuration,
 first-run deployment material, a single public listener, health/readiness/metrics endpoints, and
-plain, file-based, or ACME TLS. It now opens a durable SQLite database in WAL mode and applies
-forward migrations for `api`, `worker`, and `edge` roles; readiness checks that database. The
-storage layer also has the first sync foundation: per-vault gap-free sequence allocation, atomic
+plain, file-based, or ACME TLS. The `api`, `worker`, and `edge` roles open the selected SQLite or
+PostgreSQL database and apply forward migrations; readiness checks that database. The SQLite
+storage layer has the first sync foundation: per-vault gap-free sequence allocation, atomic
 compare-and-swap batches, current change and snapshot paging, acknowledgement cursors, and
 bounded version reads. It also exposes an atomic retention pass for the worker: historical rows are
 version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
 horizon while deleting their retained history. The `scoplen-store` queue now persists opaque jobs
 with bounded payloads, atomic claims, owner-checked leases, retry/failure state, and expired-lease
 requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
-Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
+Standalone `ca` and `gateway` roles do not open a database or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for a session handshake that lists
 account-owned personal vaults and current shared-vault memberships with their rotation state,
 shared-vault creation, key retrieval, epoch publication, and member addition and removal, plus
@@ -36,8 +36,8 @@ envelopes before storage; the baseline listener
 does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. PostgreSQL sync API queries, production identity/authentication,
-policy filtering, membership-aware purge orchestration, multi-instance
+backend and include it in `/readyz`. The remaining PostgreSQL sync queries, production identity
+and authentication, policy filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
 roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
@@ -82,17 +82,17 @@ authorization. A read cursor below the purge horizon or ahead of the vault seque
 CBOR `410 sync.cursor_expired` problem so the client can restart full reconciliation; an ACK cursor
 ahead of the sequence remains `400 sync.cursor_ahead`. These limits are not session-advertised write
 settings. Other route body limits and multi-instance rate admission remain roadmap work.
-The store provides an atomic, one-per-account personal-vault provisioning method with an opaque
-ARK-wrapped initial key, and the authenticated K-4 vault-key route delivers that key only to its
-owner using the shared `{keys}` response shape. Enrollment wiring, production identity, and
-personal-key rotation remain open. A session lists a personal vault only after provisioning
-succeeds.
+The SQLite and PostgreSQL stores atomically provision one personal vault per account with an opaque
+ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
+vault and current shared memberships. The SQLite-backed authenticated K-4 vault-key route delivers
+that key only to its owner using the shared `{keys}` response shape. Enrollment wiring, production
+identity, and personal-key rotation remain open; the injected sync router still uses SQLite.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
 against the SQLite set. The API, edge, and worker roles can select PostgreSQL with
 `storage.backend = "postgres"` and `storage.database_url`; the listener's `/readyz` checks the
-selected database and object store. Worker queue, sync-retention, account-key, and audit queries
-use PostgreSQL. The sync HTTP adapter and its remaining sync queries are still SQLite-only and are
-not mounted by the baseline listener.
+selected database and object store. Worker queue, sync-retention, account-key, audit, account-scoped
+vault-list, and personal-vault key queries use PostgreSQL. The sync HTTP adapter and its remaining
+sync queries are still SQLite-only; the baseline listener does not mount the sync router.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
