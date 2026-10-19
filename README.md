@@ -151,6 +151,17 @@ certificate for `server.public_host`, using the contact in `tls.acme_email`. ACM
 certificates are cached below `server.data_dir/acme-cache`; keep the data directory in protected
 operator storage. The `tls.acme_production` setting defaults to `true`; set it to `false` only when
 testing against the Let's Encrypt staging directory.
+
+TLS-ALPN-01 requires external port 443, even when the local listener uses another port.
+Set `server.public_host` to a canonical lowercase DNS name, canonical IPv4 address, or
+unbracketed canonical IPv6 address. `server.public_port` (or `SPL_SERVER_PUBLIC_PORT`) is the
+externally reachable HTTPS port, defaulting to 443; it is independent of the local
+`server.listen_port`. The server validates the resulting canonical HTTPS origin at startup and
+uses it for generated setup links. Port 443 is omitted from those links; a different external
+port is included. Invalid or ambiguous public hosts fail `--validate-config` and startup.
+The emitted setup link is reserved for the future operator setup flow; it cannot be redeemed
+while the setup and authentication routes remain unmounted.
+
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
 PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or

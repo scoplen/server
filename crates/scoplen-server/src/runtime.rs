@@ -77,6 +77,7 @@ impl ListenerDatabase {
 /// Returns an error when the data directory, generated key material, or setup-link file cannot
 /// be created.
 pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
+    let public_origin = config.public_origin()?;
     std::fs::create_dir_all(&config.server.data_dir).map_err(|source| {
         ServerError::DataDirectory { path: config.server.data_dir.clone(), source }
     })?;
@@ -119,7 +120,7 @@ pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
         return Ok(BootstrapResult::default());
     }
     let token = uuid::Uuid::new_v4();
-    let link = format!("https://{}/setup/{}", config.server.public_host, token);
+    let link = format!("{public_origin}/setup/{token}");
     write_private(&setup_file, &link)?;
     Ok(BootstrapResult { setup_link: Some(link) })
 }
@@ -876,9 +877,16 @@ mod tests {
             std::env::temp_dir().join(format!("scoplen-server-{}", uuid::Uuid::new_v4()));
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
+        config.server.public_host = "example.com".into();
+        config.server.public_port = 9443;
 
         let first = bootstrap(&config).expect("first bootstrap succeeds");
-        assert!(first.setup_link.is_some());
+        assert!(
+            first
+                .setup_link
+                .as_deref()
+                .is_some_and(|link| link.starts_with("https://example.com:9443/setup/"))
+        );
         for name in [
             "deployment.key",
             "audit-signing.key",

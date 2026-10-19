@@ -3,10 +3,11 @@
 
 use std::{
     fmt,
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     path::{Path, PathBuf},
 };
 
+use scoplen_crypto::validate_server_origin;
 use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig, sync::SyncCardinalityLimits};
 use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
 use serde::Deserialize;
@@ -68,6 +69,11 @@ impl Config {
         }
         if let Some(value) = env_value("SPL_SERVER_PUBLIC_HOST") {
             self.server.public_host = value;
+        }
+        if let Some(value) = env_value("SPL_SERVER_PUBLIC_PORT") {
+            self.server.public_port = value.parse().map_err(|_| {
+                ConfigError::Invalid("SPL_SERVER_PUBLIC_PORT must be an integer port".into())
+            })?;
         }
         if let Some(value) = env_value("SPL_SERVER_DATA_DIR") {
             self.server.data_dir = PathBuf::from(value);
@@ -158,9 +164,7 @@ impl Config {
                 "server.listen_port must be between 1 and 65535".into(),
             ));
         }
-        if self.server.public_host.trim().is_empty() {
-            return Err(ConfigError::Invalid("server.public_host must not be empty".into()));
-        }
+        self.public_origin()?;
         if self.server.data_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invalid("server.data_dir must not be empty".into()));
         }
@@ -175,6 +179,11 @@ impl Config {
                 }
             }
             TlsMode::Acme => {
+                if self.server.public_port != 443 {
+                    return Err(ConfigError::Invalid(
+                        "tls.mode = acme requires server.public_port = 443 for TLS-ALPN-01".into(),
+                    ));
+                }
                 if self.tls.acme_email.as_deref().unwrap_or_default().trim().is_empty() {
                     return Err(ConfigError::Invalid(
                         "tls.mode = acme requires tls.acme_email".into(),
@@ -233,6 +242,44 @@ impl Config {
     pub fn listen_address(&self) -> String {
         format!("{}:{}", self.server.listen_addr, self.server.listen_port)
     }
+
+    /// The trusted canonical HTTPS origin used for public links and signatures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the public host or port cannot form a canonical K-3 origin.
+    pub fn public_origin(&self) -> Result<String, ConfigError> {
+        if self.server.public_port == 0 {
+            return Err(ConfigError::Invalid(
+                "server.public_port must be between 1 and 65535".into(),
+            ));
+        }
+        let host = &self.server.public_host;
+        let authority_host = if let Ok(ip) = host.parse::<Ipv6Addr>() {
+            if *host != ip.to_string() {
+                return Err(invalid_public_host());
+            }
+            format!("[{host}]")
+        } else {
+            if host.contains([':', '[', ']']) {
+                return Err(invalid_public_host());
+            }
+            host.clone()
+        };
+        let origin = if self.server.public_port == 443 {
+            format!("https://{authority_host}")
+        } else {
+            format!("https://{authority_host}:{}", self.server.public_port)
+        };
+        validate_server_origin(&origin).map_err(|_| invalid_public_host())?;
+        Ok(origin)
+    }
+}
+
+fn invalid_public_host() -> ConfigError {
+    ConfigError::Invalid(
+        "server.public_host must be a canonical lowercase DNS name, IPv4 address, or unbracketed IPv6 address".into(),
+    )
 }
 
 fn env_value(name: &str) -> Option<String> {
@@ -247,8 +294,10 @@ pub struct ServerSettings {
     pub listen_addr: String,
     /// Public port. `8443` avoids a privileged bind during development.
     pub listen_port: u16,
-    /// Public DNS name used by setup links and ACME.
+    /// Canonical public DNS name, IPv4 address, or unbracketed IPv6 address.
     pub public_host: String,
+    /// Externally reachable HTTPS port, independent of the local listener port.
+    pub public_port: u16,
     /// Directory for deployment keys and generated first-run material.
     pub data_dir: PathBuf,
 }
@@ -259,6 +308,7 @@ impl Default for ServerSettings {
             listen_addr: "127.0.0.1".into(),
             listen_port: 8443,
             public_host: "localhost".into(),
+            public_port: 443,
             data_dir: PathBuf::from("./data"),
         }
     }
@@ -701,6 +751,63 @@ mod tests {
         let config = Config::default();
         config.validate().expect("defaults are valid");
         assert_eq!(config.listen_address(), "127.0.0.1:8443");
+        assert_eq!(config.public_origin().expect("public origin"), "https://localhost");
+    }
+
+    #[test]
+    fn public_origin_uses_canonical_host_and_external_port() {
+        let mut config = Config::default();
+        for (host, port, expected) in [
+            ("example.com", 443, "https://example.com"),
+            ("example.com", 9443, "https://example.com:9443"),
+            ("192.0.2.1", 443, "https://192.0.2.1"),
+            ("192.0.2.1", 9443, "https://192.0.2.1:9443"),
+            ("2001:db8::1", 443, "https://[2001:db8::1]"),
+            ("2001:db8::1", 9443, "https://[2001:db8::1]:9443"),
+        ] {
+            config.server.public_host = host.into();
+            config.server.public_port = port;
+            config.server.listen_port = 8443;
+            config.validate().expect("canonical public origin");
+            assert_eq!(config.public_origin().expect("public origin"), expected);
+            config.server.listen_port = 10443;
+            assert_eq!(config.public_origin().expect("origin ignores listener"), expected);
+        }
+    }
+
+    #[test]
+    fn public_origin_rejects_invalid_host_and_port() {
+        let mut config = Config::default();
+        for host in [
+            "",
+            "EXAMPLE.com",
+            "example.com.",
+            "https://example.com",
+            "example.com:9443",
+            "[2001:db8::1]",
+            "2001:0db8::1",
+            "edge.0x",
+            "192.000.2.1",
+            "user@example.com",
+        ] {
+            config.server.public_host = host.into();
+            let error = config.validate().expect_err("invalid public host");
+            assert!(error.to_string().contains("server.public_host"), "{host}: {error}");
+        }
+        config.server.public_host = "example.com".into();
+        config.server.public_port = 0;
+        let error = config.validate().expect_err("zero public port");
+        assert!(error.to_string().contains("server.public_port"));
+    }
+
+    #[test]
+    fn public_origin_settings_parse_from_toml() {
+        let config: Config = toml::from_str(
+            "[server]\nlisten_port = 8443\npublic_host = '::1'\npublic_port = 9443\n",
+        )
+        .expect("parse server settings");
+        assert_eq!(config.public_origin().expect("public origin"), "https://[::1]:9443");
+        assert_eq!(config.listen_address(), "127.0.0.1:8443");
     }
 
     #[test]
@@ -814,6 +921,14 @@ mod tests {
         assert!(config.validate().is_err());
         config.server.public_host = "scoplen.example.com".into();
         config.validate().expect("ACME values are now present");
+        config.server.public_port = 9443;
+        assert!(
+            config
+                .validate()
+                .expect_err("ACME requires the standard public port")
+                .to_string()
+                .contains("server.public_port")
+        );
     }
 
     #[test]

@@ -80,7 +80,9 @@ async fn run() -> Result<(), ServerError> {
 
     let prepared = prepare_roles(&config, &roles).await?;
     if let Some(link) = prepared.setup_link {
-        println!("first-run setup link (valid for one hour): {link}");
+        println!(
+            "reserved first-run setup link (operator enrollment is not available yet): {link}"
+        );
     }
     scoplen_server::run_roles(
         config,

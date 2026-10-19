@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Validated the configured public HTTPS origin against the shared K-3 rules, with an external
+  `server.public_port` separate from the listener port. Setup links now use this trusted origin;
+  invalid hosts and ports fail startup and configuration checks. Operator setup and production
+  authentication remain incomplete.
 - Added PostgreSQL Personal sync snapshot paging and bounded retained-version reads. Snapshots
   recover from the purge horizon; both reads use one read-only repeatable-read transaction, and
   PostgreSQL integration tests cover vault isolation, paging, retention, missing-state errors, and
