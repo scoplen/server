@@ -17,6 +17,12 @@ The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracin
 material is written only under the configured data directory and is never included in request
 responses or logs.
 
+First-run material is created exclusively and flushed before success. On Unix, new files have
+owner read/write permissions from creation, before any secret is written. Existing files,
+including symlink destinations, are never overwritten. An incomplete CA pair requires operator
+recovery; bootstrap does not replace its surviving file. Windows uses the data directory's
+inherited access controls. Existing deployment file permissions are not changed.
+
 The relational storage boundary supports SQLite or PostgreSQL for `api`, `worker`, and `edge`.
 SQLite roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys on pooled
 connections, and apply embedded forward migrations before generating first-run material.

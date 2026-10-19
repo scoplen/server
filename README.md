@@ -18,6 +18,10 @@ horizon while deleting their retained history. The `scoplen-store` queue now per
 with bounded payloads, atomic claims, owner-checked leases, retry/failure state, and expired-lease
 requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
 Standalone `ca` and `gateway` roles do not open a database or generate Personal setup material.
+New bootstrap material uses exclusive file creation and, on Unix, owner read/write permissions
+(`0600`). Existing files are preserved; an incomplete CA pair requires recovery from the
+operator's backup. Windows inherits the data directory's access controls. Existing deployments
+retain their current file permissions, which the operator must restrict separately if needed.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for a session handshake that lists
 account-owned personal vaults and current shared-vault memberships with their rotation state,
 shared-vault creation, key retrieval, epoch publication, and member addition and removal, plus

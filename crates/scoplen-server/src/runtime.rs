@@ -103,7 +103,22 @@ pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
 
     let ca_certificate = config.server.data_dir.join("internal-ca.pem");
     let ca_key = config.server.data_dir.join("internal-ca-key.pem");
-    if !ca_certificate.exists() || !ca_key.exists() {
+    let certificate_exists = ca_certificate
+        .try_exists()
+        .map_err(|source| ServerError::Material { path: ca_certificate.clone(), source })?;
+    let key_exists = ca_key
+        .try_exists()
+        .map_err(|source| ServerError::Material { path: ca_key.clone(), source })?;
+    if certificate_exists != key_exists {
+        return Err(ServerError::Material {
+            path: if certificate_exists { ca_key } else { ca_certificate },
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "internal CA certificate and key must both exist; restore the incomplete pair from backup",
+            ),
+        });
+    }
+    if !certificate_exists {
         let mut params = CertificateParams::new(vec![config.server.public_host.clone()])
             .map_err(|error| ServerError::Tls(error.to_string()))?;
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -125,7 +140,7 @@ pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<(), ServerError> {
-    std::fs::write(path, format!("{contents}\n"))
+    crate::private_material::write_private(path, contents)
         .map_err(|source| ServerError::Material { path: path.to_path_buf(), source })
 }
 
@@ -888,11 +903,44 @@ mod tests {
         ] {
             let path = data_dir.join(name);
             assert!(path.is_file(), "expected generated material at {}", path.display());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(&path).expect("material metadata").permissions().mode() & 0o777,
+                    0o600
+                );
+            }
         }
 
         let second = bootstrap(&config).expect("second bootstrap is idempotent");
         assert!(second.setup_link.is_none());
         fs::remove_dir_all(data_dir).expect("test material is removable");
+    }
+
+    #[test]
+    fn incomplete_ca_material_is_not_overwritten() {
+        for (missing_name, survivor_name) in
+            [("internal-ca-key.pem", "internal-ca.pem"), ("internal-ca.pem", "internal-ca-key.pem")]
+        {
+            let data_dir =
+                std::env::temp_dir().join(format!("scoplen-bootstrap-{}", uuid::Uuid::new_v4()));
+            let mut config = Config::default();
+            config.server.data_dir = data_dir.clone();
+            bootstrap(&config).expect("initial bootstrap");
+            let survivor = data_dir.join(survivor_name);
+            let existing = fs::read(&survivor).expect("existing material");
+            let missing = data_dir.join(missing_name);
+            fs::remove_file(&missing).expect("remove owned test material");
+            for _ in 0..2 {
+                let error = bootstrap(&config).expect_err("incomplete CA must fail closed");
+                assert!(matches!(error, ServerError::Material { source, .. }
+                    if source.kind() == std::io::ErrorKind::InvalidData));
+                assert_eq!(fs::read(&survivor).expect("retained material"), existing);
+                assert!(!missing.exists());
+            }
+            fs::remove_dir_all(data_dir).expect("remove owned test material");
+        }
     }
 
     #[tokio::test]
