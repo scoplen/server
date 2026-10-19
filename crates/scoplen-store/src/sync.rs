@@ -47,7 +47,7 @@ pub const MAX_SHARED_VAULTS_PER_ACCOUNT: u64 = 1_000;
 /// Maximum number of current account members in a shared vault.
 pub const MAX_MEMBERS_PER_SHARED_VAULT: u64 = 1_000;
 
-/// SQLite sync cardinality limits selected for one deployment.
+/// Sync cardinality limits selected for one deployment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SyncCardinalityLimits {
     pub max_objects_per_vault: u64,
@@ -1834,10 +1834,7 @@ impl PostgresStore {
         }
 
         let mut transaction = self.pool().begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 1))")
-            .bind(account_id.as_slice())
-            .execute(&mut *transaction)
-            .await?;
+        lock_account_postgres(&mut transaction, account_id).await?;
         let exists =
             sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM sync_vaults WHERE vault_id = $1")
                 .bind(vault_id.as_slice())
@@ -1930,6 +1927,335 @@ impl PostgresStore {
                 Ok(SharedVaultKey { epoch, wrapped_vault_key })
             })
             .collect()
+    }
+
+    /// Atomically publish the next shared-vault epoch for every current member.
+    ///
+    /// # Errors
+    ///
+    /// Returns a conflict, member-set mismatch, key-response limit, validation, or storage error.
+    pub async fn publish_shared_sync_vault_epoch(
+        &self,
+        vault_id: VaultId,
+        epoch: u64,
+        wraps: &[SharedVaultEpochWrap],
+    ) -> Result<(), SyncStoreError> {
+        validate_epoch_wraps(wraps)?;
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let current_epoch = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(k.epoch) FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = $1 AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?
+        .map(epoch_from_sql)
+        .transpose()?
+        .unwrap_or(0);
+        let expected = current_epoch.checked_add(1).ok_or(SyncStoreError::SequenceExhausted)?;
+        if epoch != expected {
+            return Err(SyncStoreError::EpochConflict { current_epoch });
+        }
+        let member_rows = sqlx::query(
+            "SELECT account_id FROM sync_vault_members WHERE vault_id = $1 ORDER BY account_id ASC",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let members = member_rows
+            .iter()
+            .map(|row| {
+                let bytes: Vec<u8> = row.try_get("account_id")?;
+                id_from_bytes(&bytes, "account_id")
+            })
+            .collect::<Result<Vec<_>, SyncStoreError>>()?;
+        let supplied: Vec<AccountId> = wraps.iter().map(|wrap| wrap.account_id).collect();
+        if supplied != members {
+            return Err(SyncStoreError::MemberSetMismatch);
+        }
+        check_epoch_key_response_capacity_postgres(&mut transaction, vault_id, epoch, wraps)
+            .await?;
+        for wrap in wraps {
+            sqlx::query(
+                "INSERT INTO sync_vault_member_keys
+                 (vault_id, account_id, epoch, wrapped_vault_key) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(vault_id.as_slice())
+            .bind(wrap.account_id.as_slice())
+            .bind(sequence_to_sql(epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
+            sqlx::query(
+                "UPDATE sync_vault_members SET key_epoch = $1, wrapped_vault_key = $2
+                 WHERE vault_id = $3 AND account_id = $4",
+            )
+            .bind(sequence_to_sql(epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .bind(vault_id.as_slice())
+            .bind(wrap.account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        sqlx::query("UPDATE sync_vaults SET rotation_pending = FALSE WHERE vault_id = $1")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically add a member with one opaque wrap for every currently served epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a duplicate-member, quota, epoch-set, key-response limit, validation, or storage
+    /// error without partial membership or wraps.
+    pub async fn add_shared_sync_vault_member(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+        wraps: &[SharedVaultKey],
+    ) -> Result<(), SyncStoreError> {
+        validate_member_wraps(wraps)?;
+        let mut transaction = self.pool().begin().await?;
+        lock_account_postgres(&mut transaction, account_id).await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT 1::BIGINT FROM sync_vault_members WHERE vault_id = $1 AND account_id = $2",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if exists.is_some() {
+            return Err(SyncStoreError::MemberAlreadyExists);
+        }
+        let member_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = $1",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(member_count).map_err(|_| SyncStoreError::CorruptRow("member_count"))?
+            >= self.sync_cardinality_limits().max_members_per_shared_vault
+        {
+            return Err(SyncStoreError::QuotaExceeded("members per shared vault"));
+        }
+        let shared_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = $1 AND v.kind = 'shared'",
+        )
+        .bind(account_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
+            >= self.sync_cardinality_limits().max_shared_vaults_per_account
+        {
+            return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
+        }
+        let epoch_rows = sqlx::query(
+            "SELECT DISTINCT k.epoch FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = $1 AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )
+             ORDER BY k.epoch ASC",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_all(&mut *transaction)
+        .await?;
+        let epochs = epoch_rows
+            .iter()
+            .map(|row| epoch_from_sql(row.try_get("epoch")?))
+            .collect::<Result<Vec<_>, SyncStoreError>>()?;
+        let supplied_epochs: Vec<u64> = wraps.iter().map(|wrap| wrap.epoch).collect();
+        if supplied_epochs != epochs {
+            return Err(SyncStoreError::MemberEpochMismatch);
+        }
+        if vault_keys_response_bytes(
+            wraps.iter().map(|wrap| (wrap.epoch, wrap.wrapped_vault_key.len())),
+            wraps.len(),
+        ) > MAX_SHARED_VAULT_KEYS_BODY_BYTES
+        {
+            return Err(SyncStoreError::VaultKeyResponseLimit);
+        }
+        let current = wraps.last().ok_or(SyncStoreError::InvalidMemberWraps)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_members
+             (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+             VALUES ($1, $2, 'member', $3, $4)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(sequence_to_sql(current.epoch)?)
+        .bind(&current.wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
+        for wrap in wraps {
+            sqlx::query(
+                "INSERT INTO sync_vault_member_keys
+                 (vault_id, account_id, epoch, wrapped_vault_key) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(vault_id.as_slice())
+            .bind(account_id.as_slice())
+            .bind(sequence_to_sql(wrap.epoch)?)
+            .bind(&wrap.wrapped_vault_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically retire an older shared-vault epoch after current objects are re-encrypted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing, newest, or in-use epoch, unsupported vault kind, or storage error.
+    pub async fn retire_shared_sync_vault_epoch(
+        &self,
+        vault_id: VaultId,
+        epoch: u64,
+    ) -> Result<(), SyncStoreError> {
+        if epoch == 0 {
+            return Err(SyncStoreError::EpochNotFound { epoch });
+        }
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let kind =
+            sqlx::query_scalar::<_, String>("SELECT kind FROM sync_vaults WHERE vault_id = $1")
+                .bind(vault_id.as_slice())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if kind != "shared" {
+            return Err(SyncStoreError::UnsupportedVaultKind);
+        }
+        let epoch_sql = sequence_to_sql(epoch)?;
+        let already_retired = sqlx::query_scalar::<_, i64>(
+            "SELECT 1::BIGINT FROM sync_vault_retired_epochs WHERE vault_id = $1 AND epoch = $2",
+        )
+        .bind(vault_id.as_slice())
+        .bind(epoch_sql)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if already_retired {
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let served = sqlx::query_scalar::<_, i64>(
+            "SELECT 1::BIGINT FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = $1 AND k.epoch = $2
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_vault_retired_epochs AS r
+                 WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+               )
+             LIMIT 1",
+        )
+        .bind(vault_id.as_slice())
+        .bind(epoch_sql)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+        if !served {
+            return Err(SyncStoreError::EpochNotFound { epoch });
+        }
+        let newest = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(k.epoch) FROM sync_vault_member_keys AS k
+             WHERE k.vault_id = $1 AND NOT EXISTS (
+               SELECT 1 FROM sync_vault_retired_epochs AS r
+               WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+             )",
+        )
+        .bind(vault_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?
+        .map(epoch_from_sql)
+        .transpose()?
+        .ok_or(SyncStoreError::EpochNotFound { epoch })?;
+        if epoch == newest {
+            return Err(SyncStoreError::EpochNewest { epoch });
+        }
+        let references = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_objects WHERE vault_id = $1 AND key_epoch = $2",
+        )
+        .bind(vault_id.as_slice())
+        .bind(epoch_sql)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if references != 0 {
+            return Err(SyncStoreError::EpochInUse { epoch });
+        }
+        sqlx::query("DELETE FROM sync_vault_member_keys WHERE vault_id = $1 AND epoch = $2")
+            .bind(vault_id.as_slice())
+            .bind(epoch_sql)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("INSERT INTO sync_vault_retired_epochs (vault_id, epoch) VALUES ($1, $2)")
+            .bind(vault_id.as_slice())
+            .bind(epoch_sql)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_constraint)?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically remove a shared-vault member and mark the vault for re-keying.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-member, last-admin, or storage error without partial changes.
+    pub async fn remove_shared_sync_vault_member(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+    ) -> Result<(), SyncStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        lock_vault_postgres(&mut transaction, vault_id).await?;
+        let role = sqlx::query_scalar::<_, String>(
+            "SELECT role FROM sync_vault_members WHERE vault_id = $1 AND account_id = $2",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(SyncStoreError::MemberNotFound)?;
+        if role == "admin" {
+            let admin_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = $1 AND role = 'admin'",
+            )
+            .bind(vault_id.as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if admin_count <= 1 {
+                return Err(SyncStoreError::LastAdmin);
+            }
+        }
+        let deleted =
+            sqlx::query("DELETE FROM sync_vault_members WHERE vault_id = $1 AND account_id = $2")
+                .bind(vault_id.as_slice())
+                .bind(account_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(SyncStoreError::MemberNotFound);
+        }
+        sqlx::query("UPDATE sync_vaults SET rotation_pending = TRUE WHERE vault_id = $1")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
@@ -2252,6 +2578,17 @@ async fn lock_vault_postgres(
     Ok(())
 }
 
+async fn lock_account_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: AccountId,
+) -> Result<(), SyncStoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 1))")
+        .bind(account_id.as_slice())
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
 async fn vault_state_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     vault_id: VaultId,
@@ -2409,6 +2746,54 @@ async fn check_epoch_key_response_capacity(
         let account_id = id_from_bytes(&row.try_get::<Vec<u8>, _>("account_id")?, "account_id")?;
         let served_epoch = epoch_from_sql(row.try_get("epoch")?)?;
         let wrap_bytes = usize::try_from(row.try_get::<i64, _>("wrap_bytes")?)
+            .map_err(|_| SyncStoreError::CorruptRow("wrapped_vault_key"))?;
+        if !(1..=MAX_SHARED_VAULT_KEY_BYTES).contains(&wrap_bytes) {
+            return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+        }
+        member_keys.entry(account_id).or_default().push((served_epoch, wrap_bytes));
+        active_epochs.insert(served_epoch);
+    }
+    if active_epochs.len() >= MAX_SHARED_VAULT_KEY_EPOCHS {
+        return Err(SyncStoreError::VaultKeyResponseLimit);
+    }
+    for wrap in wraps {
+        let existing = member_keys.get(&wrap.account_id).map(Vec::as_slice).unwrap_or_default();
+        let projected = vault_keys_response_bytes(
+            existing.iter().copied().chain(std::iter::once((epoch, wrap.wrapped_vault_key.len()))),
+            existing.len() + 1,
+        );
+        if projected > MAX_SHARED_VAULT_KEYS_BODY_BYTES {
+            return Err(SyncStoreError::VaultKeyResponseLimit);
+        }
+    }
+    Ok(())
+}
+
+async fn check_epoch_key_response_capacity_postgres(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+    epoch: u64,
+    wraps: &[SharedVaultEpochWrap],
+) -> Result<(), SyncStoreError> {
+    let rows = sqlx::query(
+        "SELECT k.account_id, k.epoch, octet_length(k.wrapped_vault_key) AS wrap_bytes
+         FROM sync_vault_member_keys AS k
+         JOIN sync_vault_members AS m
+           ON m.vault_id = k.vault_id AND m.account_id = k.account_id
+         WHERE k.vault_id = $1 AND NOT EXISTS (
+           SELECT 1 FROM sync_vault_retired_epochs AS r
+           WHERE r.vault_id = k.vault_id AND r.epoch = k.epoch
+         )",
+    )
+    .bind(vault_id.as_slice())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let mut member_keys = HashMap::<AccountId, Vec<(u64, usize)>>::new();
+    let mut active_epochs = HashSet::new();
+    for row in rows {
+        let account_id = id_from_bytes(&row.try_get::<Vec<u8>, _>("account_id")?, "account_id")?;
+        let served_epoch = epoch_from_sql(row.try_get("epoch")?)?;
+        let wrap_bytes = usize::try_from(row.try_get::<i32, _>("wrap_bytes")?)
             .map_err(|_| SyncStoreError::CorruptRow("wrapped_vault_key"))?;
         if !(1..=MAX_SHARED_VAULT_KEY_BYTES).contains(&wrap_bytes) {
             return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));

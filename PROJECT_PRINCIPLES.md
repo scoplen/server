@@ -21,7 +21,7 @@ self-hosted server, host agent, administration CLI, and web console.
 - SQLite migration, transaction, initial sync storage, an atomic retention primitive, a durable
   leased job queue with worker lease cleanup, and an explicitly authenticated K-4 HTTP/CBOR adapter
   exist. The baseline listener does not mount the adapter until production identity is available.
-  Membership-aware purge scheduling, remaining PostgreSQL sync queries and sync-router support,
+  Membership-aware purge scheduling, PostgreSQL sync-router support,
   identity, policy, certificate, gateway, audit, agent, CLI, and console behavior remain on the
   roadmap. The worker can now use the PostgreSQL query backend; API and edge can start with
   PostgreSQL and check its readiness, while the authenticated sync router remains SQLite-only and

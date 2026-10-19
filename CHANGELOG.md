@@ -4,10 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Pinned migration SQL checkouts to LF so Windows and Unix builds embed identical migration
+  bytes and SQLx checksums. Existing databases created with noncanonical bytes still require
+  their matching build; recorded migration checksums are not rewritten.
+- Added PostgreSQL parity for shared-vault epoch publication, member addition/removal, and safe
+  epoch retirement. Per-vault serialization and a shared account quota lock protect concurrent
+  mutations; key-response bounds and late-failure rollback are covered against PostgreSQL 17.
+  The sync HTTP adapter remains SQLite-only and unmounted by the baseline listener.
 - Added PostgreSQL shared-vault creation with an atomic admin membership and epoch-one wrap,
   account-scoped stable listings, and non-retired member-key reads. Disposable PostgreSQL tests
   cover isolation, concurrent quota and duplicate races, and rollback after a key-row failure.
-  Later shared-vault mutations and the sync HTTP adapter remain SQLite-only.
 - Added a `scoplen-identity` verifier for D-101 first-device enrollment. It checks the K-4 account
   signature, K-2 certificate, and origin-bound device possession proof, returning only a redacted
   verified value for later atomic redemption. Synchronized all server proto pins to `e288515`.
