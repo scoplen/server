@@ -418,6 +418,189 @@ async fn postgres_personal_sync_concurrent_writes_and_acks_are_monotone() {
     store.pool().close().await;
 }
 
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_personal_sync_snapshot_and_versions_are_vault_scoped() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let first = uuid::Uuid::new_v4().into_bytes();
+    let second = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_personal_sync_vault(first, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("first account vault");
+    store
+        .create_personal_sync_vault(second, uuid::Uuid::new_v4().into_bytes(), &[2])
+        .await
+        .expect("second account vault");
+    store
+        .write_sync_batch(first, &[write(1, None, 10), write(2, None, 20), write(3, None, 30)])
+        .await
+        .expect("first vault objects");
+    store.write_sync_batch(second, &[write(1, None, 90)]).await.expect("second vault object");
+    store.write_sync_batch(first, &[write(1, Some(1), 40)]).await.expect("new first version");
+
+    let first_page = store.sync_snapshot(first, 0, 1).await.expect("first page");
+    assert_eq!(first_page.objects[0].object_id, [2; 16]);
+    assert_eq!(first_page.objects[0].sequence, 2);
+    assert!(first_page.more);
+    assert_eq!(first_page.next_cursor, 2);
+    let second_page = store.sync_snapshot(first, 2, 1).await.expect("second page");
+    assert_eq!(second_page.objects[0].sequence, 3);
+    assert!(second_page.more);
+    assert_eq!(second_page.next_cursor, 3);
+    let last_page = store.sync_snapshot(first, 3, 1).await.expect("last page");
+    assert_eq!(last_page.objects[0].sequence, 4);
+    assert_eq!(last_page.objects[0].envelope, vec![40, 41]);
+    assert_eq!(last_page.objects[0].signer_device_id, Some([9; 16]));
+    assert!(!last_page.more);
+    assert_eq!(last_page.next_cursor, 4);
+    let caught_up = store.sync_snapshot(first, 4, 1).await.expect("caught up");
+    assert_eq!(caught_up.objects.len(), 0);
+    assert!(!caught_up.more);
+    assert_eq!(caught_up.next_cursor, 4);
+
+    let first_versions = store.sync_versions(first, [1; 16]).await.expect("first history");
+    assert_eq!(first_versions.iter().map(|item| item.sequence).collect::<Vec<_>>(), vec![1, 4]);
+    assert_eq!(first_versions[0].envelope, vec![10, 11]);
+    assert_eq!(first_versions[1].envelope, vec![40, 41]);
+    let other_page = store.sync_snapshot(second, 0, 10).await.expect("other account snapshot");
+    assert_eq!(other_page.objects.len(), 1);
+    assert_eq!(other_page.objects[0].envelope, vec![90, 91]);
+    assert_eq!(other_page.next_cursor, 1);
+    let other_versions = store.sync_versions(second, [1; 16]).await.expect("other history");
+    assert_eq!(other_versions.len(), 1);
+    assert_eq!(other_versions[0].envelope, vec![90, 91]);
+
+    for limit in [0, 1_001] {
+        assert!(matches!(
+            store.sync_snapshot(first, 0, limit).await,
+            Err(SyncStoreError::InvalidPageSize)
+        ));
+    }
+    assert!(matches!(
+        store.sync_snapshot(first, 5, 1).await,
+        Err(SyncStoreError::CursorAhead { cursor: 5, current: 4 })
+    ));
+    assert!(matches!(store.sync_snapshot([0; 16], 0, 1).await, Err(SyncStoreError::VaultNotFound)));
+    assert!(matches!(
+        store.sync_versions([0; 16], [1; 16]).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert!(matches!(
+        store.sync_versions(first, [99; 16]).await,
+        Err(SyncStoreError::ObjectNotFound)
+    ));
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_sync_snapshot_recovers_after_retention() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("personal vault");
+    for revision in 0..25_u64 {
+        store
+            .write_sync_batch(
+                vault,
+                &[write(
+                    1,
+                    (revision > 0).then_some(revision),
+                    u8::try_from(revision).expect("bounded revision"),
+                )],
+            )
+            .await
+            .expect("write revision");
+    }
+    let report = store.purge_sync_history(vault, None, now_ms()).await.expect("retention");
+    assert_eq!(report.pruned_versions, 4);
+    assert_eq!(report.purge_horizon, 4);
+    assert!(matches!(
+        store.sync_changes(vault, 0, 10).await,
+        Err(SyncStoreError::CursorExpired { purge_horizon: 4 })
+    ));
+    let snapshot = store.sync_snapshot(vault, 0, 10).await.expect("full reconciliation");
+    assert_eq!(snapshot.objects.iter().map(|item| item.sequence).collect::<Vec<_>>(), vec![25]);
+    assert_eq!(snapshot.next_cursor, 25);
+    assert!(!snapshot.more);
+    let versions = store.sync_versions(vault, [1; 16]).await.expect("retained history");
+    assert_eq!(versions.len(), 21);
+    assert_eq!(versions.first().expect("oldest").sequence, 5);
+    assert_eq!(versions.last().expect("current").sequence, 25);
+
+    store.write_sync_batch(vault, &[tombstone(1, 25)]).await.expect("tombstone");
+    let report = store.purge_sync_history(vault, Some(26), now_ms()).await.expect("purge");
+    assert_eq!(report.purged_tombstones, 1);
+    assert_eq!(report.purge_horizon, 26);
+    assert!(matches!(
+        store.sync_versions(vault, [1; 16]).await,
+        Err(SyncStoreError::ObjectNotFound)
+    ));
+    let snapshot = store.sync_snapshot(vault, 0, 10).await.expect("empty reconciliation");
+    assert_eq!(snapshot.objects.len(), 0);
+    assert_eq!(snapshot.next_cursor, 26);
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_personal_sync_snapshot_and_versions_remain_consistent_during_writes() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("personal vault");
+    store.write_sync_batch(vault, &[write(1, None, 1)]).await.expect("initial object");
+    let writer = store.clone();
+    let reader = store.clone();
+    tokio::join!(
+        async move {
+            for revision in 1..=60_u64 {
+                writer
+                    .write_sync_batch(
+                        vault,
+                        &[write(
+                            1,
+                            Some(revision),
+                            u8::try_from(revision + 1).expect("bounded revision"),
+                        )],
+                    )
+                    .await
+                    .expect("concurrent revision");
+                tokio::task::yield_now().await;
+            }
+        },
+        async move {
+            for _ in 0..100 {
+                let snapshot = reader.sync_snapshot(vault, 0, 1).await.expect("snapshot");
+                assert_eq!(snapshot.objects.len(), 1);
+                assert_eq!(snapshot.next_cursor, snapshot.objects[0].sequence);
+                assert!(!snapshot.more);
+                let versions = reader.sync_versions(vault, [1; 16]).await.expect("versions");
+                assert!((1..=21).contains(&versions.len()));
+                assert!(versions.windows(2).all(|pair| pair[0].sequence + 1 == pair[1].sequence));
+                assert!(versions.iter().all(|item| item.object_id == [1; 16]));
+                tokio::task::yield_now().await;
+            }
+        },
+    );
+    let final_page = store.sync_snapshot(vault, 0, 1).await.expect("final snapshot");
+    assert_eq!(final_page.next_cursor, 61);
+    assert_eq!(final_page.objects[0].sequence, 61);
+    store.pool().close().await;
+}
+
 #[tokio::test]
 async fn shared_session_descriptors_follow_current_membership_and_rotation() {
     let directory = test_directory();

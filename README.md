@@ -93,10 +93,10 @@ against the SQLite set. The API, edge, and worker roles can select PostgreSQL wi
 `storage.backend = "postgres"` and `storage.database_url`; the listener's `/readyz` checks the
 selected database and object store. Worker queue, sync-retention, account-key, audit, account-scoped
 vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also supports atomic CAS
-batches with gap-free vault sequences, current change pages from one snapshot, and monotone device
-acknowledgements. The runtime passes the configured object limit to that writer. The sync HTTP
-adapter, snapshot/version queries, and shared-vault mutation queries still use SQLite; the baseline
-listener does not mount the sync router.
+batches with gap-free vault sequences, current change and full-reconciliation snapshot pages from
+one read transaction, bounded retained-version reads, and monotone device acknowledgements. The
+runtime passes the configured object limit to that writer. The sync HTTP adapter and shared-vault
+mutation queries still use SQLite; the baseline listener does not mount the sync router.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
