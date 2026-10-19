@@ -5,6 +5,7 @@
 
 mod config;
 mod error;
+mod private_material;
 mod roles;
 mod runtime;
 

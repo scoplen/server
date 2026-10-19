@@ -8,6 +8,9 @@ Changes are recorded here for released or reviewable repository outcomes.
   `server.public_port` separate from the listener port. Setup links now use this trusted origin;
   invalid hosts and ports fail startup and configuration checks. Operator setup and production
   authentication remain incomplete.
+- Create new first-run key, certificate, and setup files with owner-only Unix permissions and
+  exclusive creation. Existing files and symlink destinations cannot be overwritten; incomplete
+  CA material fails closed instead of replacing an existing certificate or key.
 - Added PostgreSQL Personal sync snapshot paging and bounded retained-version reads. Snapshots
   recover from the purge horizon; both reads use one read-only repeatable-read transaction, and
   PostgreSQL integration tests cover vault isolation, paging, retention, missing-state errors, and
