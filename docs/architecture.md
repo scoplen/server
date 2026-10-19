@@ -57,7 +57,11 @@ per-account shared-vault quota, and read only a member's non-retired wraps. Post
 serializes CAS batches on the vault row, enforces its configured object limit, assigns gap-free
 sequences, serves current changes and full-reconciliation snapshots from read-only repeatable-read
 transactions, reads up to 21 retained object versions, and stores monotone device ACKs.
-Later shared-vault mutations remain SQLite-only. A migration error
+Both stores serialize epoch publication, member addition/removal, and epoch retirement with vault
+writes. PostgreSQL member addition also takes the account quota lock used by vault creation before
+locking the vault, so concurrent joins across vaults cannot exceed the account limit. Historical
+wraps cascade when a member is removed, and retired epochs stay unavailable to new writes.
+A migration error
 prevents startup. `/readyz` queries the database and returns 503 when the query fails. Public
 HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router covers
 the account-key, object-sync, and local notification boundaries but still delegates authentication,
@@ -73,7 +77,7 @@ bounded opaque payloads, claims jobs with owner-checked leases, records retries,
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration run through the same
 bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
-are available; the remaining PostgreSQL sync queries and sync-router porting, application-level
+are available; PostgreSQL sync-router porting, application-level
 column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
 The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;
 cloud adapters, column encryption, and external KMS readiness remain open. Database-backed role
