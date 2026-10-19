@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added PostgreSQL shared-vault creation with an atomic admin membership and epoch-one wrap,
+  account-scoped stable listings, and non-retired member-key reads. Disposable PostgreSQL tests
+  cover isolation, concurrent quota and duplicate races, and rollback after a key-row failure.
+  Later shared-vault mutations and the sync HTTP adapter remain SQLite-only.
 - Added a `scoplen-identity` verifier for D-101 first-device enrollment. It checks the K-4 account
   signature, K-2 certificate, and origin-bound device possession proof, returning only a redacted
   verified value for later atomic redemption. Synchronized all server proto pins to `e288515`.

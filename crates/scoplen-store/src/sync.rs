@@ -1781,6 +1781,157 @@ impl PostgresStore {
             .collect()
     }
 
+    /// List current shared-vault memberships in stable vault-id order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error if metadata cannot be read safely.
+    pub async fn list_shared_sync_vaults_for_account(
+        &self,
+        account_id: AccountId,
+    ) -> Result<Vec<SharedVaultDescriptor>, SyncStoreError> {
+        let rows = sqlx::query(
+            "SELECT v.vault_id, v.current_seq, m.key_epoch, v.rotation_pending
+             FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = $1 AND v.kind = 'shared'
+             ORDER BY v.vault_id ASC",
+        )
+        .bind(account_id.as_slice())
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(SharedVaultDescriptor {
+                    vault_id: id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id")?,
+                    sequence: sequence_from_sql(row.try_get("current_seq")?)?,
+                    key_epoch: epoch_from_sql(row.try_get("key_epoch")?)?,
+                    rotation_pending: row.try_get("rotation_pending")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Atomically create a shared vault with its admin and epoch-one key wrap.
+    ///
+    /// A transaction-scoped account lock keeps the membership quota correct when two creations
+    /// for one account race. The caller supplies an authenticated account id and a validated wrap.
+    ///
+    /// # Errors
+    ///
+    /// Returns a duplicate-vault, quota, validation, or database error without partial rows.
+    pub async fn create_shared_sync_vault(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+        wrapped_vault_key: &[u8],
+    ) -> Result<(), SyncStoreError> {
+        if wrapped_vault_key.is_empty() {
+            return Err(SyncStoreError::EmptyVaultKey);
+        }
+        if wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES {
+            return Err(SyncStoreError::VaultKeyTooLarge);
+        }
+
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 1))")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM sync_vaults WHERE vault_id = $1")
+                .bind(vault_id.as_slice())
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if exists.is_some() {
+            return Err(SyncStoreError::VaultAlreadyExists);
+        }
+        let shared_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sync_vault_members AS m
+             JOIN sync_vaults AS v ON v.vault_id = m.vault_id
+             WHERE m.account_id = $1 AND v.kind = 'shared'",
+        )
+        .bind(account_id.as_slice())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if u64::try_from(shared_count).map_err(|_| SyncStoreError::CorruptRow("shared_count"))?
+            >= self.sync_cardinality_limits().max_shared_vaults_per_account
+        {
+            return Err(SyncStoreError::QuotaExceeded("shared vaults per account"));
+        }
+
+        sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES ($1, 'shared')")
+            .bind(vault_id.as_slice())
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_personal_vault_insert_error)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_members
+             (vault_id, account_id, role, key_epoch, wrapped_vault_key)
+             VALUES ($1, $2, 'admin', 1, $3)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
+        sqlx::query(
+            "INSERT INTO sync_vault_member_keys
+             (vault_id, account_id, epoch, wrapped_vault_key)
+             VALUES ($1, $2, 1, $3)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .bind(wrapped_vault_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_constraint)?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Return a member's non-retired shared-vault key wraps in epoch order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-vault/member, corrupt-row, or database error.
+    pub async fn get_shared_sync_vault_keys(
+        &self,
+        vault_id: VaultId,
+        account_id: AccountId,
+    ) -> Result<Vec<SharedVaultKey>, SyncStoreError> {
+        let rows = sqlx::query(
+            "SELECT epoch, wrapped_vault_key FROM sync_vault_member_keys
+             WHERE vault_id = $1 AND account_id = $2
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_vault_retired_epochs AS r
+                 WHERE r.vault_id = sync_vault_member_keys.vault_id
+                   AND r.epoch = sync_vault_member_keys.epoch
+               )
+             ORDER BY epoch ASC",
+        )
+        .bind(vault_id.as_slice())
+        .bind(account_id.as_slice())
+        .fetch_all(self.pool())
+        .await?;
+        if rows.is_empty() {
+            return Err(SyncStoreError::VaultNotFound);
+        }
+        rows.into_iter()
+            .map(|row| {
+                let epoch = epoch_from_sql(row.try_get("epoch")?)?;
+                let wrapped_vault_key: Vec<u8> = row.try_get("wrapped_vault_key")?;
+                if wrapped_vault_key.is_empty()
+                    || wrapped_vault_key.len() > MAX_SHARED_VAULT_KEY_BYTES
+                {
+                    return Err(SyncStoreError::CorruptRow("wrapped_vault_key"));
+                }
+                Ok(SharedVaultKey { epoch, wrapped_vault_key })
+            })
+            .collect()
+    }
+
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
     ///
     /// The account and client-generated vault id must be validated by the enrollment service.
