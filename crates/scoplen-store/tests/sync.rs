@@ -36,6 +36,53 @@ async fn remove_test_directory(path: PathBuf) {
     }
 }
 
+#[cfg(feature = "postgres-integration")]
+async fn install_postgres_vault_failure_trigger(
+    store: &PostgresStore,
+    vault: [u8; 16],
+    table: &str,
+    event: &str,
+) -> (String, String) {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let function = format!("scoplen_test_fail_{suffix}");
+    let trigger = format!("scoplen_test_trigger_{suffix}");
+    let vault_hex = uuid::Uuid::from_bytes(vault).simple().to_string();
+    sqlx::query(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.vault_id = decode('{vault_hex}', 'hex') THEN
+           RAISE EXCEPTION 'injected shared-vault mutation failure';
+         END IF; RETURN NEW; END $$"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("create failure function");
+    sqlx::query(&format!(
+        "CREATE TRIGGER {trigger} {event} ON {table}
+         FOR EACH ROW EXECUTE FUNCTION {function}()"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("install failure trigger");
+    (trigger, function)
+}
+
+#[cfg(feature = "postgres-integration")]
+async fn remove_postgres_vault_failure_trigger(
+    store: &PostgresStore,
+    table: &str,
+    trigger: &str,
+    function: &str,
+) {
+    sqlx::query(&format!("DROP TRIGGER {trigger} ON {table}"))
+        .execute(store.pool())
+        .await
+        .expect("remove failure trigger");
+    sqlx::query(&format!("DROP FUNCTION {function}()"))
+        .execute(store.pool())
+        .await
+        .expect("remove failure function");
+}
+
 #[tokio::test]
 async fn personal_vault_provisioning_is_unique_atomic_and_account_scoped() {
     let directory = test_directory();
@@ -296,6 +343,596 @@ async fn postgres_shared_vault_creation_rolls_back_after_key_insert_failure() {
         .await
         .expect("remove failure function");
     store.create_shared_sync_vault(vault, account, &[1]).await.expect("retry after rollback");
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_shared_vault_epoch_publication_and_retirement_are_atomic() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let admin = uuid::Uuid::new_v4().into_bytes();
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
+    assert!(matches!(
+        store.publish_shared_sync_vault_epoch(vault, 2, &[]).await,
+        Err(SyncStoreError::InvalidEpochWraps)
+    ));
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                3,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![3] }]
+            )
+            .await,
+        Err(SyncStoreError::EpochConflict { current_epoch: 1 })
+    ));
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                2,
+                &[SharedVaultEpochWrap {
+                    account_id: uuid::Uuid::new_v4().into_bytes(),
+                    wrapped_vault_key: vec![2]
+                }]
+            )
+            .await,
+        Err(SyncStoreError::MemberSetMismatch)
+    ));
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("publish epoch two");
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, admin).await.expect("first two epochs"),
+        vec![
+            SharedVaultKey { epoch: 1, wrapped_vault_key: vec![1] },
+            SharedVaultKey { epoch: 2, wrapped_vault_key: vec![2] },
+        ]
+    );
+    let left_wraps = [SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![3] }];
+    let right_wraps = [SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![4] }];
+    let (left, right) = tokio::join!(
+        store.publish_shared_sync_vault_epoch(vault, 3, &left_wraps),
+        store.publish_shared_sync_vault_epoch(vault, 3, &right_wraps),
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    assert!(
+        left.is_ok() || matches!(left, Err(SyncStoreError::EpochConflict { current_epoch: 3 }))
+    );
+    assert!(
+        right.is_ok() || matches!(right, Err(SyncStoreError::EpochConflict { current_epoch: 3 }))
+    );
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, admin).await.expect("concurrent epoch").len(),
+        3
+    );
+
+    store.write_sync_batch(vault, &[write(1, None, 3)]).await.expect("epoch-one object");
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 1).await,
+        Err(SyncStoreError::EpochInUse { epoch: 1 })
+    ));
+    let mut rewritten = write(1, Some(1), 4);
+    rewritten.key_epoch = 2;
+    store.write_sync_batch(vault, &[rewritten]).await.expect("rewrite to epoch two");
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("retire old epoch");
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("repeat retirement");
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, admin).await.expect("retained wraps").len(),
+        2
+    );
+    let mut stale = write(2, None, 5);
+    stale.key_epoch = 1;
+    assert!(matches!(
+        store.write_sync_batch(vault, &[stale]).await,
+        Err(SyncStoreError::EpochRetired { epoch: 1 })
+    ));
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 3).await,
+        Err(SyncStoreError::EpochNewest { epoch: 3 })
+    ));
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 4).await,
+        Err(SyncStoreError::EpochNotFound { epoch: 4 })
+    ));
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(uuid::Uuid::new_v4().into_bytes(), 1).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    let personal = uuid::Uuid::new_v4().into_bytes();
+    store.create_personal_sync_vault(personal, admin, &[7]).await.expect("personal vault");
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(personal, 1).await,
+        Err(SyncStoreError::UnsupportedVaultKind)
+    ));
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_shared_vault_epoch_count_limit_reopens_after_retirement() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let admin = uuid::Uuid::new_v4().into_bytes();
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
+    for epoch in 2..=MAX_SHARED_VAULT_KEY_EPOCHS as u64 {
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![1] }],
+            )
+            .await
+            .expect("publish within limit");
+    }
+    let rejected_epoch = MAX_SHARED_VAULT_KEY_EPOCHS as u64 + 1;
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                rejected_epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }]
+            )
+            .await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, admin).await.expect("unchanged keys").len(),
+        MAX_SHARED_VAULT_KEY_EPOCHS
+    );
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("retire epoch one");
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            rejected_epoch,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("retirement frees capacity");
+    let keys = store.get_shared_sync_vault_keys(vault, admin).await.expect("64 served epochs");
+    assert_eq!(keys.len(), MAX_SHARED_VAULT_KEY_EPOCHS);
+    assert_eq!(keys.first().expect("first epoch").epoch, 2);
+    assert_eq!(keys.last().expect("last epoch").epoch, rejected_epoch);
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_shared_vault_member_addition_and_removal_preserve_key_isolation() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let admin = uuid::Uuid::new_v4().into_bytes();
+    let member = uuid::Uuid::new_v4().into_bytes();
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("publish epoch two");
+    assert!(matches!(
+        store
+            .add_shared_sync_vault_member(
+                vault,
+                member,
+                &[SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4] }]
+            )
+            .await,
+        Err(SyncStoreError::MemberEpochMismatch)
+    ));
+    let wraps = [
+        SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] },
+        SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4] },
+    ];
+    store.add_shared_sync_vault_member(vault, member, &wraps).await.expect("add member");
+    assert_eq!(store.get_shared_sync_vault_keys(vault, member).await.expect("member wraps"), wraps);
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(member).await.expect("member vaults").len(),
+        1
+    );
+    assert!(matches!(
+        store.add_shared_sync_vault_member(vault, member, &wraps).await,
+        Err(SyncStoreError::MemberAlreadyExists)
+    ));
+    let role: String = sqlx::query_scalar(
+        "SELECT role FROM sync_vault_members WHERE vault_id = $1 AND account_id = $2",
+    )
+    .bind(vault.as_slice())
+    .bind(member.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("member role");
+    assert_eq!(role, "member");
+    store.remove_shared_sync_vault_member(vault, member).await.expect("remove member");
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(member).await.expect("removed member vaults"),
+        Vec::new()
+    );
+    let key_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sync_vault_member_keys WHERE vault_id = $1 AND account_id = $2",
+    )
+    .bind(vault.as_slice())
+    .bind(member.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("cascaded key rows");
+    assert_eq!(key_rows, 0);
+    assert!(
+        store.list_shared_sync_vaults_for_account(admin).await.expect("admin vaults")[0]
+            .rotation_pending
+    );
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, member).await,
+        Err(SyncStoreError::MemberNotFound)
+    ));
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, admin).await,
+        Err(SyncStoreError::LastAdmin)
+    ));
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            3,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![5] }],
+        )
+        .await
+        .expect("publish replacement epoch");
+    assert!(
+        !store.list_shared_sync_vaults_for_account(admin).await.expect("cleared rotation")[0]
+            .rotation_pending
+    );
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_shared_vault_member_quotas_serialize_competing_additions() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let limits = SyncCardinalityLimits {
+        max_shared_vaults_per_account: 1,
+        max_members_per_shared_vault: 2,
+        ..Default::default()
+    };
+    let store = PostgresStore::connect_with_sync_limits(&database_url, limits)
+        .await
+        .expect("open PostgreSQL with quotas");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_shared_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("seed vault");
+    let left = uuid::Uuid::new_v4().into_bytes();
+    let right = uuid::Uuid::new_v4().into_bytes();
+    let wraps = [SharedVaultKey { epoch: 1, wrapped_vault_key: vec![2] }];
+    let (left_result, right_result) = tokio::join!(
+        store.add_shared_sync_vault_member(vault, left, &wraps),
+        store.add_shared_sync_vault_member(vault, right, &wraps),
+    );
+    assert_eq!(usize::from(left_result.is_ok()) + usize::from(right_result.is_ok()), 1);
+    assert!(
+        left_result.is_ok()
+            || matches!(
+                left_result,
+                Err(SyncStoreError::QuotaExceeded("members per shared vault"))
+            )
+    );
+    assert!(
+        right_result.is_ok()
+            || matches!(
+                right_result,
+                Err(SyncStoreError::QuotaExceeded("members per shared vault"))
+            )
+    );
+    let member_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = $1")
+            .bind(vault.as_slice())
+            .fetch_one(store.pool())
+            .await
+            .expect("bounded membership count");
+    assert_eq!(member_count, 2);
+
+    let first = uuid::Uuid::new_v4().into_bytes();
+    let second = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_shared_sync_vault(first, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("first vault");
+    store
+        .create_shared_sync_vault(second, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("second vault");
+    let target = uuid::Uuid::new_v4().into_bytes();
+    let (first_result, second_result) = tokio::join!(
+        store.add_shared_sync_vault_member(first, target, &wraps),
+        store.add_shared_sync_vault_member(second, target, &wraps),
+    );
+    assert_eq!(usize::from(first_result.is_ok()) + usize::from(second_result.is_ok()), 1);
+    assert!(
+        first_result.is_ok()
+            || matches!(
+                first_result,
+                Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+            )
+    );
+    assert!(
+        second_result.is_ok()
+            || matches!(
+                second_result,
+                Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+            )
+    );
+    assert_eq!(
+        store.list_shared_sync_vaults_for_account(target).await.expect("one target vault").len(),
+        1
+    );
+
+    let creation_target = uuid::Uuid::new_v4().into_bytes();
+    let race_vault = uuid::Uuid::new_v4().into_bytes();
+    let new_vault = uuid::Uuid::new_v4().into_bytes();
+    store
+        .create_shared_sync_vault(race_vault, uuid::Uuid::new_v4().into_bytes(), &[1])
+        .await
+        .expect("create membership race vault");
+    let (add_result, create_result) = tokio::join!(
+        store.add_shared_sync_vault_member(race_vault, creation_target, &wraps),
+        store.create_shared_sync_vault(new_vault, creation_target, &[3]),
+    );
+    assert_eq!(usize::from(add_result.is_ok()) + usize::from(create_result.is_ok()), 1);
+    assert!(
+        add_result.is_ok()
+            || matches!(
+                add_result,
+                Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+            )
+    );
+    assert!(
+        create_result.is_ok()
+            || matches!(
+                create_result,
+                Err(SyncStoreError::QuotaExceeded("shared vaults per account"))
+            )
+    );
+    assert_eq!(
+        store
+            .list_shared_sync_vaults_for_account(creation_target)
+            .await
+            .expect("one membership after creation race")
+            .len(),
+        1
+    );
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_shared_vault_mutations_roll_back_late_storage_failures() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let admin = uuid::Uuid::new_v4().into_bytes();
+    let member = uuid::Uuid::new_v4().into_bytes();
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
+
+    let (trigger, function) = install_postgres_vault_failure_trigger(
+        &store,
+        vault,
+        "sync_vault_members",
+        "BEFORE UPDATE OF key_epoch",
+    )
+    .await;
+    assert!(matches!(
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                2,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }]
+            )
+            .await,
+        Err(SyncStoreError::Database(_))
+    ));
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, admin).await.expect("publication rollback").len(),
+        1
+    );
+    remove_postgres_vault_failure_trigger(&store, "sync_vault_members", &trigger, &function).await;
+    store
+        .publish_shared_sync_vault_epoch(
+            vault,
+            2,
+            &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![2] }],
+        )
+        .await
+        .expect("retry publication");
+
+    let (trigger, function) = install_postgres_vault_failure_trigger(
+        &store,
+        vault,
+        "sync_vault_member_keys",
+        "BEFORE INSERT",
+    )
+    .await;
+    let wraps = [
+        SharedVaultKey { epoch: 1, wrapped_vault_key: vec![3] },
+        SharedVaultKey { epoch: 2, wrapped_vault_key: vec![4] },
+    ];
+    assert!(matches!(
+        store.add_shared_sync_vault_member(vault, member, &wraps).await,
+        Err(SyncStoreError::Constraint(_))
+    ));
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    let membership_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sync_vault_members WHERE vault_id = $1 AND account_id = $2",
+    )
+    .bind(vault.as_slice())
+    .bind(member.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("member insertion rollback");
+    assert_eq!(membership_rows, 0);
+    remove_postgres_vault_failure_trigger(&store, "sync_vault_member_keys", &trigger, &function)
+        .await;
+    store.add_shared_sync_vault_member(vault, member, &wraps).await.expect("retry member addition");
+
+    let (trigger, function) = install_postgres_vault_failure_trigger(
+        &store,
+        vault,
+        "sync_vault_retired_epochs",
+        "BEFORE INSERT",
+    )
+    .await;
+    assert!(matches!(
+        store.retire_shared_sync_vault_epoch(vault, 1).await,
+        Err(SyncStoreError::Constraint(_))
+    ));
+    for account in [admin, member] {
+        assert_eq!(
+            store
+                .get_shared_sync_vault_keys(vault, account)
+                .await
+                .expect("retirement rollback")
+                .len(),
+            2
+        );
+    }
+    remove_postgres_vault_failure_trigger(&store, "sync_vault_retired_epochs", &trigger, &function)
+        .await;
+    store.retire_shared_sync_vault_epoch(vault, 1).await.expect("retry retirement");
+
+    let (trigger, function) = install_postgres_vault_failure_trigger(
+        &store,
+        vault,
+        "sync_vaults",
+        "BEFORE UPDATE OF rotation_pending",
+    )
+    .await;
+    assert!(matches!(
+        store.remove_shared_sync_vault_member(vault, member).await,
+        Err(SyncStoreError::Database(_))
+    ));
+    assert_eq!(
+        store.get_shared_sync_vault_keys(vault, member).await.expect("removal rollback").len(),
+        1
+    );
+    assert!(
+        !store.list_shared_sync_vaults_for_account(admin).await.expect("pending rollback")[0]
+            .rotation_pending
+    );
+    remove_postgres_vault_failure_trigger(&store, "sync_vaults", &trigger, &function).await;
+    store.remove_shared_sync_vault_member(vault, member).await.expect("retry removal");
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
+    assert!(
+        store.list_shared_sync_vaults_for_account(admin).await.expect("pending rotation")[0]
+            .rotation_pending
+    );
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_shared_vault_key_body_limit_rejects_publication_and_member_addition() {
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
+    let vault = uuid::Uuid::new_v4().into_bytes();
+    let admin = uuid::Uuid::new_v4().into_bytes();
+    let member = uuid::Uuid::new_v4().into_bytes();
+    let rejected_member = uuid::Uuid::new_v4().into_bytes();
+    let maximum_wrap = vec![1; MAX_SHARED_VAULT_KEY_BYTES];
+    store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
+    for epoch in 2..MAX_SHARED_VAULT_KEY_EPOCHS as u64 {
+        store
+            .publish_shared_sync_vault_epoch(
+                vault,
+                epoch,
+                &[SharedVaultEpochWrap { account_id: admin, wrapped_vault_key: vec![1] }],
+            )
+            .await
+            .expect("publish below body limit");
+    }
+    let existing_wraps = (1..MAX_SHARED_VAULT_KEY_EPOCHS as u64)
+        .map(|epoch| SharedVaultKey { epoch, wrapped_vault_key: maximum_wrap.clone() })
+        .collect::<Vec<_>>();
+    store
+        .add_shared_sync_vault_member(vault, member, &existing_wraps)
+        .await
+        .expect("add large-wrap member");
+    let next = MAX_SHARED_VAULT_KEY_EPOCHS as u64;
+    let (first, second) = if admin < member { (admin, member) } else { (member, admin) };
+    let oversized = [
+        SharedVaultEpochWrap {
+            account_id: first,
+            wrapped_vault_key: if first == member { maximum_wrap.clone() } else { vec![2] },
+        },
+        SharedVaultEpochWrap {
+            account_id: second,
+            wrapped_vault_key: if second == member { maximum_wrap.clone() } else { vec![2] },
+        },
+    ];
+    assert!(matches!(
+        store.publish_shared_sync_vault_epoch(vault, next, &oversized).await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    for account in [admin, member] {
+        assert_eq!(
+            store
+                .get_shared_sync_vault_keys(vault, account)
+                .await
+                .expect("unchanged key set")
+                .len(),
+            MAX_SHARED_VAULT_KEY_EPOCHS - 1
+        );
+    }
+    let fitting = [
+        SharedVaultEpochWrap { account_id: first, wrapped_vault_key: vec![2] },
+        SharedVaultEpochWrap { account_id: second, wrapped_vault_key: vec![2] },
+    ];
+    store.publish_shared_sync_vault_epoch(vault, next, &fitting).await.expect("small wraps fit");
+    let rejected_wraps = (1..=next)
+        .map(|epoch| SharedVaultKey { epoch, wrapped_vault_key: maximum_wrap.clone() })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        store.add_shared_sync_vault_member(vault, rejected_member, &rejected_wraps).await,
+        Err(SyncStoreError::VaultKeyResponseLimit)
+    ));
+    assert!(matches!(
+        store.get_shared_sync_vault_keys(vault, rejected_member).await,
+        Err(SyncStoreError::VaultNotFound)
+    ));
     store.pool().close().await;
 }
 

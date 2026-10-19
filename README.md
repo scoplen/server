@@ -51,7 +51,7 @@ are pinned to `scoplen-proto@e288515` for this shared contract.
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. The remaining PostgreSQL sync queries, production identity
+backend and include it in `/readyz`. PostgreSQL sync-router adoption, production identity
 and authentication, policy filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
@@ -71,10 +71,9 @@ the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomple
 Authenticated change, snapshot, object-version, account-key, and vault-key reads also return
 `503 sync.storage_unavailable` when persisted data cannot form a valid complete response; malformed
 caller input retains its request error and no partial success body is sent.
-The SQLite sync store enforces all configured cardinality limits in mutation transactions. The
-PostgreSQL object writer enforces the configured current-object limit, and shared-vault creation
-enforces the configured per-account vault limit; later shared-vault mutations have not been ported.
-Defaults are 100,000 current objects per vault (including tombstones), 1,000
+The SQLite and PostgreSQL sync stores enforce configured current-object, shared-vault-per-account,
+and member-per-vault cardinality limits in mutation transactions. Defaults are 100,000 current
+objects per vault (including tombstones), 1,000
 shared vault memberships per account, and 1,000 accounts per shared vault. The SQLite-backed K-4
 session advertises these limits. Quota rejection returns `413 sync.quota_exceeded` without changing
 state. Member limits cannot exceed 1,000 because epoch publication requires one key wrap per member
@@ -106,6 +105,10 @@ that key only to its owner using the shared `{keys}` response shape. Enrollment 
 identity, and personal-key rotation remain open; the injected sync router still uses SQLite.
 Both stores also atomically create a shared vault with its admin membership and epoch-one wrap,
 list current shared memberships in vault-id order, and return only a member's non-retired wraps.
+Both stores publish the next epoch for exactly the current member set, add members with every
+served wrap, remove members and their wraps while marking rotation pending, and retire older
+epochs only after current objects no longer reference them. Mutations enforce the fixed key
+response count and size bounds before commit.
 The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
 against the SQLite set. The API, edge, and worker roles can select PostgreSQL with
 `storage.backend = "postgres"` and `storage.database_url`; the listener's `/readyz` checks the
@@ -113,8 +116,8 @@ selected database and object store. Worker queue, sync-retention, account-key, a
 vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also supports atomic CAS
 batches with gap-free vault sequences, current change and full-reconciliation snapshot pages from
 one read transaction, bounded retained-version reads, and monotone device acknowledgements. The
-runtime passes the configured object limit to that writer. The sync HTTP adapter and later
-shared-vault mutation queries still use SQLite; the baseline listener does not mount the sync router.
+runtime passes the configured object limit to that writer. The sync HTTP adapter still uses
+SQLite; the baseline listener does not mount the sync router.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
