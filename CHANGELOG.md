@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added PostgreSQL Personal sync snapshot paging and bounded retained-version reads. Snapshots
+  recover from the purge horizon; both reads use one read-only repeatable-read transaction, and
+  PostgreSQL integration tests cover vault isolation, paging, retention, missing-state errors, and
+  concurrent writes. Corrected the PostgreSQL retention DELETE syntax exposed by the recovery
+  test. The sync HTTP adapter remains SQLite-only and unmounted.
 - Added PostgreSQL Personal sync storage for atomic compare-and-swap batches, gap-free sequences,
   current change pages, and monotone device acknowledgements. The runtime passes configured
   current-object limits to PostgreSQL, and real database tests cover concurrency, rollback,

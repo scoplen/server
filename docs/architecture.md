@@ -33,8 +33,9 @@ full-reconciliation snapshot pages without interpreting envelope bytes. Both rel
 atomically provision one personal vault and its opaque wrapped key per account, scope key reads to
 the owner, and list the account's personal vault and current shared memberships. PostgreSQL also
 serializes CAS batches on the vault row, enforces its configured object limit, assigns gap-free
-sequences, serves current changes from a repeatable-read snapshot, and stores monotone device ACKs.
-Snapshot/version reads and shared-vault mutations remain SQLite-only. A migration error
+sequences, serves current changes and full-reconciliation snapshots from read-only repeatable-read
+transactions, reads up to 21 retained object versions, and stores monotone device ACKs.
+Shared-vault mutations remain SQLite-only. A migration error
 prevents startup. `/readyz` queries the database and returns 503 when the query fails. Public
 HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router covers
 the account-key, object-sync, and local notification boundaries but still delegates authentication,

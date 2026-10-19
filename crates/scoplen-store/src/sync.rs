@@ -1607,9 +1607,84 @@ impl PostgresStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
             .await?;
-        let page = read_current_page_postgres(&mut transaction, vault_id, after, limit).await?;
+        let page =
+            read_current_page_postgres(&mut transaction, vault_id, after, limit, true).await?;
         transaction.commit().await?;
         Ok(page)
+    }
+
+    /// Read a full-reconciliation page of current object versions.
+    ///
+    /// The page uses the change-feed order and cursor bounds, but accepts `after = 0` even after
+    /// retention has advanced the purge horizon. Authorization remains a service concern.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-vault, ahead-cursor, page-size, or database error.
+    pub async fn sync_snapshot(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+    ) -> Result<SnapshotPage, SyncStoreError> {
+        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
+            return Err(SyncStoreError::InvalidPageSize);
+        }
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let page =
+            read_current_page_postgres(&mut transaction, vault_id, after, limit, false).await?;
+        transaction.commit().await?;
+        Ok(SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more })
+    }
+
+    /// Read the latest current and retained object versions in ascending sequence order.
+    ///
+    /// At most 21 versions are returned. A read-only repeatable-read transaction keeps the vault
+    /// existence check and the version rows in one snapshot during concurrent writes or purges.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing-vault, missing-object, or database error.
+    pub async fn sync_versions(
+        &self,
+        vault_id: VaultId,
+        object_id: ObjectId,
+    ) -> Result<Vec<SyncChange>, SyncStoreError> {
+        let mut transaction = self.pool().begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *transaction)
+            .await?;
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM sync_vaults WHERE vault_id = $1")
+                .bind(vault_id.as_slice())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .is_some();
+        if !exists {
+            return Err(SyncStoreError::VaultNotFound);
+        }
+        let rows = sqlx::query(
+            "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch
+             FROM sync_object_versions WHERE vault_id = $1 AND object_id = $2
+             ORDER BY sequence DESC LIMIT 21",
+        )
+        .bind(vault_id.as_slice())
+        .bind(object_id.as_slice())
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() {
+            return Err(SyncStoreError::ObjectNotFound);
+        }
+        let mut versions = rows
+            .iter()
+            .map(|row| change_from_postgres_row(object_id, row))
+            .collect::<Result<Vec<_>, SyncStoreError>>()?;
+        versions.reverse();
+        transaction.commit().await?;
+        Ok(versions)
     }
 
     /// Record a device cursor after the client has applied changes.
@@ -1840,7 +1915,7 @@ impl PostgresStore {
              SELECT sequence FROM (
                SELECT sequence, written_at_ms, ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY sequence DESC) AS rank
                FROM sync_object_versions WHERE vault_id = $2
-             ) AS retained WHERE rank > 21 OR (rank > 1 AND written_at_ms < $3)",
+             ) AS retained WHERE rank > 21 OR (rank > 1 AND written_at_ms < $3))",
         )
         .bind(vault_id.as_slice())
         .bind(vault_id.as_slice())
@@ -1940,6 +2015,7 @@ async fn read_current_page_postgres(
     vault_id: VaultId,
     after: u64,
     limit: u16,
+    enforce_purge_horizon: bool,
 ) -> Result<ChangePage, SyncStoreError> {
     let row = sqlx::query("SELECT current_seq, purge_horizon FROM sync_vaults WHERE vault_id = $1")
         .bind(vault_id.as_slice())
@@ -1948,7 +2024,7 @@ async fn read_current_page_postgres(
         .ok_or(SyncStoreError::VaultNotFound)?;
     let current_seq = sequence_from_sql(row.try_get("current_seq")?)?;
     let purge_horizon = sequence_from_sql(row.try_get("purge_horizon")?)?;
-    if after < purge_horizon {
+    if enforce_purge_horizon && after < purge_horizon {
         return Err(SyncStoreError::CursorExpired { purge_horizon });
     }
     if after > current_seq {
