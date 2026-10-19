@@ -22,6 +22,14 @@ The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracin
 material is written only under the configured data directory and is never included in request
 responses or logs.
 
+`scoplen-identity` consumes the bounded D-101 Personal enrollment request from `scoplen-api`.
+It validates the trusted canonical origin and three existing signatures, then exposes the token
+digest, bound origin and ids, and exact canonical K-4/K-2 artifacts through a read-only verified
+value. Structurally invalid input remains separate from identity or signature denial; neither
+error contains submitted material. This in-memory verification does not check invitation state,
+persist an account or device, grant a token, or mount an enrollment route. Those operations still
+require operator authentication and one durable identity transaction.
+
 First-run material is created exclusively and flushed before success. On Unix, new files have
 owner read/write permissions from creation, before any secret is written. Existing files,
 including symlink destinations, are never overwritten. An incomplete CA pair requires operator
