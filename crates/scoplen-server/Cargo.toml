@@ -28,6 +28,7 @@ scoplen-identity = { path = "../scoplen-identity" }
 scoplen-store = { path = "../scoplen-store" }
 scoplen-sync = { path = "../scoplen-sync" }
 thiserror.workspace = true
+time = { version = "0.3.55", features = ["formatting"] }
 tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true

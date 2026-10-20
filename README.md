@@ -55,17 +55,19 @@ source and invitation-digest admission, failure auditing, and one-use redemption
 uniform denial for unknown, expired, consumed, or conflicting invitations. A lost commit
 acknowledgement returns `auth.commit_outcome_unknown` so the client can retain its identity and
 attempt device authentication. Issuance remains an internal storage method that requires an
-operator-authenticated caller; no public issuance route is mounted. Challenge/device token
-exchange also remains incomplete. A separate SQLite/PostgreSQL device access-token keyring now
-stores an encrypted Ed25519 seed, exposes only public verification keys, rotates the active key
-after 30 days with a seven-day verification overlap, and audits creation and rotation in the same
-transaction. The keyring is not yet wired into a public HTTP authentication route.
-The store now has durable device challenge digests, per-endpoint admission and cooldowns,
-same-transaction nonce consumption and token issuance, absolute-expiry refresh families,
-single-use rotation and reuse revocation, and cross-instance DPoP replay claims on SQLite and
-PostgreSQL. These are internal storage operations; public challenge, device, and refresh routes
-and protected-route authorization are not mounted yet. All server proto dependencies are pinned
-to `scoplen-proto@26699ff` for the shared authentication and scope contracts.
+operator-authenticated caller; no public issuance route is mounted. A separate SQLite/PostgreSQL
+device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
+keys, rotates the active key after 30 days with a seven-day verification overlap, and audits
+creation and rotation in the same transaction. The API listener mounts
+`POST /api/v1/auth/challenge`, `/api/v1/auth/device`, and `/api/v1/auth/refresh`, plus public
+`GET /.well-known/jwks.json`. The store backs these routes with durable device challenge digests,
+per-endpoint admission and cooldowns, same-transaction nonce consumption and token issuance,
+absolute-expiry refresh families, single-use rotation and reuse revocation, and cross-instance
+DPoP replay claims on SQLite and PostgreSQL. Native refresh uses a JSON credential; browser
+refresh accepts only the scoped `HttpOnly` cookie with the exact trusted Origin and returns the
+rotated credential only in `Set-Cookie`. Browser sign-in and protected-route authorization remain
+separate roadmap work. All server proto dependencies are pinned to `scoplen-proto@26699ff` for
+the shared authentication and scope contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
@@ -214,6 +216,13 @@ each fixed 60-second window, with a bounded cooldown after an admitted denial. T
 are shared through the configured SQLite or PostgreSQL database. A reverse proxy without a
 verified peer-address resolver causes callers to share the proxy's address quota. The current
 server has no operator-authenticated HTTP path for issuing invitations.
+Enrolled devices can request a 120-second challenge, sign it with their registered P-256 key,
+and receive a ten-minute DPoP-bound access token and a single-use refresh credential. The API
+listener returns no-store JSON and RFC 9457 problems. Device and refresh admission is durable
+across API instances; a verified spent-token reuse revokes its 30-day family. A refresh response
+whose commit cannot be confirmed requires a new device challenge instead of retrying the old
+credential. `GET /.well-known/jwks.json` publishes only the active and unexpired overlap public
+token keys. These routes do not yet authorize the protected sync or control-plane APIs.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use

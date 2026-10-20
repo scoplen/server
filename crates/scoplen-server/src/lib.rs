@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod device_auth;
 mod error;
 mod personal_enrollment;
 mod private_material;

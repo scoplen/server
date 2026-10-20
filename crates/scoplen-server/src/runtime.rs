@@ -30,7 +30,7 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
-use crate::{Config, Role, ServerError, TlsMode, personal_enrollment};
+use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment};
 
 /// Result of first-run material generation.
 #[derive(Debug, Default)]
@@ -253,11 +253,25 @@ pub async fn run_roles(
     if roles.iter().any(|role| role.requires_store()) && audit_signer.is_none() {
         return Err(ServerError::MissingKeyManagement);
     }
-    let _key_management = key_management;
+    let key_management = key_management.map(Arc::new);
     let store = store.map(Arc::new);
     let postgres_store = postgres_store.map(Arc::new);
     let object_storage = object_storage.map(Arc::new);
     let postgres = uses_postgres(&config);
+    if let Some(kms) = key_management.as_ref() {
+        if postgres {
+            let store = postgres_store.as_ref().ok_or(ServerError::MissingStore)?;
+            store
+                .ensure_device_token_keyring(kms.as_ref())
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+        } else if let Some(store) = store.as_ref() {
+            store
+                .ensure_device_token_keyring(kms.as_ref())
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+        }
+    }
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
         let database = if postgres {
@@ -273,6 +287,7 @@ pub async fn run_roles(
             roles.clone(),
             database,
             object_storage,
+            key_management.as_ref().ok_or(ServerError::MissingKeyManagement)?.clone(),
         )));
     }
     if roles.contains(&Role::Worker) {
@@ -774,6 +789,7 @@ async fn worker_deployment_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
 fn api_router(
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
+    key_management: Arc<LocalKeyFile>,
     trusted_origin: String,
     enrollment_enabled: bool,
 ) -> Router {
@@ -784,6 +800,10 @@ fn api_router(
         ListenerDatabase::Postgres(store) => {
             personal_enrollment::EnrollmentBackend::Postgres(store.clone())
         }
+    };
+    let auth_backend = match &database {
+        ListenerDatabase::Sqlite(store) => device_auth::AuthBackend::Sqlite(store.clone()),
+        ListenerDatabase::Postgres(store) => device_auth::AuthBackend::Postgres(store.clone()),
     };
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -815,7 +835,9 @@ fn api_router(
         }))
         .route("/", get(|| async { "Scoplen server" }));
     if enrollment_enabled {
-        router.merge(personal_enrollment::router(trusted_origin, enrollment_backend))
+        router
+            .merge(personal_enrollment::router(trusted_origin.clone(), enrollment_backend))
+            .merge(device_auth::router(trusted_origin, auth_backend, key_management))
     } else {
         router
     }
@@ -826,6 +848,7 @@ async fn run_public_listener(
     roles: Vec<Role>,
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
+    key_management: Arc<LocalKeyFile>,
 ) -> Result<(), ServerError> {
     let address = config.listen_address();
     let trusted_origin = config.public_origin()?;
@@ -841,8 +864,14 @@ async fn run_public_listener(
             }
             axum::serve(
                 listener,
-                api_router(database, object_storage, trusted_origin, enrollment_enabled)
-                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                api_router(
+                    database,
+                    object_storage,
+                    key_management,
+                    trusted_origin,
+                    enrollment_enabled,
+                )
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await
             .map_err(|error| ServerError::Task(error.to_string()))?;
@@ -855,6 +884,7 @@ async fn run_public_listener(
                 let router = api_router(
                     database.clone(),
                     object_storage.clone(),
+                    key_management.clone(),
                     trusted_origin.clone(),
                     enrollment_enabled,
                 )
@@ -872,8 +902,15 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            run_acme_listener(config, listener, database, object_storage, enrollment_enabled)
-                .await?;
+            run_acme_listener(
+                config,
+                listener,
+                database,
+                object_storage,
+                key_management,
+                enrollment_enabled,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -918,6 +955,7 @@ async fn run_acme_listener(
     listener: TcpListener,
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
+    key_management: Arc<LocalKeyFile>,
     enrollment_enabled: bool,
 ) -> Result<(), ServerError> {
     let email = config
@@ -944,6 +982,7 @@ async fn run_acme_listener(
         let router = api_router(
             database.clone(),
             object_storage.clone(),
+            key_management.clone(),
             config.public_origin()?,
             enrollment_enabled,
         )
@@ -1090,16 +1129,21 @@ mod tests {
                 root: object_root.clone(),
             })
             .expect("open object storage");
+        fs::write(data_dir.join("deployment.key"), "09".repeat(32)).expect("test deployment key");
+        let key_management =
+            Arc::new(LocalKeyFile::load(data_dir.join("deployment.key")).expect("test KMS"));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
         let address = listener.local_addr().expect("read listener address");
         let server_store = store.clone();
         let server_object_storage = object_storage.clone();
+        let server_key_management = key_management.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 api_router(
                     ListenerDatabase::Sqlite(Arc::new(server_store)),
                     Arc::new(server_object_storage),
+                    server_key_management,
                     "https://example.com".to_owned(),
                     true,
                 )
@@ -1112,16 +1156,26 @@ mod tests {
         let enrollment = http_request(address, b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
         assert!(enrollment.starts_with("HTTP/1.1 415 Unsupported Media Type"), "{enrollment}");
         assert!(enrollment.contains("auth.invalid_request"));
+        let challenge = http_request(address, b"POST /api/v1/auth/challenge HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
+        assert!(challenge.starts_with("HTTP/1.1 415 Unsupported Media Type"), "{challenge}");
+        let jwks = http_request(
+            address,
+            b"GET /.well-known/jwks.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(jwks.starts_with("HTTP/1.1 200 OK"), "{jwks}");
         let edge_listener = TcpListener::bind("127.0.0.1:0").await.expect("edge-only listener");
         let edge_address = edge_listener.local_addr().expect("edge-only address");
         let edge_store = store.clone();
         let edge_object_storage = object_storage.clone();
+        let edge_key_management = key_management.clone();
         let edge_server = tokio::spawn(async move {
             axum::serve(
                 edge_listener,
                 api_router(
                     ListenerDatabase::Sqlite(Arc::new(edge_store)),
                     Arc::new(edge_object_storage),
+                    edge_key_management,
                     "https://example.com".to_owned(),
                     false,
                 )
@@ -1132,6 +1186,12 @@ mod tests {
         });
         let edge_enrollment = http_request(edge_address, b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
         assert!(edge_enrollment.starts_with("HTTP/1.1 404 Not Found"), "{edge_enrollment}");
+        let edge_jwks = http_request(
+            edge_address,
+            b"GET /.well-known/jwks.json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(edge_jwks.starts_with("HTTP/1.1 404 Not Found"), "{edge_jwks}");
         edge_server.abort();
         let _ = edge_server.await;
 
@@ -1169,17 +1229,20 @@ mod tests {
         let store = prepared.postgres_store.expect("PostgreSQL pool");
         assert_eq!(store.sync_cardinality_limits().max_objects_per_vault, 2);
         let object_storage = prepared.object_storage.expect("object storage");
+        let key_management = Arc::new(prepared.key_management.expect("test KMS"));
         let object_root = data_dir.join("objects");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
         let address = listener.local_addr().expect("read listener address");
         let server = tokio::spawn({
             let store = store.clone();
+            let key_management = key_management.clone();
             async move {
                 axum::serve(
                     listener,
                     api_router(
                         ListenerDatabase::Postgres(Arc::new(store)),
                         Arc::new(object_storage),
+                        key_management,
                         "https://example.com".to_owned(),
                         true,
                     )

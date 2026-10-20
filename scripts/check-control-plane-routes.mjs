@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Check every mounted /api/v1 route in the server source tree against the
-// authored OpenAPI contract and the explicit control-plane route manifest.
+// Check every mounted /api/v1 or /.well-known route in the server source tree
+// against the authored OpenAPI contract and explicit route manifest.
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,12 +42,15 @@ export async function checkControlPlaneRoutes(contractPath, manifestPath = defau
   const mounted = new Set();
   for await (const sourcePath of rustSources(sourceRoot)) {
     const source = await readFile(sourcePath, "utf8");
-    for (const match of source.matchAll(/\.route\(\s*["'](\/api\/v1\/[^"']+)["']\s*,\s*/g)) {
+    for (const match of source.matchAll(/\.route\(\s*["'](\/api\/v1\/[^"']+|\/\.well-known\/[^"']+)["']\s*,\s*/g)) {
       const [, absolutePath] = match;
       const route = source.slice(match.index + match[0].length);
       const method = route.match(/^(?:(?:axum::)?routing::)?(get|post|patch|delete|put)\s*\(/)?.[1];
       if (!method) throw new Error(`could not determine method for mounted route ${absolutePath} in ${sourcePath}`);
-      const key = `${method.toUpperCase()} ${absolutePath.slice("/api/v1".length)}`;
+      const path = absolutePath.startsWith("/api/v1/")
+        ? absolutePath.slice("/api/v1".length)
+        : absolutePath;
+      const key = `${method.toUpperCase()} ${path}`;
       if (!expected.has(key)) throw new Error(`mounted route is absent from control-plane manifest: ${key}`);
       mounted.add(key);
     }
