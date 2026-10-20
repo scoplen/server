@@ -153,6 +153,76 @@ const AUDIT_CHECKPOINTS: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const DEPLOYMENT_AUDIT_EVENTS: TableSpec = TableSpec {
+    name: "deployment_audit_events",
+    columns: &[
+        ColumnSpec {
+            name: "sequence",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "previous_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "event_bytes",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "event_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
+const DEPLOYMENT_AUDIT_CHECKPOINTS: TableSpec = TableSpec {
+    name: "deployment_audit_checkpoints",
+    columns: &[
+        ColumnSpec {
+            name: "sequence",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "head_hash",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "signature",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "signed_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
 const SYNC_VAULTS: TableSpec = TableSpec {
     name: "sync_vaults",
     columns: &[
@@ -691,6 +761,8 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATIONS,
     AUDIT_EVENTS,
     AUDIT_CHECKPOINTS,
+    DEPLOYMENT_AUDIT_EVENTS,
+    DEPLOYMENT_AUDIT_CHECKPOINTS,
     SYNC_VAULTS,
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
@@ -1051,6 +1123,8 @@ mod tests {
     const SQLITE_ORGANIZATIONS: &str =
         include_str!("../migrations/sqlite/20261007000000_organizations.sql");
     const SQLITE_AUDIT: &str = include_str!("../migrations/sqlite/20261008030000_audit_chain.sql");
+    const SQLITE_DEPLOYMENT_AUDIT: &str =
+        include_str!("../migrations/sqlite/20261020000000_deployment_audit.sql");
     const SQLITE_SYNC: &str = include_str!("../migrations/sqlite/20261007010000_sync.sql");
     const SQLITE_MEMBER_REMOVAL: &str =
         include_str!("../migrations/sqlite/20261008000000_shared_vault_member_removal.sql");
@@ -1065,6 +1139,8 @@ mod tests {
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_AUDIT: &str =
         include_str!("../migrations/postgres/20261008030000_audit_chain.sql");
+    const POSTGRES_DEPLOYMENT_AUDIT: &str =
+        include_str!("../migrations/postgres/20261020000000_deployment_audit.sql");
     const POSTGRES_SYNC: &str = include_str!("../migrations/postgres/20261007010000_sync.sql");
     const POSTGRES_MEMBER_REMOVAL: &str =
         include_str!("../migrations/postgres/20261008000000_shared_vault_member_removal.sql");
@@ -1099,6 +1175,7 @@ mod tests {
         let sqlite = [
             SQLITE_ORGANIZATIONS,
             SQLITE_AUDIT,
+            SQLITE_DEPLOYMENT_AUDIT,
             SQLITE_SYNC,
             SQLITE_KEYS,
             SQLITE_JOBS,
@@ -1109,6 +1186,7 @@ mod tests {
         let postgres = [
             POSTGRES_ORGANIZATIONS,
             POSTGRES_AUDIT,
+            POSTGRES_DEPLOYMENT_AUDIT,
             POSTGRES_SYNC,
             POSTGRES_KEYS,
             POSTGRES_JOBS,
@@ -1164,7 +1242,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 8);
+        assert_eq!(migration_count, 9);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1173,7 +1251,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 8);
+        assert_eq!(replay_count, 9);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

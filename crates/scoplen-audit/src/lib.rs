@@ -15,6 +15,7 @@ pub const CHECKPOINT_SIGNATURE_BYTES: usize = 64;
 /// Maximum canonical event size accepted by the storage boundary.
 pub const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const CHECKPOINT_DOMAIN: &[u8] = b"spl-audit-checkpoint-v1";
+const DEPLOYMENT_CHECKPOINT_DOMAIN: &[u8] = b"spl-audit-deployment-checkpoint-v1";
 
 /// Audit primitive validation failures.
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -83,6 +84,27 @@ pub fn checkpoint_payload(
     Ok(payload)
 }
 
+/// Build the exact bytes signed for a deployment audit checkpoint.
+///
+/// # Errors
+///
+/// Returns [`AuditError::InvalidPosition`] when the sequence or timestamp is zero.
+pub fn deployment_checkpoint_payload(
+    sequence: u64,
+    head_hash: &[u8; HASH_BYTES],
+    signed_at_ms: u64,
+) -> Result<Vec<u8>, AuditError> {
+    if sequence == 0 || signed_at_ms == 0 {
+        return Err(AuditError::InvalidPosition);
+    }
+    let mut payload = Vec::with_capacity(DEPLOYMENT_CHECKPOINT_DOMAIN.len() + 8 + HASH_BYTES + 8);
+    payload.extend_from_slice(DEPLOYMENT_CHECKPOINT_DOMAIN);
+    payload.extend_from_slice(&sequence.to_be_bytes());
+    payload.extend_from_slice(head_hash);
+    payload.extend_from_slice(&signed_at_ms.to_be_bytes());
+    Ok(payload)
+}
+
 /// Verify a sequence of events and return its final hash.
 ///
 /// # Errors
@@ -142,5 +164,21 @@ mod tests {
         assert!(payload.starts_with(CHECKPOINT_DOMAIN));
         assert_eq!(payload.len(), CHECKPOINT_DOMAIN.len() + 16 + 8 + HASH_BYTES + 8);
         assert_ne!(payload, checkpoint_payload(&[1; 16], 4, &[2; HASH_BYTES], 4).expect("other"));
+    }
+
+    #[test]
+    fn deployment_checkpoint_payload_has_distinct_domain_and_exact_fields() {
+        let head = [2; HASH_BYTES];
+        let payload = deployment_checkpoint_payload(3, &head, 4).expect("payload");
+        let mut expected = DEPLOYMENT_CHECKPOINT_DOMAIN.to_vec();
+        expected.extend_from_slice(&3_u64.to_be_bytes());
+        expected.extend_from_slice(&head);
+        expected.extend_from_slice(&4_u64.to_be_bytes());
+        assert_eq!(payload, expected);
+        assert_ne!(payload, checkpoint_payload(&[0; 16], 3, &head, 4).expect("organization"));
+        assert_ne!(payload, deployment_checkpoint_payload(4, &head, 4).expect("sequence"));
+        assert_ne!(payload, deployment_checkpoint_payload(3, &head, 5).expect("time"));
+        assert_eq!(deployment_checkpoint_payload(0, &head, 4), Err(AuditError::InvalidPosition));
+        assert_eq!(deployment_checkpoint_payload(3, &head, 0), Err(AuditError::InvalidPosition));
     }
 }

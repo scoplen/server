@@ -71,6 +71,9 @@ pub enum AuditStoreError {
     /// A checkpoint already exists with different contents.
     #[error("audit checkpoint conflicts with an existing checkpoint")]
     CheckpointConflict,
+    /// Another deployment checkpoint already covers this prefix or this hour.
+    #[error("deployment audit checkpoint is deferred by a recent or newer checkpoint")]
+    CheckpointDeferred,
     /// A stored chain row failed its integrity checks.
     #[error("audit chain contains invalid stored data")]
     CorruptChain,

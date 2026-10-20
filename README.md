@@ -57,15 +57,15 @@ backend and include it in `/readyz`. Production identity
 and authentication, policy filtering, membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
-roadmap work. The audit crate and SQLite store now provide bounded canonical-event SHA-256 chain
-hashing, same-transaction append helpers, checkpoint payload construction, durable checkpoints,
-and chain verification. The worker signs an advanced chain head at most hourly with an independent
-Ed25519 seed and writes idempotent checkpoints; control-plane event producers and retention export
-wiring remain open. The storage crate also validates and redacts a local 32-byte deployment
-key-file backend behind the `KeyManagementService` trait; cloud KMS, PKCS#11, column encryption,
-and external KMS runtime wiring remain open. Database-backed role preparation now loads and
-validates the local backend before startup. Bootstrap also creates the independent
-`audit-signing.key`; `storage.kms.backend = "local"`, `storage.kms.key_file`, and
+roadmap work. The audit crate and SQLite/PostgreSQL stores provide bounded canonical-event SHA-256
+hashing, same-transaction append helpers, durable checkpoints, and chain verification for separate
+organization and deployment audit chains. The worker signs advanced verified heads at most hourly
+with an independent Ed25519 seed; deployment signatures use their own domain. Event producers,
+checkpoint export, and retention wiring remain open. The storage crate also validates and redacts
+a local 32-byte deployment key-file backend behind the `KeyManagementService` trait; cloud KMS,
+PKCS#11, column encryption, and external KMS runtime wiring remain open. Database-backed role
+preparation loads and validates the local backend before startup. Bootstrap also creates the
+independent `audit-signing.key`; `storage.kms.backend = "local"`, `storage.kms.key_file`, and
 `storage.kms.audit_key_file` are configurable in TOML or via `SPL_STORAGE_KMS_*` environment overrides.
 For a stale object-write batch, the sync adapter returns every conflicting object in request order
 with its current change or an explicit absent value. If a stored change cannot be encoded within
