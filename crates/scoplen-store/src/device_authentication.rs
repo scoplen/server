@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use scoplen_api::auth::AuthTokenResponse;
+use scoplen_api::auth::{AuthTokenResponse, DeviceAccessScope, INITIAL_DEVICE_ACCESS_SCOPE};
 use scoplen_crypto::{
     DeviceAccessToken, DeviceAccessTokenClaims, DeviceAuthContext, DeviceCertificate, DpopProof,
     DpopTarget, DpopToken, RevocationStatement, TrustedDeviceAccessTokenKeys, VerifiedDpopProof,
@@ -33,7 +33,6 @@ const FAMILY_MS: i64 = 2_592_000_000;
 const FAILURE_RESET_MS: i64 = 600_000;
 const CLEANUP_BATCH: i64 = 16;
 const AUDIT_DOMAIN: &[u8] = b"spl-device-auth-audit-v1";
-const INITIAL_SCOPE: &str = "account:read keys:read keys:write sync:read sync:write";
 
 /// Admission buckets are separate for each anonymous authentication endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -459,7 +458,7 @@ fn verify_device_signature(
 fn narrowed_scope(original: &str) -> Result<String, DeviceAuthenticationError> {
     let mut previous = None;
     for scope in original.split(' ') {
-        if !INITIAL_SCOPE.split(' ').any(|allowed| allowed == scope)
+        if DeviceAccessScope::from_token(scope).is_none()
             || previous.is_some_and(|earlier| earlier >= scope)
         {
             return Err(DeviceAuthenticationError::Denied { changed: false });
@@ -810,8 +809,14 @@ impl SqliteStore {
         .rows_affected()
             == 1;
         if let (true, Some(principal)) = (claimed, principal.as_ref()) {
-            let (response, refresh_digest) =
-                sign_response(principal, trusted_origin, keyring, INITIAL_SCOPE, now, 2_592_000)?;
+            let (response, refresh_digest) = sign_response(
+                principal,
+                trusted_origin,
+                keyring,
+                INITIAL_DEVICE_ACCESS_SCOPE,
+                now,
+                2_592_000,
+            )?;
             let family_id = Uuid::now_v7().into_bytes();
             sqlx::query(
                 "INSERT INTO device_refresh_families
@@ -822,7 +827,7 @@ impl SqliteStore {
             .bind(principal.account_id.as_slice())
             .bind(device_id.as_slice())
             .bind(&principal.jkt)
-            .bind(INITIAL_SCOPE)
+            .bind(INITIAL_DEVICE_ACCESS_SCOPE)
             .bind(now)
             .bind(now + FAMILY_MS)
             .execute(&mut *tx)
@@ -1313,8 +1318,14 @@ impl PostgresStore {
         .rows_affected()
             == 1;
         if let (true, Some(principal)) = (claimed, principal.as_ref()) {
-            let (response, refresh_digest) =
-                sign_response(principal, trusted_origin, keyring, INITIAL_SCOPE, now, 2_592_000)?;
+            let (response, refresh_digest) = sign_response(
+                principal,
+                trusted_origin,
+                keyring,
+                INITIAL_DEVICE_ACCESS_SCOPE,
+                now,
+                2_592_000,
+            )?;
             let family_id = Uuid::now_v7().into_bytes();
             sqlx::query(
                 "INSERT INTO device_refresh_families
@@ -1325,7 +1336,7 @@ impl PostgresStore {
             .bind(principal.account_id.as_slice())
             .bind(device_id.as_slice())
             .bind(&principal.jkt)
-            .bind(INITIAL_SCOPE)
+            .bind(INITIAL_DEVICE_ACCESS_SCOPE)
             .bind(now)
             .bind(now + FAMILY_MS)
             .execute(&mut *tx)

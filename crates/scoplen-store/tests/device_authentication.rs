@@ -2,13 +2,16 @@
 
 mod support;
 
+#[cfg(feature = "postgres-integration")]
+use std::time::Duration;
 use std::{
     net::IpAddr,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use scoplen_api::auth::INITIAL_DEVICE_ACCESS_SCOPE;
 use scoplen_crypto::{
     DeviceAuthContext, DeviceCertificate, DeviceKemKeyPair, DpopProof, DpopTarget, DpopToken,
     Ed25519SigningKey, P256SigningKey, TrustedDeviceAccessTokenKeys,
@@ -263,7 +266,7 @@ async fn sqlite_device_exchange_refresh_and_spent_reuse_revoke_atomically() {
     let claims = token.verify(&trusted, now_seconds()).expect("signed token");
     assert_eq!(claims.claims().sub, account_id);
     assert_eq!(claims.claims().did, device_id);
-    assert_eq!(claims.claims().scope, "account:read keys:read keys:write sync:read sync:write");
+    assert_eq!(claims.claims().scope, INITIAL_DEVICE_ACCESS_SCOPE);
     assert_eq!(first.refresh_expires_in, 2_592_000);
     assert!(matches!(
         store
