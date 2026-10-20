@@ -59,9 +59,13 @@ operator-authenticated caller; no public issuance route is mounted. Challenge/de
 exchange also remains incomplete. A separate SQLite/PostgreSQL device access-token keyring now
 stores an encrypted Ed25519 seed, exposes only public verification keys, rotates the active key
 after 30 days with a seven-day verification overlap, and audits creation and rotation in the same
-transaction. The keyring is not yet wired into a token issuer or an HTTP authentication route.
-All server proto dependencies
-are pinned to `scoplen-proto@cdb0f0d` for this shared contract.
+transaction. The keyring is not yet wired into a public HTTP authentication route.
+The store now has durable device challenge digests, per-endpoint admission and cooldowns,
+same-transaction nonce consumption and token issuance, absolute-expiry refresh families,
+single-use rotation and reuse revocation, and cross-instance DPoP replay claims on SQLite and
+PostgreSQL. These are internal storage operations; public challenge, device, and refresh routes
+and protected-route authorization are not mounted yet. All server proto dependencies are pinned
+to `scoplen-proto@26699ff` for the shared authentication and scope contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key

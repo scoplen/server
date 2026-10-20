@@ -7,8 +7,8 @@ rust-version.workspace = true
 description = "Scoplen identity and device lifecycle primitives."
 
 [dependencies]
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

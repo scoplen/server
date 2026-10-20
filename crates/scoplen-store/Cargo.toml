@@ -11,8 +11,9 @@ workspace = true
 
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
@@ -21,12 +22,11 @@ object_store.workspace = true
 sha2.workspace = true
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros"] }
 thiserror.workspace = true
+uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
 
 [dev-dependencies]
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
 tokio.workspace = true
-uuid = { workspace = true, features = ["v7"] }
 url = "2.5.8"
 
 [features]

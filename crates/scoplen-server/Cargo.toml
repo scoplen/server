@@ -22,8 +22,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
 scoplen-identity = { path = "../scoplen-identity" }
 scoplen-store = { path = "../scoplen-store" }
 scoplen-sync = { path = "../scoplen-sync" }
