@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod support;
+use support::remove_test_directory;
+
 use std::{
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -28,21 +31,30 @@ fn directory() -> PathBuf {
     path
 }
 
-async fn remove_directory(path: PathBuf) {
-    for attempt in 0..20 {
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => return,
-            Err(error) if error.raw_os_error() == Some(32) && attempt < 19 => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => panic!("remove test directory {}: {error}", path.display()),
-        }
-    }
-}
-
 fn now_ms() -> i64 {
     i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_millis())
         .expect("time range")
+}
+
+#[tokio::test]
+async fn sqlite_device_token_key_state_rejects_null_gaps() {
+    let directory = directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("store");
+    for (retired_at, verify_until) in [(None::<i64>, None::<i64>), (Some(2), None)] {
+        let result = sqlx::query("INSERT INTO device_access_token_keys (kid, public_key, encrypted_seed, activated_at_ms, retired_at_ms, verify_until_ms, active_slot) VALUES (?, ?, ?, 1, ?, ?, ?)")
+            .bind("0123456789abcdef0123456789abcdef")
+            .bind(vec![0_u8; 32])
+            .bind(vec![0_u8; 73])
+            .bind(retired_at)
+            .bind(verify_until)
+            .bind(Option::<i64>::None)
+            .execute(store.pool())
+            .await;
+        assert!(matches!(result, Err(sqlx::Error::Database(error)) if error.is_check_violation()));
+    }
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -87,7 +99,7 @@ async fn sqlite_concurrent_creation_is_one_audited_encrypted_key() {
     first.pool().close().await;
     second.pool().close().await;
     drop((first, second));
-    remove_directory(directory).await;
+    remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -186,7 +198,7 @@ async fn sqlite_rotation_overlap_wrong_kms_and_tamper_fail_closed() {
     ));
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -228,7 +240,30 @@ async fn sqlite_audit_failure_rolls_back_and_time_is_sampled_after_lock() {
     );
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_device_token_key_state_rejects_null_gaps() {
+    use scoplen_store::PostgresStore;
+
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+    for (retired_at, verify_until) in [(None::<i64>, None::<i64>), (Some(2), None)] {
+        let result = sqlx::query("INSERT INTO device_access_token_keys (kid, public_key, encrypted_seed, activated_at_ms, retired_at_ms, verify_until_ms, active_slot) VALUES ($1, $2, $3, 1, $4, $5, $6)")
+            .bind("0123456789abcdef0123456789abcdef")
+            .bind(vec![0_u8; 32])
+            .bind(vec![0_u8; 73])
+            .bind(retired_at)
+            .bind(verify_until)
+            .bind(Option::<i64>::None)
+            .execute(store.pool())
+            .await;
+        assert!(matches!(result, Err(sqlx::Error::Database(error)) if error.is_check_violation()));
+    }
+    store.pool().close().await;
 }
 
 #[cfg(feature = "postgres-integration")]

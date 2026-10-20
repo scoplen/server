@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod support;
+
 use std::{
     net::IpAddr,
     path::PathBuf,
@@ -80,18 +82,6 @@ fn directory() -> PathBuf {
     let path = std::env::temp_dir().join(format!("scoplen-device-auth-{}", Uuid::now_v7()));
     std::fs::create_dir(&path).expect("create test directory");
     path
-}
-
-async fn remove_directory(path: PathBuf) {
-    for attempt in 0..20 {
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => return,
-            Err(error) if error.raw_os_error() == Some(32) && attempt < 19 => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => panic!("remove test directory {}: {error}", path.display()),
-        }
-    }
 }
 
 fn certificate(account_id: Uuid, device_id: Uuid) -> Vec<u8> {
@@ -231,7 +221,7 @@ async fn sqlite_admission_and_challenges_are_durable_and_non_identifying() {
     first.pool().close().await;
     second.pool().close().await;
     drop((first, second));
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -346,7 +336,7 @@ async fn sqlite_device_exchange_refresh_and_spent_reuse_revoke_atomically() {
     assert_eq!(revoked, 1);
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -430,7 +420,7 @@ async fn sqlite_audit_failure_rolls_back_nonce_family_rotation_and_replay() {
         .expect("refresh after known rollback");
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -557,7 +547,7 @@ async fn sqlite_private_quota_preserves_credentials_and_invalid_scope_denies() {
     assert_eq!(failure_streaks, vec![1, 1, 1]);
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -636,7 +626,7 @@ async fn sqlite_refresh_rotation_preserves_absolute_family_expiry() {
     assert_eq!(failure_streaks, vec![1, 1, 1]);
     store.pool().close().await;
     drop(store);
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[tokio::test]
@@ -692,7 +682,7 @@ async fn sqlite_concurrent_device_attempts_have_one_nonce_winner() {
     first.pool().close().await;
     second.pool().close().await;
     drop((first, second));
-    remove_directory(directory).await;
+    support::remove_test_directory(directory).await;
 }
 
 #[cfg(feature = "postgres-integration")]
