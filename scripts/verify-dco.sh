@@ -13,11 +13,24 @@ elif [[ "$EVENT_NAME" == push && "${BEFORE_SHA:-$zero}" != "$zero" ]]; then
   commits=$(git rev-list "$BEFORE_SHA..$HEAD_SHA")
 elif [[ "$EVENT_NAME" == push ]]; then
   : "${DCO_IMPORT_BASELINE:?missing imported history baseline}"
-  # A new branch still checks every commit after the imported snapshot, including merges.
   git merge-base --is-ancestor "$DCO_IMPORT_BASELINE" "$HEAD_SHA"
-  commits=$(git rev-list "$HEAD_SHA" "^$DCO_IMPORT_BASELINE")
-  commits="${commits:+$commits
+  : "${DEFAULT_BRANCH:?missing default branch}"
+  : "${PUSH_REF:?missing push ref}"
+  if [[ "$PUSH_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+    # An initial default-branch push still checks the signed import boundary.
+    commits=$(git rev-list "$HEAD_SHA" "^$DCO_IMPORT_BASELINE")
+    commits="${commits:+$commits
 }$DCO_IMPORT_BASELINE"
+  else
+    default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+    if ! git show-ref --verify --quiet "$default_ref"; then
+      printf 'missing fetched default branch: %s\n' "$default_ref" >&2
+      exit 1
+    fi
+    git merge-base --is-ancestor "$DCO_IMPORT_BASELINE" "$default_ref"
+    # Only commits absent from the fetched default branch are new branch work.
+    commits=$(git rev-list "$HEAD_SHA" "^$default_ref")
+  fi
 else
   printf 'unsupported DCO event: %s\n' "$EVENT_NAME" >&2
   exit 1

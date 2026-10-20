@@ -25,4 +25,6 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           BEFORE_SHA: ${{ github.event.before }}
           DCO_IMPORT_BASELINE: 38d1269fb0bccc57cdf850a6cfcba9fffd24b13e
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PUSH_REF: ${{ github.ref }}
         run: bash scripts/verify-dco.sh
