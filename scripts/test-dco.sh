@@ -106,6 +106,64 @@ if bash "$script" >/dev/null 2>&1; then
 fi
 git update-ref refs/remotes/origin/main "$advanced_main"
 
+# A later certification must name the full ancestor hash and have the original author's sign-off.
+git switch -q -c remediation-source "$signed_tip"
+git -c commit.gpgsign=false commit -q --allow-empty -m 'unsigned contribution to remediate'
+remediation_target=$(git rev-parse HEAD)
+export BEFORE_SHA="$signed_tip" PUSH_REF=refs/heads/remediation-source
+
+git switch -q -c remediation-other-author
+GIT_AUTHOR_NAME='Other author' GIT_AUTHOR_EMAIL='other@example.com' \
+  git -c commit.gpgsign=false commit -q -s --allow-empty -m 'wrong author certification' \
+    -m "DCO-Remediation-For: $remediation_target"
+HEAD_SHA=$(git rev-parse HEAD)
+if bash "$script" >/dev/null 2>&1; then
+  printf 'another author certified an unsigned contribution\n' >&2
+  exit 1
+fi
+
+git switch -q -c remediation-wrong-signer "$remediation_target"
+GIT_COMMITTER_NAME='Other signer' GIT_COMMITTER_EMAIL='signer@example.com' \
+  git -c commit.gpgsign=false commit -q -s --allow-empty -m 'wrong sign-off identity' \
+    -m "DCO-Remediation-For: $remediation_target"
+HEAD_SHA=$(git rev-parse HEAD)
+if bash "$script" >/dev/null 2>&1; then
+  printf 'mismatched sign-off certified an unsigned contribution\n' >&2
+  exit 1
+fi
+
+git switch -q -c remediation-unsigned "$remediation_target"
+git -c commit.gpgsign=false commit -q --allow-empty -m 'unsigned certification' \
+  -m "DCO-Remediation-For: $remediation_target"
+HEAD_SHA=$(git rev-parse HEAD)
+if bash "$script" >/dev/null 2>&1; then
+  printf 'unsigned certification was accepted\n' >&2
+  exit 1
+fi
+
+git switch -q -c remediation-short "$remediation_target"
+git -c commit.gpgsign=false commit -q -s --allow-empty -m 'abbreviated certification' \
+  -m "DCO-Remediation-For: ${remediation_target:0:7}"
+HEAD_SHA=$(git rev-parse HEAD)
+if bash "$script" >/dev/null 2>&1; then
+  printf 'abbreviated certification target was accepted\n' >&2
+  exit 1
+fi
+
+git switch -q -c remediation-valid "$remediation_target"
+git -c commit.gpgsign=false commit -q -s --allow-empty -m 'certify original contribution' \
+  -m "DCO-Remediation-For: $remediation_target"
+HEAD_SHA=$(git rev-parse HEAD)
+bash "$script"
+BASE_SHA=$signed_tip EVENT_NAME=pull_request bash "$script"
+
+# A certification on a side branch outside the checked head does not cover that head.
+HEAD_SHA=$remediation_target
+if bash "$script" >/dev/null 2>&1; then
+  printf 'unmerged certification was accepted\n' >&2
+  exit 1
+fi
+
 # Missing or invalid revision input must fail, even before sign-off inspection.
 export BEFORE_SHA=1111111111111111111111111111111111111111
 if bash "$script" >/dev/null 2>&1; then
