@@ -9,9 +9,11 @@ CREATE TABLE device_access_token_keys (
     verify_until_ms INTEGER,
     active_slot INTEGER,
     CHECK (
-        (active_slot = 1 AND retired_at_ms IS NULL AND verify_until_ms IS NULL)
+        (active_slot IS NOT NULL AND active_slot = 1
+            AND retired_at_ms IS NULL AND verify_until_ms IS NULL)
         OR (active_slot IS NULL AND retired_at_ms IS NOT NULL
             AND retired_at_ms > activated_at_ms
+            AND verify_until_ms IS NOT NULL
             AND verify_until_ms = retired_at_ms + 604800000)
     )
 );

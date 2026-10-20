@@ -56,7 +56,11 @@ uniform denial for unknown, expired, consumed, or conflicting invitations. A los
 acknowledgement returns `auth.commit_outcome_unknown` so the client can retain its identity and
 attempt device authentication. Issuance remains an internal storage method that requires an
 operator-authenticated caller; no public issuance route is mounted. Challenge/device token
-exchange also remains incomplete. All server proto dependencies
+exchange also remains incomplete. A separate SQLite/PostgreSQL device access-token keyring now
+stores an encrypted Ed25519 seed, exposes only public verification keys, rotates the active key
+after 30 days with a seven-day verification overlap, and audits creation and rotation in the same
+transaction. The keyring is not yet wired into a token issuer or an HTTP authentication route.
+All server proto dependencies
 are pinned to `scoplen-proto@cdb0f0d` for this shared contract.
 
 The `scoplen-store` crate now provides a backend-neutral object
