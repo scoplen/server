@@ -80,6 +80,10 @@ jobs:
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
         run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact
+      - name: Check PostgreSQL deployment audit worker
+        run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_worker_signs_advanced_deployment_prefix -- --exact
+      - name: Check PostgreSQL deployment audit transactions and concurrency
+        run: cargo test -p scoplen-store --test deployment_audit --features postgres-integration postgres_deployment_
       - name: Check account key admission and read consistency
         run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_
       - name: Check PostgreSQL personal vault ownership and concurrency

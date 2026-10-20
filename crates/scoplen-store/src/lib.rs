@@ -5,6 +5,7 @@
 
 pub mod account_keys;
 pub mod audit;
+pub mod deployment_audit;
 pub mod jobs;
 pub mod kms;
 pub mod object_storage;
@@ -16,6 +17,13 @@ pub use audit::{
     AuditChainHead, AuditCheckpoint, AuditEvent, AuditStoreError,
     append_audit_event_in_postgres_transaction, append_audit_event_in_transaction,
     write_audit_checkpoint_in_postgres_transaction, write_audit_checkpoint_in_transaction,
+};
+pub use deployment_audit::{
+    DeploymentAuditChainHead, DeploymentAuditCheckpoint, DeploymentAuditEvent,
+    append_deployment_audit_event_in_postgres_transaction,
+    append_deployment_audit_event_in_transaction,
+    write_deployment_audit_checkpoint_in_postgres_transaction,
+    write_deployment_audit_checkpoint_in_transaction,
 };
 pub use jobs::{Job, JobId, JobQueueError};
 pub use object_storage::{

@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a deployment-wide audit chain separate from organization chains in SQLite and PostgreSQL,
+  with transactional append, bounded-memory prefix verification, and an hourly signed checkpoint.
+  Concurrent checkpoint writers serialize in the database; event producers and export remain open.
 - The authenticated K-4 HTTP/CBOR router now accepts either SQLite or PostgreSQL as one selected
   durable backend for all sync, shared-vault, and account-key routes. PostgreSQL 17 integration
   tests cover successful and rejected requests, account isolation, conflicts, quotas, and local

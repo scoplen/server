@@ -17,12 +17,13 @@ use hyper_util::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
-use scoplen_audit::checkpoint_payload;
+use scoplen_audit::{checkpoint_payload, deployment_checkpoint_payload};
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
 use scoplen_store::sync::MAX_PAGE_SIZE;
 use scoplen_store::{
-    AuditChainHead, AuditCheckpoint, AuditStoreError, JobQueueError, ObjectStorage, PostgresStore,
-    SqliteStore, sync::SyncStoreError,
+    AuditChainHead, AuditCheckpoint, AuditStoreError, DeploymentAuditChainHead,
+    DeploymentAuditCheckpoint, JobQueueError, ObjectStorage, PostgresStore, SqliteStore,
+    sync::SyncStoreError,
 };
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -374,6 +375,16 @@ trait WorkerStoreBackend: Send + Sync {
         &self,
         checkpoint: &AuditCheckpoint,
     ) -> impl Future<Output = Result<(), AuditStoreError>> + Send;
+    fn verify_deployment_audit_chain(
+        &self,
+    ) -> impl Future<Output = Result<Option<DeploymentAuditChainHead>, AuditStoreError>> + Send;
+    fn latest_deployment_audit_checkpoint(
+        &self,
+    ) -> impl Future<Output = Result<Option<DeploymentAuditCheckpoint>, AuditStoreError>> + Send;
+    fn write_deployment_audit_checkpoint(
+        &self,
+        checkpoint: &DeploymentAuditCheckpoint,
+    ) -> impl Future<Output = Result<(), AuditStoreError>> + Send;
 }
 
 macro_rules! impl_worker_store_backend {
@@ -469,6 +480,25 @@ macro_rules! impl_worker_store_backend {
                 checkpoint: &AuditCheckpoint,
             ) -> impl Future<Output = Result<(), AuditStoreError>> + Send {
                 <$store>::write_audit_checkpoint(self, checkpoint)
+            }
+
+            fn verify_deployment_audit_chain(
+                &self,
+            ) -> impl Future<Output = Result<Option<DeploymentAuditChainHead>, AuditStoreError>> + Send {
+                <$store>::verify_deployment_audit_chain(self)
+            }
+
+            fn latest_deployment_audit_checkpoint(
+                &self,
+            ) -> impl Future<Output = Result<Option<DeploymentAuditCheckpoint>, AuditStoreError>> + Send {
+                <$store>::latest_deployment_audit_checkpoint(self)
+            }
+
+            fn write_deployment_audit_checkpoint(
+                &self,
+                checkpoint: &DeploymentAuditCheckpoint,
+            ) -> impl Future<Output = Result<(), AuditStoreError>> + Send {
+                <$store>::write_deployment_audit_checkpoint(self, checkpoint)
             }
         }
     };
@@ -679,7 +709,66 @@ async fn worker_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
             break;
         }
     }
-    Ok(written)
+    Ok(written
+        .saturating_add(worker_deployment_audit_checkpoint_pass_at(store, signer, now).await?))
+}
+
+async fn worker_deployment_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
+    store: &S,
+    signer: &impl AuditCheckpointSigner,
+    now: i64,
+) -> Result<u64, ServerError> {
+    let Some(head) = store
+        .verify_deployment_audit_chain()
+        .await
+        .map_err(|error| ServerError::Task(error.to_string()))?
+    else {
+        return Ok(0);
+    };
+    if let Some(previous) = store
+        .latest_deployment_audit_checkpoint()
+        .await
+        .map_err(|error| ServerError::Task(error.to_string()))?
+    {
+        if previous.sequence == head.sequence && previous.head_hash == head.head_hash {
+            return Ok(0);
+        }
+        if now.saturating_sub(previous.signed_at_ms) < AUDIT_CHECKPOINT_INTERVAL_MS {
+            return Ok(0);
+        }
+    }
+    let payload = deployment_checkpoint_payload(
+        head.sequence,
+        &head.head_hash,
+        u64::try_from(now).map_err(|_| ServerError::Task("worker clock is negative".into()))?,
+    )
+    .map_err(|error| ServerError::Task(error.to_string()))?;
+    let checkpoint = DeploymentAuditCheckpoint {
+        sequence: head.sequence,
+        head_hash: head.head_hash,
+        signature: signer.sign_checkpoint(&payload),
+        signed_at_ms: now,
+    };
+    match store.write_deployment_audit_checkpoint(&checkpoint).await {
+        Ok(()) => Ok(1),
+        Err(AuditStoreError::CheckpointDeferred) => Ok(0),
+        Err(AuditStoreError::CheckpointConflict) => {
+            let current = store
+                .latest_deployment_audit_checkpoint()
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+            if !current.is_some_and(|current| {
+                current.sequence == head.sequence && current.head_hash == head.head_hash
+            }) {
+                return Err(ServerError::Task(
+                    "deployment audit checkpoint changed to a different chain head concurrently"
+                        .into(),
+                ));
+            }
+            Ok(0)
+        }
+        Err(error) => Err(ServerError::Task(error.to_string())),
+    }
 }
 
 fn api_router(database: ListenerDatabase, object_storage: Arc<ObjectStorage>) -> Router {
@@ -1316,6 +1405,149 @@ mod tests {
         store.pool().close().await;
         drop(store);
         remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn worker_deployment_audit_checkpoint_is_hourly_and_domain_separated() {
+        let data_dir = std::env::temp_dir()
+            .join(format!("scoplen-deployment-audit-worker-{}", uuid::Uuid::new_v4()));
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("open audit database");
+        let first = store.append_deployment_audit_event(b"first", 1).await.expect("first event");
+        let signer_path = data_dir.join("audit-signing.key");
+        fs::write(
+            &signer_path,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
+        )
+        .expect("write audit key");
+        let signer = LocalAuditSigner::load(&signer_path).expect("load audit signer");
+        let first_at = 3_600_000_i64;
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at).await.expect("first pass"),
+            1
+        );
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at + 1)
+                .await
+                .expect("repeat pass"),
+            0
+        );
+        let checkpoint = store
+            .latest_deployment_audit_checkpoint()
+            .await
+            .expect("latest")
+            .expect("checkpoint exists");
+        assert_eq!(checkpoint.sequence, first.sequence);
+        assert_eq!(checkpoint.head_hash, first.event_hash);
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.verification_key())
+            .expect("verification key");
+        let payload = deployment_checkpoint_payload(
+            checkpoint.sequence,
+            &checkpoint.head_hash,
+            u64::try_from(checkpoint.signed_at_ms).expect("positive time"),
+        )
+        .expect("deployment payload");
+        let signature = ed25519_dalek::Signature::from_bytes(&checkpoint.signature);
+        verifying.verify_strict(&payload, &signature).expect("deployment signature");
+        let organization_payload = checkpoint_payload(
+            &[0; 16],
+            checkpoint.sequence,
+            &checkpoint.head_hash,
+            u64::try_from(checkpoint.signed_at_ms).expect("positive time"),
+        )
+        .expect("organization payload");
+        assert!(verifying.verify_strict(&organization_payload, &signature).is_err());
+
+        store.append_deployment_audit_event(b"second", first_at + 2).await.expect("second");
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at + 3)
+                .await
+                .expect("before hour"),
+            0
+        );
+        assert_eq!(
+            worker_audit_checkpoint_pass_at(
+                &store,
+                &signer,
+                first_at + AUDIT_CHECKPOINT_INTERVAL_MS
+            )
+            .await
+            .expect("after hour"),
+            1
+        );
+        assert_eq!(
+            store.latest_deployment_audit_checkpoint().await.expect("latest").unwrap().sequence,
+            2
+        );
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_signs_advanced_deployment_prefix() {
+        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL store");
+        let previous = store.latest_deployment_audit_checkpoint().await.expect("latest checkpoint");
+        let first_at = previous.map_or(3_600_000, |checkpoint| {
+            checkpoint.signed_at_ms.saturating_add(AUDIT_CHECKPOINT_INTERVAL_MS + 1)
+        });
+        let first = store
+            .append_deployment_audit_event(b"postgres worker first", first_at - 2)
+            .await
+            .expect("first event");
+        let key_dir = std::env::temp_dir()
+            .join(format!("scoplen-deployment-audit-pg-worker-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&key_dir).expect("create signer directory");
+        let signer_path = key_dir.join("audit-signing.key");
+        fs::write(
+            &signer_path,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
+        )
+        .expect("write audit key");
+        let signer = LocalAuditSigner::load(&signer_path).expect("load audit signer");
+        assert!(
+            worker_audit_checkpoint_pass_at(&store, &signer, first_at).await.expect("first pass")
+                >= 1
+        );
+        let checkpoint = store
+            .latest_deployment_audit_checkpoint()
+            .await
+            .expect("latest checkpoint")
+            .expect("checkpoint exists");
+        assert_eq!(checkpoint.sequence, first.sequence);
+        assert_eq!(checkpoint.head_hash, first.event_hash);
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&signer.verification_key())
+            .expect("verification key");
+        let payload = deployment_checkpoint_payload(
+            checkpoint.sequence,
+            &checkpoint.head_hash,
+            u64::try_from(checkpoint.signed_at_ms).expect("positive time"),
+        )
+        .expect("deployment payload");
+        verifying
+            .verify_strict(&payload, &ed25519_dalek::Signature::from_bytes(&checkpoint.signature))
+            .expect("signature verifies");
+        store
+            .append_deployment_audit_event(b"postgres worker second", first_at + 1)
+            .await
+            .expect("second event");
+        worker_audit_checkpoint_pass_at(&store, &signer, first_at + 2).await.expect("before hour");
+        assert_eq!(
+            store.latest_deployment_audit_checkpoint().await.expect("latest").unwrap().sequence,
+            first.sequence
+        );
+        worker_audit_checkpoint_pass_at(&store, &signer, first_at + AUDIT_CHECKPOINT_INTERVAL_MS)
+            .await
+            .expect("after hour");
+        assert_eq!(
+            store.latest_deployment_audit_checkpoint().await.expect("latest").unwrap().sequence,
+            first.sequence + 1
+        );
+        store.pool().close().await;
+        remove_test_directory(&key_dir).await;
     }
 
     #[tokio::test]
