@@ -1000,6 +1000,249 @@ const JOBS: TableSpec = TableSpec {
     }],
 };
 
+const DEVICE_AUTH_CHALLENGES: TableSpec = TableSpec {
+    name: "device_auth_challenges",
+    columns: &[
+        ColumnSpec {
+            name: "nonce_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "consumed_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec { name: "device_auth_challenges_by_expiry", columns: &["expires_at_ms"] }],
+};
+
+const DEVICE_REFRESH_FAMILIES: TableSpec = TableSpec {
+    name: "device_refresh_families",
+    columns: &[
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "dpop_jkt",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "audience",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "scope", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "revoked_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "device_id",
+            target_table: "identity_devices",
+            target_column: "device_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "device_refresh_families_by_expiry", columns: &["expires_at_ms"] },
+        IndexSpec {
+            name: "device_refresh_families_by_device",
+            columns: &["device_id", "expires_at_ms"],
+        },
+    ],
+};
+
+const DEVICE_REFRESH_TOKENS: TableSpec = TableSpec {
+    name: "device_refresh_tokens",
+    columns: &[
+        ColumnSpec {
+            name: "token_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "spent_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "family_id",
+        target_table: "device_refresh_families",
+        target_column: "family_id",
+    }],
+    indexes: &[
+        IndexSpec { name: "device_refresh_tokens_one_live", columns: &["family_id"] },
+        IndexSpec {
+            name: "device_refresh_tokens_by_family",
+            columns: &["family_id", "issued_at_ms"],
+        },
+    ],
+};
+
+const DEVICE_DPOP_REPLAYS: TableSpec = TableSpec {
+    name: "device_dpop_replays",
+    columns: &[
+        ColumnSpec {
+            name: "dpop_jkt",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "jti_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "device_dpop_replays_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
+const DEVICE_AUTH_ADMISSION: TableSpec = TableSpec {
+    name: "device_auth_admission",
+    columns: &[
+        ColumnSpec {
+            name: "endpoint",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "kind", kind: LogicalType::Integer, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "bucket_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "window_start_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "attempts",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "failure_streak",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "last_failure_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "cooldown_until_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "device_auth_admission_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
 const TABLES: &[TableSpec] = &[
     ORGANIZATIONS,
     AUDIT_EVENTS,
@@ -1007,6 +1250,11 @@ const TABLES: &[TableSpec] = &[
     DEPLOYMENT_AUDIT_EVENTS,
     DEPLOYMENT_AUDIT_CHECKPOINTS,
     DEVICE_ACCESS_TOKEN_KEYS,
+    DEVICE_AUTH_CHALLENGES,
+    DEVICE_REFRESH_FAMILIES,
+    DEVICE_REFRESH_TOKENS,
+    DEVICE_DPOP_REPLAYS,
+    DEVICE_AUTH_ADMISSION,
     SYNC_VAULTS,
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
@@ -1399,6 +1647,8 @@ mod tests {
         include_str!("../migrations/sqlite/20261020020000_personal_admission.sql");
     const SQLITE_DEVICE_TOKEN_KEYS: &str =
         include_str!("../migrations/sqlite/20261020030000_device_token_keys.sql");
+    const SQLITE_DEVICE_AUTHENTICATION: &str =
+        include_str!("../migrations/sqlite/20261020040000_device_authentication.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_AUDIT: &str =
@@ -1421,6 +1671,8 @@ mod tests {
         include_str!("../migrations/postgres/20261020020000_personal_admission.sql");
     const POSTGRES_DEVICE_TOKEN_KEYS: &str =
         include_str!("../migrations/postgres/20261020030000_device_token_keys.sql");
+    const POSTGRES_DEVICE_AUTHENTICATION: &str =
+        include_str!("../migrations/postgres/20261020040000_device_authentication.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -1455,6 +1707,7 @@ mod tests {
             SQLITE_PERSONAL_ENROLLMENT,
             SQLITE_PERSONAL_ADMISSION,
             SQLITE_DEVICE_TOKEN_KEYS,
+            SQLITE_DEVICE_AUTHENTICATION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -1469,6 +1722,7 @@ mod tests {
             POSTGRES_PERSONAL_ENROLLMENT,
             POSTGRES_PERSONAL_ADMISSION,
             POSTGRES_DEVICE_TOKEN_KEYS,
+            POSTGRES_DEVICE_AUTHENTICATION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -1518,7 +1772,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 12);
+        assert_eq!(migration_count, 13);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1527,7 +1781,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 12);
+        assert_eq!(replay_count, 13);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

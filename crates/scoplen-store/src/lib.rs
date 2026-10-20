@@ -6,6 +6,7 @@
 pub mod account_keys;
 pub mod audit;
 pub mod deployment_audit;
+pub mod device_authentication;
 pub mod device_token_keys;
 pub mod jobs;
 pub mod kms;
