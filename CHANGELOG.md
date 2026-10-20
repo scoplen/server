@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Centralized SQLite integration-fixture cleanup with a ten-second deadline for Windows
+  sharing and lock violations after connection-pool shutdown. Other cleanup errors still fail
+  immediately. A real exclusive Windows file handle held beyond the former one-second budget
+  now exercises release and cleanup, alongside the unchanged storage assertions.
 - Added durable D-101 Personal invitations and atomic first-device enrollment to SQLite and
   PostgreSQL. Redemption accepts only the identity verifier's signed result, rejects existing
   identity/K-4/vault identifiers with one denial, checks expiry after obtaining the invitation

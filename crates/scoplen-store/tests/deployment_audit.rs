@@ -1,28 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod support;
+use support::remove_test_directory;
+
 use scoplen_store::{
     AuditStoreError, DeploymentAuditCheckpoint, RelationalStore, SqliteStore,
     append_deployment_audit_event_in_transaction,
 };
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
 
 fn test_directory() -> PathBuf {
     let path =
         std::env::temp_dir().join(format!("scoplen-deployment-audit-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&path).expect("create isolated test directory");
     path
-}
-
-async fn remove_test_directory(path: PathBuf) {
-    for attempt in 0..20 {
-        match std::fs::remove_dir_all(&path) {
-            Ok(()) => return,
-            Err(error) if error.raw_os_error() == Some(32) && attempt < 19 => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => panic!("remove test directory {}: {error}", path.display()),
-        }
-    }
 }
 
 #[tokio::test]
