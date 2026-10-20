@@ -3,7 +3,9 @@
 mod support;
 use support::remove_test_directory;
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
+#[cfg(feature = "postgres-integration")]
+use std::time::Duration;
 
 use scoplen_store::{
     RelationalStore, SqliteStore,
