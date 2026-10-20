@@ -644,10 +644,13 @@ const ACCOUNT_KEY_DEVICE_WRAPS: TableSpec = TableSpec {
         target_table: "sync_account_key_bundles",
         target_column: "account_id",
     }],
-    indexes: &[IndexSpec {
-        name: "sync_account_key_device_wraps_by_account",
-        columns: &["account_id", "device_id"],
-    }],
+    indexes: &[
+        IndexSpec {
+            name: "sync_account_key_device_wraps_by_account",
+            columns: &["account_id", "device_id"],
+        },
+        IndexSpec { name: "sync_account_key_device_wraps_by_device", columns: &["device_id"] },
+    ],
 };
 
 const ACCOUNT_KEY_CERTIFICATES: TableSpec = TableSpec {
@@ -694,6 +697,144 @@ const ACCOUNT_KEY_REVOCATIONS: TableSpec = TableSpec {
         name: "sync_account_key_revocations_by_account",
         columns: &["account_id"],
     }],
+};
+
+const IDENTITY_ACCOUNTS: TableSpec = TableSpec {
+    name: "identity_accounts",
+    columns: &[
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "email", kind: LogicalType::Text, nullable: true, primary_key: false },
+        ColumnSpec {
+            name: "account_signing_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_kem_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
+const IDENTITY_DEVICES: TableSpec = TableSpec {
+    name: "identity_devices",
+    columns: &[
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "certificate",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "active",
+            kind: LogicalType::Boolean,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[IndexSpec {
+        name: "identity_devices_by_account",
+        columns: &["account_id", "device_id"],
+    }],
+};
+
+const PERSONAL_INVITATIONS: TableSpec = TableSpec {
+    name: "personal_invitations",
+    columns: &[
+        ColumnSpec {
+            name: "invitation_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "token_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trusted_origin",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issuer_operator_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "consumed_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "consumed_account_id",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "consumed_account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[IndexSpec { name: "personal_invitations_by_expiry", columns: &["expires_at_ms"] }],
 };
 
 const JOBS: TableSpec = TableSpec {
@@ -775,6 +916,9 @@ const TABLES: &[TableSpec] = &[
     ACCOUNT_KEY_DEVICE_WRAPS,
     ACCOUNT_KEY_CERTIFICATES,
     ACCOUNT_KEY_REVOCATIONS,
+    IDENTITY_ACCOUNTS,
+    IDENTITY_DEVICES,
+    PERSONAL_INVITATIONS,
     JOBS,
 ];
 
@@ -810,7 +954,8 @@ type SchemaShape = BTreeMap<String, TableShape>;
 fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType, String> {
     let declared = declared.trim().to_ascii_uppercase();
     match (table, column, declared.as_str()) {
-        ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER")
+        ("identity_devices", "active", "INTEGER")
+        | ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER")
         | ("sync_vaults", "rotation_pending", "INTEGER") => Ok(LogicalType::Boolean),
         (_, _, "BLOB") => Ok(LogicalType::Bytes),
         (_, _, "TEXT") => Ok(LogicalType::Text),
@@ -822,7 +967,8 @@ fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType,
 #[cfg(feature = "postgres-integration")]
 fn postgres_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType, String> {
     match (table, column, declared) {
-        ("sync_objects" | "sync_object_versions", "tombstone", "boolean")
+        ("identity_devices", "active", "boolean")
+        | ("sync_objects" | "sync_object_versions", "tombstone", "boolean")
         | ("sync_vaults", "rotation_pending", "boolean") => Ok(LogicalType::Boolean),
         (_, _, "bytea") => Ok(LogicalType::Bytes),
         (_, _, "text") => Ok(LogicalType::Text),
@@ -1135,6 +1281,8 @@ mod tests {
     const SQLITE_KEYS: &str =
         include_str!("../migrations/sqlite/20261007020000_account_key_bundles.sql");
     const SQLITE_JOBS: &str = include_str!("../migrations/sqlite/20261007030000_jobs.sql");
+    const SQLITE_PERSONAL_ENROLLMENT: &str =
+        include_str!("../migrations/sqlite/20261020010000_personal_enrollment.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_AUDIT: &str =
@@ -1151,6 +1299,8 @@ mod tests {
     const POSTGRES_KEYS: &str =
         include_str!("../migrations/postgres/20261007020000_account_key_bundles.sql");
     const POSTGRES_JOBS: &str = include_str!("../migrations/postgres/20261007030000_jobs.sql");
+    const POSTGRES_PERSONAL_ENROLLMENT: &str =
+        include_str!("../migrations/postgres/20261020010000_personal_enrollment.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -1182,6 +1332,7 @@ mod tests {
             SQLITE_MEMBER_REMOVAL,
             SQLITE_PERSONAL_VAULTS,
             SQLITE_EPOCH_RETIREMENT,
+            SQLITE_PERSONAL_ENROLLMENT,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -1193,6 +1344,7 @@ mod tests {
             POSTGRES_MEMBER_REMOVAL,
             POSTGRES_PERSONAL_VAULTS,
             POSTGRES_EPOCH_RETIREMENT,
+            POSTGRES_PERSONAL_ENROLLMENT,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -1242,7 +1394,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 9);
+        assert_eq!(migration_count, 10);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1251,7 +1403,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 9);
+        assert_eq!(replay_count, 10);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

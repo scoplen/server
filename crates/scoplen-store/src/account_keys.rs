@@ -813,7 +813,7 @@ async fn read_postgres_statements(
     rows.into_iter().map(|row| validate_artifact(row.try_get(field)?, field)).collect()
 }
 
-async fn check_sqlite_key_response_capacity(
+pub(crate) async fn check_sqlite_key_response_capacity(
     transaction: &mut Transaction<'_, Sqlite>,
     account_id: AccountId,
 ) -> Result<(), AccountKeyStoreError> {
@@ -853,7 +853,7 @@ async fn check_sqlite_key_response_capacity(
     )
 }
 
-async fn check_postgres_key_response_capacity(
+pub(crate) async fn check_postgres_key_response_capacity(
     transaction: &mut Transaction<'_, Postgres>,
     account_id: AccountId,
 ) -> Result<(), AccountKeyStoreError> {

@@ -45,9 +45,13 @@ authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR a
 `scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
-canonical artifacts for a future atomic redemption transaction. It neither checks invitation
-state nor enrolls a device; operator authorization, durable identity, challenge/device token
-exchange, and the production enrollment route remain incomplete. All server proto dependencies
+canonical artifacts. `scoplen-store` now persists one-use, 24-hour Personal invitations and
+atomically redeems a verified enrollment into a null-email account, active first device,
+revision-one K-4 bundle, Personal vault, consumed invitation, and deployment audit event on
+SQLite or PostgreSQL. Existing K-4 and vault identifiers are rejected without consuming the
+invitation. The storage method requires an operator-authenticated caller for issuance; it does
+not itself authenticate operators or mount an HTTP route. Challenge/device token exchange and
+the production issuance and enrollment routes remain incomplete. All server proto dependencies
 are pinned to `scoplen-proto@e288515` for this shared contract.
 
 The `scoplen-store` crate now provides a backend-neutral object
