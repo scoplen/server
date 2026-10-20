@@ -103,3 +103,9 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_api_edge_readiness_follows_selected_database -- --exact
       - name: Check PostgreSQL authenticated sync router
         run: cargo test -p scoplen-sync --test postgres_http --features postgres-integration
+      - name: Create isolated device authentication database
+        run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_device_auth_ci'
+      - name: Check PostgreSQL device authentication and refresh transactions
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_device_auth_ci
+        run: cargo test -p scoplen-store --test device_authentication --features postgres-integration
