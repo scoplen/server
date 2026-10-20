@@ -49,10 +49,15 @@ canonical artifacts. `scoplen-store` now persists one-use, 24-hour Personal invi
 atomically redeems a verified enrollment into a null-email account, active first device,
 revision-one K-4 bundle, Personal vault, consumed invitation, and deployment audit event on
 SQLite or PostgreSQL. Existing K-4 and vault identifiers are rejected without consuming the
-invitation. The storage method requires an operator-authenticated caller for issuance; it does
-not itself authenticate operators or mount an HTTP route. Challenge/device token exchange and
-the production issuance and enrollment routes remain incomplete. All server proto dependencies
-are pinned to `scoplen-proto@e288515` for this shared contract.
+invitation. The API listener mounts anonymous `POST /api/v1/auth/personal-enroll` with strict
+JSON and artifact validation, configured-origin checks, device possession verification, durable
+source and invitation-digest admission, failure auditing, and one-use redemption. It returns a
+uniform denial for unknown, expired, consumed, or conflicting invitations. A lost commit
+acknowledgement returns `auth.commit_outcome_unknown` so the client can retain its identity and
+attempt device authentication. Issuance remains an internal storage method that requires an
+operator-authenticated caller; no public issuance route is mounted. Challenge/device token
+exchange also remains incomplete. All server proto dependencies
+are pinned to `scoplen-proto@cdb0f0d` for this shared contract.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
@@ -192,8 +197,15 @@ externally reachable HTTPS port, defaulting to 443; it is independent of the loc
 `server.listen_port`. The server validates the resulting canonical HTTPS origin at startup and
 uses it for generated setup links. Port 443 is omitted from those links; a different external
 port is included. Invalid or ambiguous public hosts fail `--validate-config` and startup.
-The emitted setup link is reserved for the future operator setup flow; it cannot be redeemed
-while the setup and authentication routes remain unmounted.
+The emitted setup link is reserved for the future operator setup flow; its redemption route is
+not mounted. The Personal enrollment route
+requires an already issued invitation and no existing session or cookie. It rejects
+`Authorization`, `DPoP`, and `Idempotency-Key` headers. It
+admits at most 30 attempts per peer address and five attempts per decoded invitation digest in
+each fixed 60-second window, with a bounded cooldown after an admitted denial. These counters
+are shared through the configured SQLite or PostgreSQL database. A reverse proxy without a
+verified peer-address resolver causes callers to share the proxy's address quota. The current
+server has no operator-authenticated HTTP path for issuing invitations.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use

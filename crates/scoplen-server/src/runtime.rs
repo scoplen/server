@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Extension, Router, extract::connect_info::ConnectInfo, http::StatusCode, routing::get};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto::Builder,
@@ -30,7 +30,7 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
-use crate::{Config, Role, ServerError, TlsMode};
+use crate::{Config, Role, ServerError, TlsMode, personal_enrollment};
 
 /// Result of first-run material generation.
 #[derive(Debug, Default)]
@@ -771,8 +771,21 @@ async fn worker_deployment_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
     }
 }
 
-fn api_router(database: ListenerDatabase, object_storage: Arc<ObjectStorage>) -> Router {
-    Router::new()
+fn api_router(
+    database: ListenerDatabase,
+    object_storage: Arc<ObjectStorage>,
+    trusted_origin: String,
+    enrollment_enabled: bool,
+) -> Router {
+    let enrollment_backend = match &database {
+        ListenerDatabase::Sqlite(store) => {
+            personal_enrollment::EnrollmentBackend::Sqlite(store.clone())
+        }
+        ListenerDatabase::Postgres(store) => {
+            personal_enrollment::EnrollmentBackend::Postgres(store.clone())
+        }
+    };
+    let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/readyz",
@@ -800,7 +813,12 @@ fn api_router(database: ListenerDatabase, object_storage: Arc<ObjectStorage>) ->
                 crate::VERSION
             )
         }))
-        .route("/", get(|| async { "Scoplen server" }))
+        .route("/", get(|| async { "Scoplen server" }));
+    if enrollment_enabled {
+        router.merge(personal_enrollment::router(trusted_origin, enrollment_backend))
+    } else {
+        router
+    }
 }
 
 async fn run_public_listener(
@@ -810,6 +828,8 @@ async fn run_public_listener(
     object_storage: Arc<ObjectStorage>,
 ) -> Result<(), ServerError> {
     let address = config.listen_address();
+    let trusted_origin = config.public_origin()?;
+    let enrollment_enabled = roles.contains(&Role::Api);
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
     match config.tls.mode {
@@ -819,16 +839,26 @@ async fn run_public_listener(
                     "edge role is configured behind plain HTTP; gateway ALPN requires direct TLS"
                 );
             }
-            axum::serve(listener, api_router(database, object_storage))
-                .await
-                .map_err(|error| ServerError::Task(error.to_string()))?;
+            axum::serve(
+                listener,
+                api_router(database, object_storage, trusted_origin, enrollment_enabled)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .map_err(|error| ServerError::Task(error.to_string()))?;
         }
         TlsMode::Files => {
             let acceptor = TlsAcceptor::from(Arc::new(tls_config(&config)?));
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
-                let router = api_router(database.clone(), object_storage.clone());
+                let router = api_router(
+                    database.clone(),
+                    object_storage.clone(),
+                    trusted_origin.clone(),
+                    enrollment_enabled,
+                )
+                .layer(Extension(ConnectInfo(peer)));
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
@@ -842,7 +872,8 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            run_acme_listener(config, listener, database, object_storage).await?;
+            run_acme_listener(config, listener, database, object_storage, enrollment_enabled)
+                .await?;
         }
     }
     Ok(())
@@ -887,6 +918,7 @@ async fn run_acme_listener(
     listener: TcpListener,
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
+    enrollment_enabled: bool,
 ) -> Result<(), ServerError> {
     let email = config
         .tls
@@ -908,7 +940,14 @@ async fn run_acme_listener(
             .1
             .alpn_protocol()
             .is_some_and(|protocol| protocol == b"spl-gw/1");
-        let router = api_router(database.clone(), object_storage.clone());
+        let peer = tls.get_ref().get_ref().0.get_ref().peer_addr().map_err(ServerError::Runtime)?;
+        let router = api_router(
+            database.clone(),
+            object_storage.clone(),
+            config.public_origin()?,
+            enrollment_enabled,
+        )
+        .layer(Extension(ConnectInfo(peer)));
         tokio::spawn(async move {
             if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
                 error!(%error, "ACME TLS connection failed");
@@ -1061,12 +1100,40 @@ mod tests {
                 api_router(
                     ListenerDatabase::Sqlite(Arc::new(server_store)),
                     Arc::new(server_object_storage),
-                ),
+                    "https://example.com".to_owned(),
+                    true,
+                )
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await
             .expect("serve readiness endpoint");
         });
         assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+        let enrollment = http_request(address, b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
+        assert!(enrollment.starts_with("HTTP/1.1 415 Unsupported Media Type"), "{enrollment}");
+        assert!(enrollment.contains("auth.invalid_request"));
+        let edge_listener = TcpListener::bind("127.0.0.1:0").await.expect("edge-only listener");
+        let edge_address = edge_listener.local_addr().expect("edge-only address");
+        let edge_store = store.clone();
+        let edge_object_storage = object_storage.clone();
+        let edge_server = tokio::spawn(async move {
+            axum::serve(
+                edge_listener,
+                api_router(
+                    ListenerDatabase::Sqlite(Arc::new(edge_store)),
+                    Arc::new(edge_object_storage),
+                    "https://example.com".to_owned(),
+                    false,
+                )
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("serve edge-only listener");
+        });
+        let edge_enrollment = http_request(edge_address, b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
+        assert!(edge_enrollment.starts_with("HTTP/1.1 404 Not Found"), "{edge_enrollment}");
+        edge_server.abort();
+        let _ = edge_server.await;
 
         fs::remove_dir_all(&object_root).expect("remove object root for readiness failure");
         assert!(
@@ -1113,7 +1180,10 @@ mod tests {
                     api_router(
                         ListenerDatabase::Postgres(Arc::new(store)),
                         Arc::new(object_storage),
-                    ),
+                        "https://example.com".to_owned(),
+                        true,
+                    )
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
                 )
                 .await
                 .expect("serve PostgreSQL readiness endpoint");
@@ -1145,12 +1215,17 @@ mod tests {
     }
 
     async fn http_readiness(address: std::net::SocketAddr) -> String {
+        http_request(
+            address,
+            b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await
+    }
+
+    async fn http_request(address: std::net::SocketAddr, request: &[u8]) -> String {
         let mut stream =
             tokio::net::TcpStream::connect(address).await.expect("connect to listener");
-        stream
-            .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await
-            .expect("send HTTP request");
+        stream.write_all(request).await.expect("send HTTP request");
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("read HTTP response");
         String::from_utf8(response).expect("HTTP response is UTF-8")

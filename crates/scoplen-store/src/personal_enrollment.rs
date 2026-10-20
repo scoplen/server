@@ -7,6 +7,7 @@
 
 use std::{
     fmt,
+    net::IpAddr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -27,6 +28,7 @@ use crate::{
         append_deployment_audit_event_in_postgres_transaction,
         append_deployment_audit_event_in_transaction,
     },
+    personal_admission::{clear_postgres_failure_streak, clear_sqlite_failure_streak},
 };
 
 const INVITATION_LIFETIME_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -127,6 +129,8 @@ pub enum PersonalInvitationStoreError {
     Entropy,
     #[error("Personal invitation storage failed")]
     Database,
+    #[error("Personal invitation commit outcome is unknown")]
+    CommitOutcomeUnknown,
     #[error("Personal invitation audit failed")]
     Audit,
     #[error("Personal enrollment key response failed")]
@@ -181,7 +185,10 @@ impl SqliteStore {
         let event = audit_event(1, issue.issued_at_ms, &[issuer_operator_id, issue.invitation_id])?;
         append_deployment_audit_event_in_transaction(&mut transaction, &event, issue.issued_at_ms)
             .await?;
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalInvitationStoreError::CommitOutcomeUnknown)?;
         Ok(issue.disclose(trusted_origin))
     }
 
@@ -195,6 +202,27 @@ impl SqliteStore {
     pub async fn redeem_verified_personal_invitation(
         &self,
         verified: &VerifiedPersonalEnrollment,
+    ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
+        self.redeem_verified_personal_invitation_with_source(verified, None).await
+    }
+
+    /// Redeem through a source-admitted HTTP request, clearing its failure streak on commit.
+    ///
+    /// # Errors
+    /// A failure before commit rolls back identity, invitation, and audit changes. A failed
+    /// commit acknowledgement returns `CommitOutcomeUnknown`; the transaction may have committed.
+    pub async fn redeem_verified_personal_invitation_from_source(
+        &self,
+        verified: &VerifiedPersonalEnrollment,
+        source: IpAddr,
+    ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
+        self.redeem_verified_personal_invitation_with_source(verified, Some(source)).await
+    }
+
+    async fn redeem_verified_personal_invitation_with_source(
+        &self,
+        verified: &VerifiedPersonalEnrollment,
+        source: Option<IpAddr>,
     ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
         let row = sqlx::query(
@@ -227,7 +255,19 @@ impl SqliteStore {
             &[invitation_id, receipt.account_id, receipt.device_id, receipt.personal_vault_id],
         )?;
         append_deployment_audit_event_in_transaction(&mut transaction, &event, now).await?;
-        transaction.commit().await?;
+        if let Some(source) = source {
+            clear_sqlite_failure_streak(
+                &mut transaction,
+                source,
+                verified.invitation_token_digest(),
+            )
+            .await
+            .map_err(|_| PersonalInvitationStoreError::Database)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalInvitationStoreError::CommitOutcomeUnknown)?;
         Ok(receipt)
     }
 
@@ -286,7 +326,10 @@ impl PostgresStore {
             issue.issued_at_ms,
         )
         .await?;
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalInvitationStoreError::CommitOutcomeUnknown)?;
         Ok(issue.disclose(trusted_origin))
     }
 
@@ -299,6 +342,27 @@ impl PostgresStore {
     pub async fn redeem_verified_personal_invitation(
         &self,
         verified: &VerifiedPersonalEnrollment,
+    ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
+        self.redeem_verified_personal_invitation_with_source(verified, None).await
+    }
+
+    /// Redeem through a source-admitted HTTP request, clearing its failure streak on commit.
+    ///
+    /// # Errors
+    /// A failure before commit rolls back identity, invitation, and audit changes. A failed
+    /// commit acknowledgement returns `CommitOutcomeUnknown`; the transaction may have committed.
+    pub async fn redeem_verified_personal_invitation_from_source(
+        &self,
+        verified: &VerifiedPersonalEnrollment,
+        source: IpAddr,
+    ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
+        self.redeem_verified_personal_invitation_with_source(verified, Some(source)).await
+    }
+
+    async fn redeem_verified_personal_invitation_with_source(
+        &self,
+        verified: &VerifiedPersonalEnrollment,
+        source: Option<IpAddr>,
     ) -> Result<PersonalEnrollmentReceipt, PersonalInvitationStoreError> {
         let mut transaction = self.pool().begin().await?;
         let row = sqlx::query(
@@ -336,7 +400,19 @@ impl PostgresStore {
         )?;
         append_deployment_audit_event_in_postgres_transaction(&mut transaction, &event, now)
             .await?;
-        transaction.commit().await?;
+        if let Some(source) = source {
+            clear_postgres_failure_streak(
+                &mut transaction,
+                source,
+                verified.invitation_token_digest(),
+            )
+            .await
+            .map_err(|_| PersonalInvitationStoreError::Database)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PersonalInvitationStoreError::CommitOutcomeUnknown)?;
         Ok(receipt)
     }
 

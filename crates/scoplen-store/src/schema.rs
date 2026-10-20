@@ -837,6 +837,60 @@ const PERSONAL_INVITATIONS: TableSpec = TableSpec {
     indexes: &[IndexSpec { name: "personal_invitations_by_expiry", columns: &["expires_at_ms"] }],
 };
 
+const PERSONAL_ADMISSION: TableSpec = TableSpec {
+    name: "personal_admission",
+    columns: &[
+        ColumnSpec { name: "kind", kind: LogicalType::Integer, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "bucket_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "window_start_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "attempts",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "failure_streak",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "last_failure_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "cooldown_until_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "personal_admission_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
 const JOBS: TableSpec = TableSpec {
     name: "jobs",
     columns: &[
@@ -919,6 +973,7 @@ const TABLES: &[TableSpec] = &[
     IDENTITY_ACCOUNTS,
     IDENTITY_DEVICES,
     PERSONAL_INVITATIONS,
+    PERSONAL_ADMISSION,
     JOBS,
 ];
 
@@ -1283,6 +1338,8 @@ mod tests {
     const SQLITE_JOBS: &str = include_str!("../migrations/sqlite/20261007030000_jobs.sql");
     const SQLITE_PERSONAL_ENROLLMENT: &str =
         include_str!("../migrations/sqlite/20261020010000_personal_enrollment.sql");
+    const SQLITE_PERSONAL_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261020020000_personal_admission.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_AUDIT: &str =
@@ -1301,6 +1358,8 @@ mod tests {
     const POSTGRES_JOBS: &str = include_str!("../migrations/postgres/20261007030000_jobs.sql");
     const POSTGRES_PERSONAL_ENROLLMENT: &str =
         include_str!("../migrations/postgres/20261020010000_personal_enrollment.sql");
+    const POSTGRES_PERSONAL_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261020020000_personal_admission.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -1333,6 +1392,7 @@ mod tests {
             SQLITE_PERSONAL_VAULTS,
             SQLITE_EPOCH_RETIREMENT,
             SQLITE_PERSONAL_ENROLLMENT,
+            SQLITE_PERSONAL_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -1345,6 +1405,7 @@ mod tests {
             POSTGRES_PERSONAL_VAULTS,
             POSTGRES_EPOCH_RETIREMENT,
             POSTGRES_PERSONAL_ENROLLMENT,
+            POSTGRES_PERSONAL_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

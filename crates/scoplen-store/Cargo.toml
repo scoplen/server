@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "e288515" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
@@ -24,9 +24,10 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e288515" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cdb0f0d" }
 tokio.workspace = true
 uuid = { workspace = true, features = ["v7"] }
+url = "2.5.8"
 
 [features]
 postgres-integration = []

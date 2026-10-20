@@ -3348,7 +3348,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
+source = "git+https://github.com/scoplen/proto.git?rev=cdb0f0d#cdb0f0d69cd57e7aa2feb9e44fa00cf43e15dc32"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -3386,7 +3386,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
+source = "git+https://github.com/scoplen/proto.git?rev=cdb0f0d#cdb0f0d69cd57e7aa2feb9e44fa00cf43e15dc32"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3434,7 +3434,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e288515#e2885151f5bab413cb16e37d28f3b7ace2f27ece"
+source = "git+https://github.com/scoplen/proto.git?rev=cdb0f0d#cdb0f0d69cd57e7aa2feb9e44fa00cf43e15dc32"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -3449,16 +3449,21 @@ dependencies = [
  "clap",
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
+ "http-body-util",
  "hyper-util",
  "rcgen",
  "rustls",
  "rustls-acme",
  "rustls-pemfile",
+ "scoplen-api",
  "scoplen-audit",
  "scoplen-crypto",
+ "scoplen-identity",
  "scoplen-store",
  "scoplen-sync",
  "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
@@ -3487,6 +3492,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+ "url",
  "uuid",
  "zeroize",
 ]

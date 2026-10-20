@@ -9,6 +9,7 @@ pub mod deployment_audit;
 pub mod jobs;
 pub mod kms;
 pub mod object_storage;
+pub mod personal_admission;
 pub mod personal_enrollment;
 #[cfg(test)]
 mod schema;
