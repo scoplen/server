@@ -1087,6 +1087,94 @@ async fn postgres_personal_invitation_concurrent_redeemers_have_one_winner() {
 
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
+async fn postgres_personal_redeem_and_failure_lock_source_before_audit() {
+    use scoplen_store::PostgresStore;
+    use std::net::Ipv6Addr;
+
+    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("PostgreSQL test URL");
+    let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+    let baseline =
+        store.deployment_audit_head().await.expect("baseline").map_or(0, |head| head.sequence);
+    let invitation =
+        store.issue_personal_invitation(*Uuid::now_v7().as_bytes(), ORIGIN).await.expect("issue");
+    let verified = verify_personal_enrollment(ORIGIN, &enrollment(*invitation.token_bytes()))
+        .expect("verified");
+    let source_bytes = *Uuid::now_v7().as_bytes();
+    let source = IpAddr::V6(Ipv6Addr::from(source_bytes));
+    let digest = *verified.invitation_token_digest();
+    store.admit_personal_enrollment_source(source).await.expect("source admission");
+    store.admit_personal_enrollment_digest(&digest).await.expect("digest admission");
+
+    let mut holder = store.pool().begin().await.expect("source lock holder");
+    let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .expect("holder PID");
+    sqlx::query(
+        "SELECT attempts FROM personal_admission WHERE kind = 1 AND bucket_key = $1 FOR UPDATE",
+    )
+    .bind(source_bytes.as_slice())
+    .fetch_one(&mut *holder)
+    .await
+    .expect("lock source bucket");
+
+    let redeem_store = store.clone();
+    let redeem = tokio::spawn(async move {
+        redeem_store.redeem_verified_personal_invitation_from_source(&verified, source).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            )
+            .bind(holder_pid)
+            .fetch_one(store.pool())
+            .await
+            .expect("blocked transaction count");
+            if blocked > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("redeem reaches source row lock");
+
+    let mut probe = store.pool().begin().await.expect("audit lock probe");
+    let audit_lock_free: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(1396916048, 1145132356)")
+            .fetch_one(&mut *probe)
+            .await
+            .expect("probe audit lock");
+    probe.rollback().await.expect("release audit probe");
+
+    let failure_store = store.clone();
+    let failure = tokio::spawn(async move {
+        failure_store
+            .audit_personal_enrollment_failure(
+                PersonalEnrollmentFailureReason::EnrollmentDenied,
+                source,
+                Some(&digest),
+            )
+            .await
+    });
+    holder.commit().await.expect("release source lock");
+    let (redeem_result, failure_result) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(redeem, failure) })
+            .await
+            .expect("concurrent enrollment and failure finish");
+    redeem_result.expect("join redeem").expect("redeem");
+    failure_result.expect("join failure").expect("failure audit");
+    assert!(audit_lock_free, "redeem must wait for source before locking audit chain");
+    assert_eq!(
+        store.verify_deployment_audit_chain().await.expect("audit chain").unwrap().sequence,
+        baseline + 3
+    );
+    store.pool().close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
 async fn postgres_personal_invitation_expiry_is_checked_after_row_lock_wait() {
     use scoplen_store::PostgresStore;
 

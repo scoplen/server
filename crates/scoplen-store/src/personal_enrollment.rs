@@ -398,8 +398,6 @@ impl PostgresStore {
             now,
             &[invitation_id, receipt.account_id, receipt.device_id, receipt.personal_vault_id],
         )?;
-        append_deployment_audit_event_in_postgres_transaction(&mut transaction, &event, now)
-            .await?;
         if let Some(source) = source {
             clear_postgres_failure_streak(
                 &mut transaction,
@@ -409,6 +407,8 @@ impl PostgresStore {
             .await
             .map_err(|_| PersonalInvitationStoreError::Database)?;
         }
+        append_deployment_audit_event_in_postgres_transaction(&mut transaction, &event, now)
+            .await?;
         transaction
             .commit()
             .await

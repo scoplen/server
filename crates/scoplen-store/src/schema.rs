@@ -1455,7 +1455,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 10);
+        assert_eq!(migration_count, 11);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1464,7 +1464,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 10);
+        assert_eq!(replay_count, 11);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
