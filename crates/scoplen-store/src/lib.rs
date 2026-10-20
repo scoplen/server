@@ -9,6 +9,7 @@ pub mod deployment_audit;
 pub mod jobs;
 pub mod kms;
 pub mod object_storage;
+pub mod personal_enrollment;
 #[cfg(test)]
 mod schema;
 pub mod sync;
@@ -28,6 +29,10 @@ pub use deployment_audit::{
 pub use jobs::{Job, JobId, JobQueueError};
 pub use object_storage::{
     ObjectStorage, ObjectStorageConfig, ObjectStorageError, S3ObjectStorageConfig,
+};
+pub use personal_enrollment::{
+    EnrolledPersonalDevice, IssuedPersonalInvitation, PersonalEnrollmentReceipt,
+    PersonalInvitationStoreError,
 };
 
 use std::{path::Path, time::Duration};

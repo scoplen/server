@@ -86,6 +86,8 @@ jobs:
         run: cargo test -p scoplen-store --test deployment_audit --features postgres-integration postgres_deployment_
       - name: Check account key admission and read consistency
         run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_
+      - name: Check Personal invitation enrollment and rollback
+        run: cargo test -p scoplen-store --test personal_enrollment --features postgres-integration postgres_personal_ -- --test-threads=1
       - name: Check PostgreSQL personal vault ownership and concurrency
         run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_personal_vault_
       - name: Check PostgreSQL shared vault mutations and key scoping

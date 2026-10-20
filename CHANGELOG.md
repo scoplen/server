@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added durable D-101 Personal invitations and atomic first-device enrollment to SQLite and
+  PostgreSQL. Redemption accepts only the identity verifier's signed result, rejects existing
+  identity/K-4/vault identifiers with one denial, checks expiry after obtaining the invitation
+  lock, and rolls back account, device, keys, vault, invitation, and audit together on failure.
+  PostgreSQL 17 and SQLite tests cover concurrent redemption, legacy collisions, mutable K-4
+  certificate replacement, expiry, and late rollback. Operator authentication and production
+  HTTP routes are still pending.
 - Added a deployment-wide audit chain separate from organization chains in SQLite and PostgreSQL,
   with transactional append, bounded-memory prefix verification, and an hourly signed checkpoint.
   Concurrent checkpoint writers serialize in the database; event producers and export remain open.
