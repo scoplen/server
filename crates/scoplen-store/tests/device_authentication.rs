@@ -355,7 +355,16 @@ async fn sqlite_audit_failure_rolls_back_nonce_family_rotation_and_replay() {
         .expect("device");
     let challenge = store.issue_device_challenge(*device_id.as_bytes()).await.expect("challenge");
     let signature = device_signature(device_id, challenge.nonce());
-    sqlx::query("CREATE TRIGGER fail_device_auth_audit BEFORE INSERT ON deployment_audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+    sqlx::query("CREATE TABLE device_auth_audit_fault (enabled INTEGER NOT NULL)")
+        .execute(store.pool())
+        .await
+        .expect("fault control table");
+    sqlx::query("INSERT INTO device_auth_audit_fault (enabled) VALUES (1)")
+        .execute(store.pool())
+        .await
+        .expect("enable audit fault");
+    // Keep the schema fixed while pooled connections exercise both rollback phases.
+    sqlx::query("CREATE TRIGGER fail_device_auth_audit BEFORE INSERT ON deployment_audit_events WHEN (SELECT enabled FROM device_auth_audit_fault)=1 BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
         .execute(store.pool()).await.expect("failure trigger");
     assert!(matches!(
         store
@@ -381,7 +390,7 @@ async fn sqlite_audit_failure_rolls_back_nonce_family_rotation_and_replay() {
         .await
         .expect("family count");
     assert_eq!(families, 0);
-    sqlx::query("DROP TRIGGER fail_device_auth_audit")
+    sqlx::query("UPDATE device_auth_audit_fault SET enabled=0")
         .execute(store.pool())
         .await
         .expect("restore audit");
@@ -397,8 +406,10 @@ async fn sqlite_audit_failure_rolls_back_nonce_family_rotation_and_replay() {
         .await
         .expect("retry after known rollback");
     let proof = refresh_proof(&device_key());
-    sqlx::query("CREATE TRIGGER fail_device_auth_audit BEFORE INSERT ON deployment_audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
-        .execute(store.pool()).await.expect("failure trigger");
+    sqlx::query("UPDATE device_auth_audit_fault SET enabled=1")
+        .execute(store.pool())
+        .await
+        .expect("enable audit fault again");
     assert!(matches!(
         store.refresh_device(source(), ORIGIN, &first.refresh_token, proof.as_str(), &ring).await,
         Err(DeviceAuthenticationError::Audit)
@@ -413,7 +424,7 @@ async fn sqlite_audit_failure_rolls_back_nonce_family_rotation_and_replay() {
         .await
         .expect("replay state");
     assert_eq!(replay_count, 0);
-    sqlx::query("DROP TRIGGER fail_device_auth_audit")
+    sqlx::query("UPDATE device_auth_audit_fault SET enabled=0")
         .execute(store.pool())
         .await
         .expect("restore audit");
