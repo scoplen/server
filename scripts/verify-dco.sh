@@ -36,10 +36,29 @@ else
   exit 1
 fi
 
+has_supplemental_signoff() {
+  local original=$1 author attestation targets signer
+  author=$(git show -s --format='%an <%ae>' "$original")
+  grep -Eq '^[^<>]+ <[^<>[:space:]]+@[^<>[:space:]]+>$' <<< "$author" || return 1
+  while IFS= read -r attestation; do
+    targets=$(git show -s --format='%(trailers:key=DCO-Remediation-For,valueonly)' "$attestation")
+    grep -Fxq -- "$original" <<< "$targets" || continue
+    [[ $(git show -s --format='%an <%ae>' "$attestation") == "$author" ]] || continue
+    signer=$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$attestation")
+    if grep -Fxq -- "$author" <<< "$signer"; then
+      return 0
+    fi
+  done < <(git rev-list --ancestry-path "$original..$HEAD_SHA")
+  return 1
+}
+
 while IFS= read -r commit; do
   [[ -z "$commit" ]] && continue
   trailers=$(git show -s --format='%(trailers:key=Signed-off-by,valueonly)' "$commit")
   if ! grep -Eq '^[^<>]+ <[^<>[:space:]]+@[^<>[:space:]]+>$' <<< "$trailers"; then
+    if has_supplemental_signoff "$commit"; then
+      continue
+    fi
     printf 'missing valid Signed-off-by trailer in %s\n' "$commit" >&2
     exit 1
   fi

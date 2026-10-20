@@ -20,3 +20,11 @@ the fetched default branch, including side branches merged into it. Published de
 history is not rechecked. Later pushes and pull requests check their full event range. Missing
 default-branch refs fail closed; a signed tip cannot hide an unsigned intermediate commit.
 Run `bash scripts/test-dco.sh` to verify these cases locally.
+
+If a published commit accidentally lacks its sign-off, its original author can add a later
+signed commit that explicitly certifies the original contribution under the DCO. Include a
+`DCO-Remediation-For: <full-40-character-commit-hash>` trailer for each certified ancestor.
+The certification commit must be authored by that same name and email and contain their exact
+`Signed-off-by` identity. Only certifications reachable from the checked head count. This
+preserves published history; it does not exempt unsigned commits or allow someone else to
+certify the original author's contribution. Use `git merge --signoff` for every merge.
