@@ -1,3 +1,7 @@
 [
-  { "method": "POST", "path": "/auth/personal-enroll" }
+  { "method": "GET", "path": "/.well-known/jwks.json" },
+  { "method": "POST", "path": "/auth/challenge" },
+  { "method": "POST", "path": "/auth/device" },
+  { "method": "POST", "path": "/auth/personal-enroll" },
+  { "method": "POST", "path": "/auth/refresh" }
 ]

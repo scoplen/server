@@ -39,3 +39,27 @@ test("nested server module routes require a manifest and OpenAPI entry", async (
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("public key discovery is checked outside the API prefix", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scoplen-jwks-route-check-"));
+  try {
+    const sourceRoot = join(directory, "src");
+    await mkdir(sourceRoot);
+    await writeFile(join(sourceRoot, "auth.rs"), 'Router::new().route("/.well-known/jwks.json", get(jwks))');
+    const contractPath = join(directory, "contract.json");
+    const manifestPath = join(directory, "manifest.json");
+    await writeFile(contractPath, JSON.stringify({
+      openapi: "3.1.0",
+      paths: { "/.well-known/jwks.json": { get: {} } },
+    }));
+    await writeFile(manifestPath, "[]");
+    await assert.rejects(
+      checkControlPlaneRoutes(contractPath, manifestPath, sourceRoot),
+      /mounted route is absent from control-plane manifest: GET \/\.well-known\/jwks\.json/,
+    );
+    await writeFile(manifestPath, JSON.stringify([{ method: "GET", path: "/.well-known/jwks.json" }]));
+    assert.equal(await checkControlPlaneRoutes(contractPath, manifestPath, sourceRoot), 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
