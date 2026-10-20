@@ -223,6 +223,54 @@ const DEPLOYMENT_AUDIT_CHECKPOINTS: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const DEVICE_ACCESS_TOKEN_KEYS: TableSpec = TableSpec {
+    name: "device_access_token_keys",
+    columns: &[
+        ColumnSpec { name: "kid", kind: LogicalType::Text, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "encrypted_seed",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "activated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retired_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "verify_until_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "active_slot",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "device_access_token_keys_one_active",
+        columns: &["active_slot"],
+    }],
+};
+
 const SYNC_VAULTS: TableSpec = TableSpec {
     name: "sync_vaults",
     columns: &[
@@ -958,6 +1006,7 @@ const TABLES: &[TableSpec] = &[
     AUDIT_CHECKPOINTS,
     DEPLOYMENT_AUDIT_EVENTS,
     DEPLOYMENT_AUDIT_CHECKPOINTS,
+    DEVICE_ACCESS_TOKEN_KEYS,
     SYNC_VAULTS,
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
@@ -1181,15 +1230,20 @@ async fn postgres_foreign_keys(
 #[cfg(feature = "postgres-integration")]
 async fn postgres_indexes(pool: &PgPool, table: &str) -> Result<BTreeSet<IndexShape>, String> {
     let rows = sqlx::query(
-        "SELECT index_rel.relname AS name, attribute.attname AS column_name FROM pg_class table_rel JOIN pg_namespace namespace_rel ON namespace_rel.oid = table_rel.relnamespace JOIN pg_index index_data ON index_data.indrelid = table_rel.oid JOIN pg_class index_rel ON index_rel.oid = index_data.indexrelid JOIN LATERAL unnest(index_data.indkey) WITH ORDINALITY AS key_data(attnum, position) ON TRUE JOIN pg_attribute attribute ON attribute.attrelid = table_rel.oid AND attribute.attnum = key_data.attnum WHERE namespace_rel.nspname = 'public' AND table_rel.relname = $1 AND NOT index_data.indisprimary AND NOT index_data.indisunique ORDER BY index_rel.relname, key_data.position",
+        "SELECT index_rel.relname AS name, attribute.attname AS column_name, index_data.indisunique AS unique_index FROM pg_class table_rel JOIN pg_namespace namespace_rel ON namespace_rel.oid = table_rel.relnamespace JOIN pg_index index_data ON index_data.indrelid = table_rel.oid JOIN pg_class index_rel ON index_rel.oid = index_data.indexrelid JOIN LATERAL unnest(index_data.indkey) WITH ORDINALITY AS key_data(attnum, position) ON TRUE JOIN pg_attribute attribute ON attribute.attrelid = table_rel.oid AND attribute.attnum = key_data.attnum WHERE namespace_rel.nspname = 'public' AND table_rel.relname = $1 AND NOT index_data.indisprimary ORDER BY index_rel.relname, key_data.position",
     )
     .bind(table)
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
     let mut indexes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let declared = TABLES.iter().find(|spec| spec.name == table).ok_or("unknown table")?;
     for row in rows {
         let name: String = row.try_get("name").map_err(|error| error.to_string())?;
+        let unique: bool = row.try_get("unique_index").map_err(|error| error.to_string())?;
+        if unique && !declared.indexes.iter().any(|index| index.name == name) {
+            continue;
+        }
         let column: String = row.try_get("column_name").map_err(|error| error.to_string())?;
         indexes.entry(name).or_default().push(column);
     }
@@ -1307,7 +1361,10 @@ fn validate_migration_source(source: &str, postgres: bool) -> Result<(), String>
             }
         }
         for index in table.indexes {
-            if !source.to_ascii_lowercase().contains(&format!("create index {}", index.name)) {
+            let normalized = source.to_ascii_lowercase();
+            if !normalized.contains(&format!("create index {}", index.name))
+                && !normalized.contains(&format!("create unique index {}", index.name))
+            {
                 return Err(format!("index {} is missing", index.name));
             }
         }
@@ -1340,6 +1397,8 @@ mod tests {
         include_str!("../migrations/sqlite/20261020010000_personal_enrollment.sql");
     const SQLITE_PERSONAL_ADMISSION: &str =
         include_str!("../migrations/sqlite/20261020020000_personal_admission.sql");
+    const SQLITE_DEVICE_TOKEN_KEYS: &str =
+        include_str!("../migrations/sqlite/20261020030000_device_token_keys.sql");
     const POSTGRES_ORGANIZATIONS: &str =
         include_str!("../migrations/postgres/20261007000000_organizations.sql");
     const POSTGRES_AUDIT: &str =
@@ -1360,6 +1419,8 @@ mod tests {
         include_str!("../migrations/postgres/20261020010000_personal_enrollment.sql");
     const POSTGRES_PERSONAL_ADMISSION: &str =
         include_str!("../migrations/postgres/20261020020000_personal_admission.sql");
+    const POSTGRES_DEVICE_TOKEN_KEYS: &str =
+        include_str!("../migrations/postgres/20261020030000_device_token_keys.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -1393,6 +1454,7 @@ mod tests {
             SQLITE_EPOCH_RETIREMENT,
             SQLITE_PERSONAL_ENROLLMENT,
             SQLITE_PERSONAL_ADMISSION,
+            SQLITE_DEVICE_TOKEN_KEYS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -1406,6 +1468,7 @@ mod tests {
             POSTGRES_EPOCH_RETIREMENT,
             POSTGRES_PERSONAL_ENROLLMENT,
             POSTGRES_PERSONAL_ADMISSION,
+            POSTGRES_DEVICE_TOKEN_KEYS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -1455,7 +1518,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 11);
+        assert_eq!(migration_count, 12);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1464,7 +1527,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 11);
+        assert_eq!(replay_count, 12);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
