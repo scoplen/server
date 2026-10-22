@@ -11,9 +11,9 @@ workspace = true
 
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
@@ -24,10 +24,15 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
+serde_json.workspace = true
+base64 = "0.22.1"
 
 [dev-dependencies]
 tokio.workspace = true
 url = "2.5.8"
+webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
+ciborium = "0.2.2"
+webauthn-rs-core = "=0.5.5"
 
 [features]
 postgres-integration = []

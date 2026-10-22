@@ -7,11 +7,18 @@ rust-version.workspace = true
 description = "Scoplen identity and device lifecycle primitives."
 
 [dependencies]
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
+ciborium = "0.2.2"
+openssl = { version = "0.10.75", features = ["vendored"] }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+url = "2.5.8"
+tracing.workspace = true
+webauthn-rs-core = "=0.5.5"
 
 [lints]
 workspace = true

@@ -183,6 +183,12 @@ hold deployment and operational material as those roadmap gates become implement
 
 ## Development
 
+The maintained WebAuthn verifier builds vendored OpenSSL. Install Perl and a native C toolchain
+before running Cargo: MSVC Build Tools and Strawberry Perl on Windows, Xcode Command Line Tools
+on macOS, or the usual C compiler, Make and Perl packages on Linux. Put `perl` on `PATH` (the
+Strawberry default is `C:\Strawberry\perl\bin`). NASM is optional on Windows; the vendored build
+automatically disables assembly when NASM is unavailable.
+
 SQL migrations use LF line endings on every platform. SQLx embeds and hashes the exact SQL
 bytes, so keep the repository's migration attributes when creating a checkout. A database made
 by an earlier build with different migration bytes can fail with a checksum mismatch; retain
@@ -220,8 +226,29 @@ externally reachable HTTPS port, defaulting to 443; it is independent of the loc
 `server.listen_port`. The server validates the resulting canonical HTTPS origin at startup and
 uses it for generated setup links. Port 443 is omitted from those links; a different external
 port is included. Invalid or ambiguous public hosts fail `--validate-config` and startup.
-The emitted setup link is reserved for the future operator setup flow; its redemption route is
-not mounted. The Personal enrollment route
+When first-operator setup is pending, `server.public_host` must be a DNS name with valid HTTPS.
+An IP-literal origin remains usable for devices after initial operator setup has completed.
+Only the first API initializer discloses a one-hour setup link through local terminal output,
+after its digest and audit are durably committed. Protect that output: the link is not logged,
+written to `setup-link.txt`, or recoverable from the database. Other replicas, restarts, edge
+and worker roles preserve the existing pending expiry without printing or replacing its secret.
+To replace a lost or expired pending link explicitly on the server host, run:
+
+```text
+cargo run -p scoplen-ctl --bin splctl -- bootstrap --reissue-pending --config spl-server.toml
+```
+
+The command uses the local database and configured KMS, invalidates prior setup ceremonies,
+and discloses the replacement only after confirmed commit. Completed setup never reopens,
+including after operator revocation. A result with an unknown commit outcome discloses no link;
+use the deliberate local reissue action only if setup remains pending.
+
+The storage service verifies real ES256 passkey registration and discoverable assertions with
+the maintained WebAuthn core under the configured exact origin/RP, required residency and UV,
+and `none` attestation policy. SQLite and PostgreSQL atomically persist the first operator,
+credential, permanent setup completion, ceremony consumption and deployment audit. HTTP setup,
+login/session and console integration are not mounted yet; the emitted link cannot yet complete
+registration through the browser. The Personal enrollment route
 requires an already issued invitation and no existing session or cookie. It rejects
 `Authorization`, `DPoP`, and `Idempotency-Key` headers. It
 admits at most 30 attempts per peer address and five attempts per decoded invitation digest in
