@@ -17,7 +17,7 @@ pub use config::{
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};
-pub use runtime::{BootstrapResult, PreparedRoles, bootstrap, prepare_roles, run_roles};
+pub use runtime::{PreparedRoles, bootstrap, prepare_roles, reissue_operator_setup, run_roles};
 
 /// The server's current package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

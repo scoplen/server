@@ -11,6 +11,15 @@ Changes are recorded here for released or reviewable repository outcomes.
   integrity, storage, or required audit failures return a non-cacheable 503 without partial
   keys. Device JWKS stays independent. Updated all proto pins to `0c06293` and UUID to 1.28.0
   in the lockfile for the shared Operator profile. Operator setup and sign-in are not mounted.
+- Added durable first-operator setup and real ES256 WebAuthn verification on SQLite and
+  PostgreSQL. API initialization discloses a digest-only one-hour setup entitlement once after
+  confirmed commit; restarts and background roles never reproduce or extend it. The local
+  `splctl bootstrap --reissue-pending` action replaces only an uncompleted entitlement.
+  Registration, permanent setup completion, ceremony consumption and deployment audit commit
+  together. Removed setup-link file creation. The maintained verifier requires vendored
+  OpenSSL build prerequisites. HTTP setup/login, operator sessions and console integration
+  remain incomplete.
+
 - Updated `rustls-webpki` to 0.103.16 and both `webpki-roots` and `webpki-root-certs` to 1.0.10,
   fixing RUSTSEC-2026-0382, RUSTSEC-2026-0381, and RUSTSEC-2026-0383 for TLS certificate trust.
 - Mounted the enrolled-device Personal sync routes on the API listener for SQLite and PostgreSQL.

@@ -33,13 +33,6 @@ use tracing::{error, info, warn};
 
 use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment, personal_sync};
 
-/// Result of first-run material generation.
-#[derive(Debug, Default)]
-pub struct BootstrapResult {
-    /// One-time setup link when this invocation created it.
-    pub setup_link: Option<String>,
-}
-
 /// Role-specific startup resources prepared before role tasks begin.
 pub struct PreparedRoles {
     /// Database pool for roles that need relational storage.
@@ -53,7 +46,7 @@ pub struct PreparedRoles {
     /// Initialized audit checkpoint signer for database-backed roles.
     pub audit_signer: Option<LocalAuditSigner>,
     /// First-run setup link only for roles that initialize the deployment.
-    pub setup_link: Option<String>,
+    pub setup_link: Option<scoplen_store::operator_setup::SetupDisclosure>,
 }
 
 #[derive(Clone)]
@@ -72,14 +65,13 @@ impl ListenerDatabase {
     }
 }
 
-/// Create the data directory, deployment key, internal CA, and one-time setup link as needed.
+/// Create the data directory, deployment key and internal CA as needed.
 ///
 /// # Errors
 ///
-/// Returns an error when the data directory, generated key material, or setup-link file cannot
-/// be created.
-pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
-    let public_origin = config.public_origin()?;
+/// Returns an error when the data directory or generated key material cannot be created.
+/// Operator setup entitlements are initialized separately, in the API role's database.
+pub fn bootstrap(config: &Config) -> Result<(), ServerError> {
     std::fs::create_dir_all(&config.server.data_dir).map_err(|source| {
         ServerError::DataDirectory { path: config.server.data_dir.clone(), source }
     })?;
@@ -132,14 +124,7 @@ pub fn bootstrap(config: &Config) -> Result<BootstrapResult, ServerError> {
         write_private(&ca_key, &key_pair.serialize_pem())?;
     }
 
-    let setup_file = config.server.data_dir.join("setup-link.txt");
-    if setup_file.exists() {
-        return Ok(BootstrapResult::default());
-    }
-    let token = uuid::Uuid::new_v4();
-    let link = format!("{public_origin}/setup/{token}");
-    write_private(&setup_file, &link)?;
-    Ok(BootstrapResult { setup_link: Some(link) })
+    Ok(())
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<(), ServerError> {
@@ -168,6 +153,28 @@ fn uses_postgres(config: &Config) -> bool {
 /// Returns an error when role-specific configuration, database migration, or first-run material
 /// initialization fails.
 pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRoles, ServerError> {
+    prepare_roles_with_setup(config, roles, false).await
+}
+
+/// Explicit server-host recovery for an uncompleted first-operator setup entitlement.
+///
+/// # Errors
+/// Requires the locally configured database and KMS; completed setup is never reopened.
+pub async fn reissue_operator_setup(
+    config: &Config,
+) -> Result<scoplen_store::operator_setup::SetupDisclosure, ServerError> {
+    let mut prepared = prepare_roles_with_setup(config, &[Role::Api], true).await?;
+    prepared
+        .setup_link
+        .take()
+        .ok_or_else(|| ServerError::Task("operator setup is already completed".into()))
+}
+
+async fn prepare_roles_with_setup(
+    config: &Config,
+    roles: &[Role],
+    reissue: bool,
+) -> Result<PreparedRoles, ServerError> {
     config.validate_for_roles(roles)?;
     if !roles.iter().any(|role| role.requires_store()) {
         return Ok(PreparedRoles {
@@ -214,18 +221,30 @@ pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRo
     };
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
-    let bootstrap = bootstrap(config)?;
+    bootstrap(config)?;
     let key_management =
         Some(LocalKeyFile::load(config.storage.kms_key_file(&config.server.data_dir)?)?);
     let audit_signer =
         Some(LocalAuditSigner::load(config.storage.kms_audit_key_file(&config.server.data_dir)?)?);
+    let setup_link = if roles.contains(&Role::Api) {
+        let origin = config.public_origin()?;
+        if let Some(store) = &store {
+            store.initialize_operator_setup(&origin, reissue).await?
+        } else if let Some(store) = &postgres_store {
+            store.initialize_operator_setup(&origin, reissue).await?
+        } else {
+            return Err(ServerError::MissingStore);
+        }
+    } else {
+        None
+    };
     Ok(PreparedRoles {
         store,
         postgres_store,
         object_storage: Some(object_storage),
         key_management,
         audit_signer,
-        setup_link: bootstrap.setup_link,
+        setup_link,
     })
 }
 
@@ -1117,20 +1136,11 @@ mod tests {
         config.server.public_host = "example.com".into();
         config.server.public_port = 9443;
 
-        let first = bootstrap(&config).expect("first bootstrap succeeds");
-        assert!(
-            first
-                .setup_link
-                .as_deref()
-                .is_some_and(|link| link.starts_with("https://example.com:9443/setup/"))
-        );
-        for name in [
-            "deployment.key",
-            "audit-signing.key",
-            "internal-ca.pem",
-            "internal-ca-key.pem",
-            "setup-link.txt",
-        ] {
+        bootstrap(&config).expect("first bootstrap succeeds");
+        assert!(!data_dir.join("setup-link.txt").exists());
+        for name in
+            ["deployment.key", "audit-signing.key", "internal-ca.pem", "internal-ca-key.pem"]
+        {
             let path = data_dir.join(name);
             assert!(path.is_file(), "expected generated material at {}", path.display());
             #[cfg(unix)]
@@ -1143,8 +1153,7 @@ mod tests {
             }
         }
 
-        let second = bootstrap(&config).expect("second bootstrap is idempotent");
-        assert!(second.setup_link.is_none());
+        bootstrap(&config).expect("second bootstrap is idempotent");
         fs::remove_dir_all(data_dir).expect("test material is removable");
     }
 
@@ -1371,6 +1380,95 @@ mod tests {
         assert!(prepared.object_storage.is_some());
         assert!(data_dir.join("objects").is_dir());
         drop(prepared);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn only_api_issues_operator_setup_once_and_local_reissue_replaces_it() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-operator-runtime-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.public_host = "operator.example.com".into();
+        for role in [Role::Edge, Role::Worker] {
+            let prepared = prepare_roles(&config, &[role]).await.expect("prepare background role");
+            assert!(prepared.setup_link.is_none());
+            let store = prepared.store.as_ref().expect("SQLite store");
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operator_setup")
+                .fetch_one(store.pool())
+                .await
+                .expect("singleton count");
+            assert_eq!(count, 0);
+            store.pool().close().await;
+        }
+        let prepared = prepare_roles(&config, &[Role::Api]).await.expect("prepare API");
+        assert!(prepared.setup_link.is_some());
+        assert!(!data_dir.join("setup-link.txt").exists());
+        let store = prepared.store.as_ref().expect("SQLite store");
+        let initial: (Vec<u8>, i64) =
+            sqlx::query_as("SELECT token_digest, expires_at_s FROM operator_setup")
+                .fetch_one(store.pool())
+                .await
+                .expect("initial singleton");
+        store.pool().close().await;
+        drop(prepared);
+        let restarted = prepare_roles(&config, &[Role::Api]).await.expect("restart API");
+        assert!(restarted.setup_link.is_none());
+        let store = restarted.store.as_ref().expect("SQLite store");
+        let retained: (Vec<u8>, i64) =
+            sqlx::query_as("SELECT token_digest, expires_at_s FROM operator_setup")
+                .fetch_one(store.pool())
+                .await
+                .expect("retained singleton");
+        assert_eq!(initial, retained);
+        store.pool().close().await;
+        drop(restarted);
+        let replacement = reissue_operator_setup(&config).await.expect("local reissue");
+        assert!(replacement.expose_link().starts_with("https://operator.example.com/setup#token="));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("read back");
+        let digest: Vec<u8> = sqlx::query_scalar("SELECT token_digest FROM operator_setup")
+            .fetch_one(store.pool())
+            .await
+            .expect("replacement digest");
+        assert_ne!(digest, initial.0);
+        store.pool().close().await;
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn pending_operator_setup_requires_dns_but_completed_setup_preserves_ip_device_origin() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-operator-origin-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.public_host = "127.0.0.1".into();
+        assert!(matches!(
+            prepare_roles(&config, &[Role::Api]).await,
+            Err(ServerError::OperatorSetup(
+                scoplen_store::operator_setup::OperatorSetupError::Configuration
+            ))
+        ));
+        config.server.public_host = "operator.example.com".into();
+        let prepared = prepare_roles(&config, &[Role::Api]).await.expect("valid DNS RP");
+        let store = prepared.store.as_ref().expect("SQLite store");
+        sqlx::query("UPDATE operator_setup SET completed_at_s = issued_at_s")
+            .execute(store.pool())
+            .await
+            .expect("completed fixture singleton");
+        store.pool().close().await;
+        drop(prepared);
+        config.server.public_host = "127.0.0.1".into();
+        let completed =
+            prepare_roles(&config, &[Role::Api]).await.expect("completed IP origin for devices");
+        assert!(completed.setup_link.is_none());
+        completed.store.as_ref().expect("SQLite store").pool().close().await;
+        drop(completed);
+        assert!(matches!(
+            reissue_operator_setup(&config).await,
+            Err(ServerError::OperatorSetup(
+                scoplen_store::operator_setup::OperatorSetupError::Denied { consumed: false }
+            ))
+        ));
         remove_test_directory(&data_dir).await;
     }
 

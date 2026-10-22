@@ -16,6 +16,8 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod operator_passkeys;
+
 /// The identity contract implemented by this crate.
 pub const COMPONENT: &str = "identity";
 

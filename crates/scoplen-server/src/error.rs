@@ -20,6 +20,9 @@ pub enum ServerError {
     /// Key-management backend could not be initialized.
     #[error("key-management error: {0}")]
     KeyManagement(#[from] scoplen_store::kms::KmsError),
+    /// First-operator entitlement storage, configuration or mandatory audit failed.
+    #[error("operator setup error: {0}")]
+    OperatorSetup(#[from] scoplen_store::operator_setup::OperatorSetupError),
     /// A database-backed role was started without initialized storage.
     #[error("api, worker, and edge roles require initialized storage")]
     MissingStore,
