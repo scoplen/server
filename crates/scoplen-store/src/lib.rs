@@ -11,6 +11,7 @@ pub mod device_token_keys;
 pub mod jobs;
 pub mod kms;
 pub mod object_storage;
+pub mod operator_admission;
 pub mod operator_setup;
 pub mod personal_admission;
 pub mod personal_enrollment;

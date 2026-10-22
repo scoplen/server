@@ -70,7 +70,10 @@ per-endpoint admission and cooldowns, same-transaction nonce consumption and tok
 absolute-expiry refresh families, single-use rotation and reuse revocation, and cross-instance
 DPoP replay claims on SQLite and PostgreSQL. Native refresh uses a JSON credential; browser
 refresh accepts only the scoped `HttpOnly` cookie with the exact trusted Origin and returns the
-rotated credential only in `Set-Cookie`. Browser sign-in and control-plane authorization remain
+rotated credential only in `Set-Cookie`. Independent Operator authentication storage now also
+provides per-endpoint source, setup-digest, ceremony and verified-Operator admission, durable
+DPoP replay claims, and audit-atomic setup finish cooldown updates on both databases.
+Browser sign-in and control-plane authorization remain
 separate roadmap work. All server proto dependencies are pinned to `scoplen-proto@4a5d602` for
 the shared authentication, scope, and object-signature contracts.
 
