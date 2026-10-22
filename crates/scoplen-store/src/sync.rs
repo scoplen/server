@@ -7,14 +7,21 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use sqlx::{Postgres, Row, Sqlite, Transaction};
 use thiserror::Error;
 
-use crate::{PostgresStore, RelationalStore, SqliteStore, account_keys::AccountId};
+use crate::{
+    PostgresStore, RelationalStore, SqliteStore,
+    account_keys::AccountId,
+    device_authentication::{
+        DeviceAuthenticationError, load_postgres_principal, load_sqlite_principal,
+        lock_postgres_account_key_state,
+    },
+};
 
 /// Maximum envelope size from the sync protocol's default limits.
 pub const MAX_ENVELOPE_BYTES: usize = 260 * 1024;
@@ -173,6 +180,20 @@ pub struct ObjectWrite {
     pub signer_device_id: Option<DeviceId>,
 }
 
+/// Current Personal device identity to recheck inside a mutation transaction.
+pub struct PersonalMutation<'a> {
+    pub account_id: AccountId,
+    pub device_id: DeviceId,
+    pub dpop_jkt: &'a str,
+    pub signers: &'a [PersonalSigner],
+}
+
+/// Signer whose previously verified key must still be current at commit time.
+pub struct PersonalSigner {
+    pub device_id: DeviceId,
+    pub dpop_jkt: String,
+}
+
 /// A current object version returned by a change query or CAS conflict.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SyncChange {
@@ -244,6 +265,12 @@ pub struct PurgeReport {
 /// Storage failures for sync operations.
 #[derive(Debug, Error)]
 pub enum SyncStoreError {
+    /// The enrolled device or Personal vault owner changed before mutation committed.
+    #[error("sync access is no longer authorized")]
+    AccessDenied,
+    /// Current authorization state could not be verified safely.
+    #[error("sync authorization is unavailable")]
+    AuthorizationUnavailable,
     /// The requested vault is not present.
     #[error("sync vault does not exist")]
     VaultNotFound,
@@ -343,6 +370,9 @@ pub enum SyncStoreError {
     /// The database operation failed.
     #[error("sync database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// A business-state write attempted COMMIT without a confirmed result.
+    #[error("sync transaction commit outcome is unknown")]
+    CommitOutcomeUnknown,
     /// A durable sync cardinality limit would be exceeded.
     #[error("sync {0} quota would be exceeded")]
     QuotaExceeded(&'static str),
@@ -1049,17 +1079,54 @@ impl SqliteStore {
     /// # Errors
     ///
     /// Returns a validation error for an invalid batch, [`SyncStoreError::Conflict`] when any
-    /// compare-and-swap base is stale, or [`SyncStoreError::Database`] for a database failure.
+    /// compare-and-swap base is stale, [`SyncStoreError::Database`] for a precommit failure, or
+    /// [`SyncStoreError::CommitOutcomeUnknown`] when the attempted commit cannot be confirmed.
     #[allow(clippy::too_many_lines)]
     pub async fn write_sync_batch(
         &self,
         vault_id: VaultId,
         writes: &[ObjectWrite],
     ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
+        self.write_sync_batch_inner(vault_id, writes, None).await
+    }
+
+    /// Apply a Personal write only while its owner and enrolled signer remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, validation, conflict, quota, or storage errors without a partial write.
+    pub async fn write_personal_sync_batch(
+        &self,
+        vault_id: VaultId,
+        authorization: &PersonalMutation<'_>,
+        writes: &[ObjectWrite],
+    ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
+        self.write_sync_batch_inner(vault_id, writes, Some(authorization)).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn write_sync_batch_inner(
+        &self,
+        vault_id: VaultId,
+        writes: &[ObjectWrite],
+        authorization: Option<&PersonalMutation<'_>>,
+    ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
         validate_batch(writes)?;
         let mut transaction = self.pool().begin().await?;
         lock_vault(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state(&mut transaction, vault_id).await?;
+        if let Some(authorization) = authorization {
+            let epoch =
+                check_sqlite_personal_mutation(&mut transaction, vault_id, authorization).await?;
+            if writes.iter().any(|write| {
+                write.key_epoch != epoch
+                    || write.signer_device_id.is_none_or(|signer| {
+                        !authorization.signers.iter().any(|known| known.device_id == signer)
+                    })
+            }) {
+                return Err(SyncStoreError::AccessDenied);
+            }
+        }
         for write in writes {
             let retired = sqlx::query_scalar::<_, i64>(
                 "SELECT 1 FROM sync_vault_retired_epochs WHERE vault_id = ? AND epoch = ?",
@@ -1176,7 +1243,7 @@ impl SqliteStore {
             .bind(vault_id.as_slice())
             .execute(&mut *transaction)
             .await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| SyncStoreError::CommitOutcomeUnknown)?;
         Ok(receipts)
     }
 
@@ -1278,9 +1345,38 @@ impl SqliteStore {
         device_id: DeviceId,
         cursor: u64,
     ) -> Result<u64, SyncStoreError> {
+        self.ack_sync_cursor_inner(vault_id, device_id, cursor, None).await
+    }
+
+    /// Advance a Personal cursor only while owner and enrolled device remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, cursor, or storage errors. A commit failure after a business-state
+    /// write returns [`SyncStoreError::CommitOutcomeUnknown`]; a no-op cannot change the cursor.
+    pub async fn ack_personal_sync_cursor(
+        &self,
+        vault_id: VaultId,
+        authorization: &PersonalMutation<'_>,
+        cursor: u64,
+    ) -> Result<u64, SyncStoreError> {
+        self.ack_sync_cursor_inner(vault_id, authorization.device_id, cursor, Some(authorization))
+            .await
+    }
+
+    async fn ack_sync_cursor_inner(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        cursor: u64,
+        authorization: Option<&PersonalMutation<'_>>,
+    ) -> Result<u64, SyncStoreError> {
         let mut transaction = self.pool().begin().await?;
         lock_vault(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state(&mut transaction, vault_id).await?;
+        if let Some(authorization) = authorization {
+            check_sqlite_personal_mutation(&mut transaction, vault_id, authorization).await?;
+        }
         if cursor > current_seq {
             return Err(SyncStoreError::CursorAhead { cursor, current: current_seq });
         }
@@ -1309,7 +1405,7 @@ impl SqliteStore {
         .bind(now_ms()?)
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| SyncStoreError::CommitOutcomeUnknown)?;
         Ok(cursor)
     }
 
@@ -1466,8 +1562,44 @@ impl PostgresStore {
         vault_id: VaultId,
         writes: &[ObjectWrite],
     ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
+        self.write_sync_batch_inner(vault_id, writes, None).await
+    }
+
+    /// Apply a Personal write only while its owner and enrolled signer remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, validation, conflict, quota, or storage errors without a partial write.
+    pub async fn write_personal_sync_batch(
+        &self,
+        vault_id: VaultId,
+        authorization: &PersonalMutation<'_>,
+        writes: &[ObjectWrite],
+    ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
+        self.write_sync_batch_inner(vault_id, writes, Some(authorization)).await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn write_sync_batch_inner(
+        &self,
+        vault_id: VaultId,
+        writes: &[ObjectWrite],
+        authorization: Option<&PersonalMutation<'_>>,
+    ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
         validate_batch(writes)?;
         let mut transaction = self.pool().begin().await?;
+        if let Some(authorization) = authorization {
+            let epoch =
+                check_postgres_personal_mutation(&mut transaction, vault_id, authorization).await?;
+            if writes.iter().any(|write| {
+                write.key_epoch != epoch
+                    || write.signer_device_id.is_none_or(|signer| {
+                        !authorization.signers.iter().any(|known| known.device_id == signer)
+                    })
+            }) {
+                return Err(SyncStoreError::AccessDenied);
+            }
+        }
         lock_vault_postgres(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state_postgres(&mut transaction, vault_id).await?;
         for write in writes {
@@ -1585,7 +1717,7 @@ impl PostgresStore {
             .bind(vault_id.as_slice())
             .execute(&mut *transaction)
             .await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| SyncStoreError::CommitOutcomeUnknown)?;
         Ok(receipts)
     }
 
@@ -1699,7 +1831,36 @@ impl PostgresStore {
         device_id: DeviceId,
         cursor: u64,
     ) -> Result<u64, SyncStoreError> {
+        self.ack_sync_cursor_inner(vault_id, device_id, cursor, None).await
+    }
+
+    /// Advance a Personal cursor only while owner and enrolled device remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, cursor, or storage errors. A commit failure after a business-state
+    /// write returns [`SyncStoreError::CommitOutcomeUnknown`]; a no-op cannot change the cursor.
+    pub async fn ack_personal_sync_cursor(
+        &self,
+        vault_id: VaultId,
+        authorization: &PersonalMutation<'_>,
+        cursor: u64,
+    ) -> Result<u64, SyncStoreError> {
+        self.ack_sync_cursor_inner(vault_id, authorization.device_id, cursor, Some(authorization))
+            .await
+    }
+
+    async fn ack_sync_cursor_inner(
+        &self,
+        vault_id: VaultId,
+        device_id: DeviceId,
+        cursor: u64,
+        authorization: Option<&PersonalMutation<'_>>,
+    ) -> Result<u64, SyncStoreError> {
         let mut transaction = self.pool().begin().await?;
+        if let Some(authorization) = authorization {
+            check_postgres_personal_mutation(&mut transaction, vault_id, authorization).await?;
+        }
         lock_vault_postgres(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state_postgres(&mut transaction, vault_id).await?;
         if cursor > current_seq {
@@ -1732,7 +1893,7 @@ impl PostgresStore {
         .bind(now_ms()?)
         .execute(&mut *transaction)
         .await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| SyncStoreError::CommitOutcomeUnknown)?;
         Ok(cursor)
     }
 
@@ -2444,6 +2605,89 @@ impl PostgresStore {
         transaction.commit().await?;
         Ok(PurgeReport { pruned_versions, purged_tombstones, purge_horizon: highest_removed })
     }
+}
+
+fn map_personal_principal_error(error: &DeviceAuthenticationError) -> SyncStoreError {
+    match error {
+        DeviceAuthenticationError::Denied { .. } => SyncStoreError::AccessDenied,
+        _ => SyncStoreError::AuthorizationUnavailable,
+    }
+}
+
+async fn check_sqlite_personal_mutation(
+    transaction: &mut Transaction<'_, Sqlite>,
+    vault_id: VaultId,
+    authorization: &PersonalMutation<'_>,
+) -> Result<u64, SyncStoreError> {
+    let principal = load_sqlite_principal(transaction, authorization.device_id)
+        .await
+        .map_err(|error| map_personal_principal_error(&error))?
+        .ok_or(SyncStoreError::AccessDenied)?;
+    if principal.account_id != authorization.account_id || principal.jkt != authorization.dpop_jkt {
+        return Err(SyncStoreError::AccessDenied);
+    }
+    for signer in authorization.signers {
+        let principal = load_sqlite_principal(transaction, signer.device_id)
+            .await
+            .map_err(|error| map_personal_principal_error(&error))?
+            .ok_or(SyncStoreError::AccessDenied)?;
+        if principal.account_id != authorization.account_id || principal.jkt != signer.dpop_jkt {
+            return Err(SyncStoreError::AccessDenied);
+        }
+    }
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT p.key_epoch FROM sync_personal_vaults AS p JOIN sync_vaults AS v ON v.vault_id = p.vault_id WHERE p.vault_id = ? AND p.account_id = ? AND v.kind = 'personal'",
+    )
+    .bind(vault_id.as_slice())
+    .bind(authorization.account_id.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(SyncStoreError::AccessDenied)?;
+    u64::try_from(epoch)
+        .ok()
+        .filter(|epoch| *epoch > 0)
+        .ok_or(SyncStoreError::AuthorizationUnavailable)
+}
+
+async fn check_postgres_personal_mutation(
+    transaction: &mut Transaction<'_, Postgres>,
+    vault_id: VaultId,
+    authorization: &PersonalMutation<'_>,
+) -> Result<u64, SyncStoreError> {
+    lock_postgres_account_key_state(transaction, &authorization.account_id)
+        .await
+        .map_err(|error| map_personal_principal_error(&error))?;
+    let mut device_keys = BTreeMap::new();
+    device_keys.insert(authorization.device_id, authorization.dpop_jkt);
+    for signer in authorization.signers {
+        if device_keys
+            .insert(signer.device_id, signer.dpop_jkt.as_str())
+            .is_some_and(|previous| previous != signer.dpop_jkt)
+        {
+            return Err(SyncStoreError::AccessDenied);
+        }
+    }
+    for (device_id, expected_jkt) in device_keys {
+        let principal = load_postgres_principal(transaction, device_id, true)
+            .await
+            .map_err(|error| map_personal_principal_error(&error))?
+            .ok_or(SyncStoreError::AccessDenied)?;
+        if principal.account_id != authorization.account_id || principal.jkt != expected_jkt {
+            return Err(SyncStoreError::AccessDenied);
+        }
+    }
+    let epoch: i64 = sqlx::query_scalar(
+        "SELECT p.key_epoch FROM sync_personal_vaults AS p JOIN sync_vaults AS v ON v.vault_id = p.vault_id WHERE p.vault_id = $1 AND p.account_id = $2 AND v.kind = 'personal' FOR SHARE OF p",
+    )
+    .bind(vault_id.as_slice())
+    .bind(authorization.account_id.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(SyncStoreError::AccessDenied)?;
+    u64::try_from(epoch)
+        .ok()
+        .filter(|epoch| *epoch > 0)
+        .ok_or(SyncStoreError::AuthorizationUnavailable)
 }
 
 async fn read_current_page(

@@ -11,6 +11,7 @@ name = "spl-server"
 path = "src/main.rs"
 
 [dependencies]
+async-trait = "0.1.92"
 axum.workspace = true
 clap.workspace = true
 getrandom.workspace = true
@@ -22,8 +23,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
 scoplen-identity = { path = "../scoplen-identity" }
 scoplen-store = { path = "../scoplen-store" }
 scoplen-sync = { path = "../scoplen-sync" }
@@ -47,4 +48,5 @@ postgres-integration = []
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }

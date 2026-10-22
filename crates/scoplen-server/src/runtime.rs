@@ -25,12 +25,13 @@ use scoplen_store::{
     DeploymentAuditCheckpoint, JobQueueError, ObjectStorage, PostgresStore, SqliteStore,
     sync::SyncStoreError,
 };
+use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
-use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment};
+use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment, personal_sync};
 
 /// Result of first-run material generation.
 #[derive(Debug, Default)]
@@ -56,7 +57,7 @@ pub struct PreparedRoles {
 }
 
 #[derive(Clone)]
-enum ListenerDatabase {
+pub(crate) enum ListenerDatabase {
     Sqlite(Arc<SqliteStore>),
     Postgres(Arc<PostgresStore>),
 }
@@ -786,12 +787,33 @@ async fn worker_deployment_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
     }
 }
 
-fn api_router(
+#[cfg(test)]
+pub(crate) fn api_router(
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
     key_management: Arc<LocalKeyFile>,
     trusted_origin: String,
     enrollment_enabled: bool,
+) -> Router {
+    api_router_with_limits(
+        database,
+        object_storage,
+        key_management,
+        trusted_origin,
+        enrollment_enabled,
+        WriteRateLimits::default(),
+        WriteBodyLimits::default(),
+    )
+}
+
+pub(crate) fn api_router_with_limits(
+    database: ListenerDatabase,
+    object_storage: Arc<ObjectStorage>,
+    key_management: Arc<LocalKeyFile>,
+    trusted_origin: String,
+    enrollment_enabled: bool,
+    write_rate_limits: WriteRateLimits,
+    write_body_limits: WriteBodyLimits,
 ) -> Router {
     let enrollment_backend = match &database {
         ListenerDatabase::Sqlite(store) => {
@@ -804,6 +826,12 @@ fn api_router(
     let auth_backend = match &database {
         ListenerDatabase::Sqlite(store) => device_auth::AuthBackend::Sqlite(store.clone()),
         ListenerDatabase::Postgres(store) => device_auth::AuthBackend::Postgres(store.clone()),
+    };
+    let sync_backend = match &database {
+        ListenerDatabase::Sqlite(store) => scoplen_sync::http::SyncBackend::Sqlite(store.clone()),
+        ListenerDatabase::Postgres(store) => {
+            scoplen_sync::http::SyncBackend::Postgres(store.clone())
+        }
     };
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -837,7 +865,21 @@ fn api_router(
     if enrollment_enabled {
         router
             .merge(personal_enrollment::router(trusted_origin.clone(), enrollment_backend))
-            .merge(device_auth::router(trusted_origin, auth_backend, key_management))
+            .merge(device_auth::router(
+                trusted_origin.clone(),
+                auth_backend.clone(),
+                key_management.clone(),
+            ))
+            .merge(scoplen_sync::http::personal_router_with_limits(
+                sync_backend,
+                personal_sync::PersonalSyncAuthenticator::new(
+                    auth_backend,
+                    key_management,
+                    trusted_origin,
+                ),
+                write_rate_limits,
+                write_body_limits,
+            ))
     } else {
         router
     }
@@ -853,6 +895,8 @@ async fn run_public_listener(
     let address = config.listen_address();
     let trusted_origin = config.public_origin()?;
     let enrollment_enabled = roles.contains(&Role::Api);
+    let write_rate_limits = config.sync.write_rate_limits()?;
+    let write_body_limits = config.sync.write_body_limits()?;
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
     match config.tls.mode {
@@ -864,12 +908,14 @@ async fn run_public_listener(
             }
             axum::serve(
                 listener,
-                api_router(
+                api_router_with_limits(
                     database,
                     object_storage,
                     key_management,
                     trusted_origin,
                     enrollment_enabled,
+                    write_rate_limits,
+                    write_body_limits,
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
@@ -878,17 +924,19 @@ async fn run_public_listener(
         }
         TlsMode::Files => {
             let acceptor = TlsAcceptor::from(Arc::new(tls_config(&config)?));
+            let router = api_router_with_limits(
+                database,
+                object_storage,
+                key_management,
+                trusted_origin,
+                enrollment_enabled,
+                write_rate_limits,
+                write_body_limits,
+            );
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
-                let router = api_router(
-                    database.clone(),
-                    object_storage.clone(),
-                    key_management.clone(),
-                    trusted_origin.clone(),
-                    enrollment_enabled,
-                )
-                .layer(Extension(ConnectInfo(peer)));
+                let router = router.clone().layer(Extension(ConnectInfo(peer)));
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
@@ -909,6 +957,8 @@ async fn run_public_listener(
                 object_storage,
                 key_management,
                 enrollment_enabled,
+                write_rate_limits,
+                write_body_limits,
             )
             .await?;
         }
@@ -950,6 +1000,7 @@ fn tls_config(config: &Config) -> Result<ServerConfig, ServerError> {
     Ok(server)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_acme_listener(
     config: Config,
     listener: TcpListener,
@@ -957,6 +1008,8 @@ async fn run_acme_listener(
     object_storage: Arc<ObjectStorage>,
     key_management: Arc<LocalKeyFile>,
     enrollment_enabled: bool,
+    write_rate_limits: WriteRateLimits,
+    write_body_limits: WriteBodyLimits,
 ) -> Result<(), ServerError> {
     let email = config
         .tls
@@ -969,6 +1022,15 @@ async fn run_acme_listener(
         .cache(DirCache::new(cache_dir))
         .directory_lets_encrypt(config.tls.acme_production)
         .tokio_incoming(TcpListenerStream::new(listener), application_alpn_protocols());
+    let router = api_router_with_limits(
+        database,
+        object_storage,
+        key_management,
+        config.public_origin()?,
+        enrollment_enabled,
+        write_rate_limits,
+        write_body_limits,
+    );
 
     while let Some(result) = tls_incoming.next().await {
         let tls = result.map_err(ServerError::Runtime)?;
@@ -979,14 +1041,7 @@ async fn run_acme_listener(
             .alpn_protocol()
             .is_some_and(|protocol| protocol == b"spl-gw/1");
         let peer = tls.get_ref().get_ref().0.get_ref().peer_addr().map_err(ServerError::Runtime)?;
-        let router = api_router(
-            database.clone(),
-            object_storage.clone(),
-            key_management.clone(),
-            config.public_origin()?,
-            enrollment_enabled,
-        )
-        .layer(Extension(ConnectInfo(peer)));
+        let router = router.clone().layer(Extension(ConnectInfo(peer)));
         tokio::spawn(async move {
             if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
                 error!(%error, "ACME TLS connection failed");

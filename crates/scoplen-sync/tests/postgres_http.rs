@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #![cfg(feature = "postgres-integration")]
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{
     Router,
@@ -20,7 +26,10 @@ use scoplen_sync::{
     },
     notify::NotificationHub,
 };
-use tokio::net::TcpListener;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -45,8 +54,9 @@ impl TestAuthenticator {
     }
 }
 
+#[async_trait::async_trait]
 impl SyncAuthenticator for TestAuthenticator {
-    fn authenticate(
+    async fn authenticate(
         &self,
         method: &Method,
         uri: &Uri,
@@ -67,19 +77,23 @@ impl SyncAuthenticator for TestAuthenticator {
             )
             .expect("valid authentication failure"));
         }
-        Ok(AuthenticatedDevice { device_id: self.device })
+        Ok(AuthenticatedDevice { device_id: self.device, account_id: self.account })
     }
 
-    fn authorize(
+    async fn authorize(
         &self,
-        _identity: AuthenticatedDevice,
+        identity: AuthenticatedDevice,
         _vault: storage::VaultId,
         _operation: SyncOperation,
     ) -> Result<(), AuthFailure> {
-        if self.vault_access { Ok(()) } else { Err(Self::denied()) }
+        if self.vault_access && identity.account_id == self.account {
+            Ok(())
+        } else {
+            Err(Self::denied())
+        }
     }
 
-    fn validate_write(
+    async fn validate_write(
         &self,
         _identity: AuthenticatedDevice,
         _vault: storage::VaultId,
@@ -88,15 +102,18 @@ impl SyncAuthenticator for TestAuthenticator {
         Ok(vec![1; writes.len()])
     }
 
-    fn account_id(&self, _identity: AuthenticatedDevice) -> Result<keys::AccountId, AuthFailure> {
+    async fn account_id(
+        &self,
+        _identity: AuthenticatedDevice,
+    ) -> Result<keys::AccountId, AuthFailure> {
         Ok(self.account)
     }
 
-    fn authorize_session(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
+    async fn authorize_session(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
         Ok(())
     }
 
-    fn authorize_keys(
+    async fn authorize_keys(
         &self,
         _identity: AuthenticatedDevice,
         _account_id: keys::AccountId,
@@ -105,7 +122,7 @@ impl SyncAuthenticator for TestAuthenticator {
         Ok(())
     }
 
-    fn validate_key_bundle_update(
+    async fn validate_key_bundle_update(
         &self,
         _identity: AuthenticatedDevice,
         _account_id: keys::AccountId,
@@ -114,17 +131,20 @@ impl SyncAuthenticator for TestAuthenticator {
         Ok(())
     }
 
-    fn authorize_notifications(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
-        Ok(())
+    async fn authorize_notifications(
+        &self,
+        identity: AuthenticatedDevice,
+    ) -> Result<(), AuthFailure> {
+        if identity.account_id == self.account { Ok(()) } else { Err(Self::denied()) }
     }
 
-    fn authenticate_notification(
+    async fn authenticate_notification(
         &self,
         uri: &Uri,
         first_message: &[u8],
     ) -> Result<AuthenticatedDevice, AuthFailure> {
         if uri.path() == "/sync/v1/notify" && first_message == b"notify-test-token" {
-            Ok(AuthenticatedDevice { device_id: self.device })
+            Ok(AuthenticatedDevice { device_id: self.device, account_id: self.account })
         } else {
             Err(AuthFailure::new(
                 StatusCode::UNAUTHORIZED,
@@ -171,6 +191,243 @@ async fn store() -> Arc<PostgresStore> {
     Arc::new(PostgresStore::connect(&url).await.expect("connect PostgreSQL 17"))
 }
 
+struct LostCommitProxy {
+    database_url: String,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for LostCommitProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl LostCommitProxy {
+    async fn start() -> Self {
+        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("PostgreSQL URL");
+        let mut url = url::Url::parse(&database_url).expect("TCP PostgreSQL URL");
+        let upstream = format!("{}:{}", url.host_str().expect("host"), url.port().unwrap_or(5432));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
+        url.set_host(Some("127.0.0.1")).expect("proxy host");
+        url.set_port(Some(listener.local_addr().expect("address").port())).expect("proxy port");
+        url.set_query(Some("sslmode=disable"));
+        let armed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let task = {
+            let armed = armed.clone();
+            let dropped = dropped.clone();
+            tokio::spawn(async move {
+                let mut connections = tokio::task::JoinSet::new();
+                loop {
+                    let (client, _) = listener.accept().await.expect("proxy client");
+                    let server =
+                        TcpStream::connect(&upstream).await.expect("PostgreSQL connection");
+                    let armed = armed.clone();
+                    let dropped = dropped.clone();
+                    connections.spawn(async move {
+                        Box::pin(drop_commit_ack(client, server, armed, dropped)).await;
+                    });
+                }
+            })
+        };
+        Self { database_url: url.to_string(), armed, dropped, task }
+    }
+}
+
+async fn drop_commit_ack(
+    client: TcpStream,
+    server: TcpStream,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<AtomicUsize>,
+) {
+    let (mut client_read, mut client_write) = client.into_split();
+    let (mut server_read, mut server_write) = server.into_split();
+    let commit_forwarded = Arc::new(AtomicBool::new(false));
+    let forwarding = {
+        let commit_forwarded = commit_forwarded.clone();
+        async move {
+            let mut buffer = [0; 16_384];
+            let mut tail = Vec::new();
+            loop {
+                let count = client_read.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                tail.extend_from_slice(&buffer[..count]);
+                if tail.windows(7).any(|bytes| bytes == b"COMMIT\0")
+                    && armed.swap(false, Ordering::SeqCst)
+                {
+                    commit_forwarded.store(true, Ordering::SeqCst);
+                }
+                tail = tail[tail.len().saturating_sub(6)..].to_vec();
+                server_write.write_all(&buffer[..count]).await?;
+            }
+            Ok::<(), std::io::Error>(())
+        }
+    };
+    let returning = async move {
+        let mut buffer = [0; 16_384];
+        let mut withheld = Vec::new();
+        loop {
+            let count = server_read.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            if commit_forwarded.load(Ordering::SeqCst) {
+                withheld.extend_from_slice(&buffer[..count]);
+                if withheld.windows(7).any(|bytes| bytes == b"COMMIT\0") {
+                    dropped.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                if withheld.len() > 65_536 {
+                    return Err(std::io::Error::other("commit reply exceeds test bound"));
+                }
+            } else {
+                client_write.write_all(&buffer[..count]).await?;
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let _ = tokio::select! { result = forwarding => result, result = returning => result };
+}
+
+async fn assert_storage_outcome(response: Response, changed: bool) {
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let problem = ProblemDetails::from_cbor(&bytes(response).await).expect("CBOR problem");
+    assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+    assert_eq!(problem.changed, changed);
+    assert_eq!(problem.retryable, !changed);
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
+    let direct = store().await;
+    let vault = Uuid::now_v7();
+    let account = Uuid::now_v7();
+    let device = Uuid::now_v7();
+    direct
+        .create_personal_sync_vault(vault.into_bytes(), account.into_bytes(), &[1])
+        .await
+        .expect("Personal vault");
+    let proxy = LostCommitProxy::start().await;
+    let proxied =
+        Arc::new(PostgresStore::connect(&proxy.database_url).await.expect("proxied store"));
+    let app = router_with_notifications(
+        proxied.clone(),
+        TestAuthenticator {
+            account: account.into_bytes(),
+            device: device.into_bytes(),
+            vault_access: true,
+        },
+        NotificationHub::default(),
+    );
+    let object = Uuid::now_v7();
+    let batch = api::SyncWriteBatch {
+        writes: vec![api::SyncWrite {
+            object_id: object,
+            base_seq: None,
+            payload: vec![1],
+            tombstone: false,
+        }],
+    };
+    let write_uri = format!("/sync/v1/vaults/{vault}/objects");
+    proxy.armed.store(true, Ordering::SeqCst);
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        send(&app, Method::POST, &write_uri, batch.to_cbor().expect("write")),
+    )
+    .await
+    .expect("lost write reply timeout");
+    assert_storage_outcome(response, true).await;
+    assert_eq!(proxy.dropped.load(Ordering::SeqCst), 1);
+    let versions =
+        direct.sync_versions(vault.into_bytes(), object.into_bytes()).await.expect("readback");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].sequence, 1, "the write committed despite its error response");
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let function = format!("fail_sync_{suffix}");
+    let trigger = format!("fail_sync_trigger_{suffix}");
+    let vault_hex = vault.simple().to_string();
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN IF NEW.vault_id = decode('{vault_hex}', 'hex') THEN
+           RAISE EXCEPTION 'injected precommit sync failure';
+         END IF; RETURN NEW; END $$;
+         CREATE TRIGGER {trigger} BEFORE UPDATE ON sync_vaults
+         FOR EACH ROW EXECUTE FUNCTION {function}();"
+    ))
+    .execute(direct.pool())
+    .await
+    .expect("precommit fixture");
+    let update = api::SyncWriteBatch {
+        writes: vec![api::SyncWrite {
+            base_seq: Some(1),
+            payload: vec![2],
+            ..batch.writes[0].clone()
+        }],
+    };
+    assert_storage_outcome(
+        send(&app, Method::POST, &write_uri, update.to_cbor().expect("update")).await,
+        false,
+    )
+    .await;
+    sqlx::raw_sql(&format!("DROP TRIGGER {trigger} ON sync_vaults; DROP FUNCTION {function}();"))
+        .execute(direct.pool())
+        .await
+        .expect("remove precommit fixture");
+    assert_eq!(
+        direct
+            .sync_versions(vault.into_bytes(), object.into_bytes())
+            .await
+            .expect("rollback readback")
+            .len(),
+        1
+    );
+
+    let ack_uri = format!("/sync/v1/vaults/{vault}/ack");
+    for (cursor, changed) in [(1, true), (0, false)] {
+        proxy.armed.store(true, Ordering::SeqCst);
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            send(
+                &app,
+                Method::POST,
+                &ack_uri,
+                api::SyncAckRequest { cursor }.to_cbor().expect("ACK"),
+            ),
+        )
+        .await
+        .expect("lost ACK reply timeout");
+        assert_storage_outcome(response, changed).await;
+    }
+    assert_eq!(proxy.dropped.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        direct
+            .ack_sync_cursor(vault.into_bytes(), device.into_bytes(), 0)
+            .await
+            .expect("ACK readback"),
+        1
+    );
+    let response = send(
+        &app,
+        Method::POST,
+        &ack_uri,
+        api::SyncAckRequest { cursor: 0 }.to_cbor().expect("ACK"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        api::SyncAckResponse::from_cbor(&bytes(response).await).expect("ACK response").cursor,
+        1
+    );
+    proxied.pool().close().await;
+    direct.pool().close().await;
+}
+
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn postgres_router_personal_sync_and_keys_round_trip() {
@@ -194,7 +451,10 @@ async fn postgres_router_personal_sync_and_keys_round_trip() {
         .await
         .expect("outsider vault");
     let hub = NotificationHub::default();
-    let mut notifications = hub.subscribe(device.into_bytes());
+    let mut notifications = hub.subscribe(AuthenticatedDevice {
+        device_id: device.into_bytes(),
+        account_id: account.into_bytes(),
+    });
     let owner = TestAuthenticator {
         account: account.into_bytes(),
         device: device.into_bytes(),
@@ -399,7 +659,10 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
     let device = Uuid::now_v7();
     let vault = Uuid::now_v7();
     let hub = NotificationHub::default();
-    let mut notifications = hub.subscribe(device.into_bytes());
+    let mut notifications = hub.subscribe(AuthenticatedDevice {
+        device_id: device.into_bytes(),
+        account_id: account.into_bytes(),
+    });
     let app = router_with_notifications(
         store.clone(),
         TestAuthenticator {
@@ -561,7 +824,9 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         panic!("invalid notification credential did not close the socket");
     };
     assert_eq!(frame.reason, "auth.authentication_required");
-    assert_eq!(hub.receiver_count(device.into_bytes()), 0);
+    let identity =
+        AuthenticatedDevice { device_id: device.into_bytes(), account_id: account.into_bytes() };
+    assert_eq!(hub.receiver_count(identity), 0);
 
     let (mut socket, _) =
         connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("notification socket");
@@ -570,7 +835,7 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         .await
         .expect("send notification credential");
     tokio::time::timeout(Duration::from_secs(5), async {
-        while hub.receiver_count(device.into_bytes()) != 1 {
+        while hub.receiver_count(identity) != 1 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

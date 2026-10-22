@@ -24,10 +24,11 @@ use scoplen_api::{
         MAX_REFRESH_REQUEST_BYTES,
     },
 };
+use scoplen_crypto::{DpopProof, DpopTarget, DpopToken};
 use scoplen_store::{
     PostgresStore, SqliteStore,
     device_authentication::{
-        DeviceAuthAdmission, DeviceAuthEndpoint, DeviceAuthFailureReason,
+        CurrentPrincipal, DeviceAuthAdmission, DeviceAuthEndpoint, DeviceAuthFailureReason,
         DeviceAuthenticationError, DeviceChallenge,
     },
     device_token_keys::{DeviceTokenKeyError, DeviceTokenKeyring},
@@ -119,10 +120,48 @@ impl AuthBackend {
         }
     }
 
-    async fn keyring(&self, kms: &LocalKeyFile) -> Result<DeviceTokenKeyring, DeviceTokenKeyError> {
+    pub(crate) async fn keyring(
+        &self,
+        kms: &LocalKeyFile,
+    ) -> Result<DeviceTokenKeyring, DeviceTokenKeyError> {
         match self {
             Self::Sqlite(store) => store.ensure_device_token_keyring(kms).await,
             Self::Postgres(store) => store.ensure_device_token_keyring(kms).await,
+        }
+    }
+
+    pub(crate) async fn current_principal(
+        &self,
+        device_id: [u8; 16],
+    ) -> Result<Option<CurrentPrincipal>, DeviceAuthenticationError> {
+        match self {
+            Self::Sqlite(store) => store.current_device_principal(device_id).await,
+            Self::Postgres(store) => store.current_device_principal(device_id).await,
+        }
+    }
+
+    pub(crate) async fn claim_dpop(
+        &self,
+        proof: &DpopProof,
+        target: &DpopTarget,
+        token: DpopToken<'_>,
+        jkt: &str,
+    ) -> Result<(), DeviceAuthenticationError> {
+        match self {
+            Self::Sqlite(store) => store.claim_dpop_proof(proof, target, token, jkt, None).await,
+            Self::Postgres(store) => store.claim_dpop_proof(proof, target, token, jkt, None).await,
+        }
+    }
+
+    pub(crate) async fn personal_vault(
+        &self,
+        account_id: [u8; 16],
+    ) -> Result<[u8; 16], scoplen_store::sync::SyncStoreError> {
+        match self {
+            Self::Sqlite(store) => store.get_personal_sync_vault_key(account_id).await.map(|v| v.0),
+            Self::Postgres(store) => {
+                store.get_personal_sync_vault_key(account_id).await.map(|v| v.0)
+            }
         }
     }
 

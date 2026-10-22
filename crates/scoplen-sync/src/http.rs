@@ -242,10 +242,12 @@ pub enum SyncKeysOperation {
 }
 
 /// An authenticated device identity supplied by the identity service.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AuthenticatedDevice {
     /// `UUIDv7` of the enrolled device.
     pub device_id: storage::DeviceId,
+    /// Account established from the verified token and current enrolled device.
+    pub account_id: key_storage::AccountId,
 }
 
 /// A problem returned by an authenticator at the request boundary.
@@ -295,6 +297,7 @@ impl AuthFailure {
 /// expired, or revoked credentials. Implementations also enforce vault membership for the
 /// requested operation. This trait has no default implementation so the server cannot
 /// accidentally ship an unauthenticated endpoint.
+#[async_trait::async_trait]
 pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// Authenticate one request as an enrolled device, including its `DPoP` method and URI binding.
     ///
@@ -302,7 +305,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     ///
     /// Returns an authentication problem when the access token or proof is missing, invalid,
     /// expired, or revoked.
-    fn authenticate(
+    async fn authenticate(
         &self,
         method: &Method,
         uri: &Uri,
@@ -314,7 +317,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns a policy or authentication problem when the device cannot perform the operation.
-    fn authorize(
+    async fn authorize(
         &self,
         identity: AuthenticatedDevice,
         vault: storage::VaultId,
@@ -330,23 +333,45 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an authentication or policy problem when a write is not valid for the vault.
-    fn validate_write(
+    async fn validate_write(
         &self,
         identity: AuthenticatedDevice,
         vault: storage::VaultId,
         writes: &[api::SyncWrite],
     ) -> Result<Vec<u64>, AuthFailure>;
 
+    /// Commit a validated batch. Production implementations can recheck live authorization
+    /// inside the storage transaction before any object or sequence changes.
+    async fn commit_write(
+        &self,
+        _identity: AuthenticatedDevice,
+        vault: storage::VaultId,
+        writes: &[storage::ObjectWrite],
+        store: &SyncBackend,
+    ) -> Result<Vec<storage::WriteReceipt>, storage::SyncStoreError> {
+        store.write_sync_batch(vault, writes).await
+    }
+
+    /// Commit an acknowledgement after a transaction-local authorization recheck.
+    async fn commit_ack(
+        &self,
+        identity: AuthenticatedDevice,
+        vault: storage::VaultId,
+        cursor: u64,
+        store: &SyncBackend,
+    ) -> Result<u64, storage::SyncStoreError> {
+        store.ack_sync_cursor(vault, identity.device_id, cursor).await
+    }
+
     /// Resolve the account that owns an authenticated device.
     ///
-    /// This is kept separate from [`AuthenticatedDevice`] because vault synchronization only
-    /// needs a device identifier. Account-key routes must use this method before touching key
-    /// storage, and implementations must not derive the account from caller-controlled input.
+    /// Account-key routes use this method before touching key storage. Implementations recheck
+    /// any current account state required and never trust caller-controlled account identifiers.
     ///
     /// # Errors
     ///
     /// Returns an authentication failure when the device is not associated with an account.
-    fn account_id(
+    async fn account_id(
         &self,
         identity: AuthenticatedDevice,
     ) -> Result<key_storage::AccountId, AuthFailure>;
@@ -356,14 +381,14 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an authentication or policy failure if the device may not start sync.
-    fn authorize_session(&self, identity: AuthenticatedDevice) -> Result<(), AuthFailure>;
+    async fn authorize_session(&self, identity: AuthenticatedDevice) -> Result<(), AuthFailure>;
 
     /// Authorize an account-key operation after `DPoP` authentication.
     ///
     /// # Errors
     ///
     /// Returns an authentication or policy failure when the device cannot access account keys.
-    fn authorize_keys(
+    async fn authorize_keys(
         &self,
         identity: AuthenticatedDevice,
         account_id: key_storage::AccountId,
@@ -382,7 +407,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     ///
     /// Returns an authentication or request failure when the signature or active-device set is
     /// invalid.
-    fn validate_key_bundle_update(
+    async fn validate_key_bundle_update(
         &self,
         identity: AuthenticatedDevice,
         account_id: key_storage::AccountId,
@@ -400,7 +425,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an authentication problem when the first message is not valid credentials.
-    fn authenticate_notification(
+    async fn authenticate_notification(
         &self,
         _uri: &Uri,
         _first_message: &[u8],
@@ -416,7 +441,10 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
     /// # Errors
     ///
     /// Returns an authentication or policy problem when notifications are not allowed.
-    fn authorize_notifications(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
+    async fn authorize_notifications(
+        &self,
+        _identity: AuthenticatedDevice,
+    ) -> Result<(), AuthFailure> {
         Err(notification_authentication_required())
     }
 }
@@ -590,6 +618,47 @@ pub fn router<A: SyncAuthenticator>(store: impl Into<SyncBackend>, authenticator
     router_with_notifications(store, authenticator, NotificationHub::default())
 }
 
+/// Mount only the Personal routes whose production authorization is available.
+/// Shared-vault mutation, account-key rotation, and notification routes remain closed.
+pub fn personal_router<A: SyncAuthenticator>(
+    store: impl Into<SyncBackend>,
+    authenticator: A,
+) -> Router {
+    personal_router_with_limits(
+        store,
+        authenticator,
+        WriteRateLimits::default(),
+        WriteBodyLimits::default(),
+    )
+}
+
+/// Mount the authorized Personal subset with validated write limits.
+pub fn personal_router_with_limits<A: SyncAuthenticator>(
+    store: impl Into<SyncBackend>,
+    authenticator: A,
+    write_rate_limits: WriteRateLimits,
+    write_body_limits: WriteBodyLimits,
+) -> Router {
+    let state = SyncHttpState {
+        store: store.into(),
+        authenticator,
+        notifications: NotificationHub::default(),
+        write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
+        write_body_limits,
+    };
+    Router::new()
+        .route("/sync/v1/session", post(session::<A>))
+        .route("/sync/v1/keys", get(keys_get::<A>))
+        .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
+        .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
+        .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
+        .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
+        .route("/sync/v1/vaults/{vault}/objects", post(objects::<A>))
+        .route("/sync/v1/vaults/{vault}/ack", post(ack::<A>))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .with_state(state)
+}
+
 /// Build the sync router with a caller-owned local notification hub.
 ///
 /// A deployment publishes content-free events to this hub after committing a change. The hub is
@@ -680,6 +749,7 @@ async fn session<A: SyncAuthenticator>(
     let identity = state
         .authenticator
         .authenticate(&method, &uri, &headers)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let body = to_bytes(body, MAX_SESSION_REQUEST_BYTES)
         .await
@@ -721,10 +791,12 @@ async fn session<A: SyncAuthenticator>(
     state
         .authenticator
         .authorize_session(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let account_id = state
         .authenticator
         .account_id(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let vaults = state
         .store
@@ -791,19 +863,19 @@ async fn notification_session<A: SyncAuthenticator>(
             return;
         }
     };
-    let identity = match state.authenticator.authenticate_notification(&uri, &first_message) {
+    let identity = match state.authenticator.authenticate_notification(&uri, &first_message).await {
         Ok(identity) => identity,
         Err(error) => {
             close_notification(&mut socket, error.code.as_str()).await;
             return;
         }
     };
-    if let Err(error) = state.authenticator.authorize_notifications(identity) {
+    if let Err(error) = state.authenticator.authorize_notifications(identity).await {
         close_notification(&mut socket, error.code.as_str()).await;
         return;
     }
 
-    let mut events = state.notifications.subscribe(identity.device_id);
+    let mut events = state.notifications.subscribe(identity);
     loop {
         tokio::select! {
             event = events.recv() => match event {
@@ -855,6 +927,7 @@ async fn create_vault<A: SyncAuthenticator>(
     let identity = state
         .authenticator
         .authenticate(&method, &uri, &headers)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let body = to_bytes(body, api::MAX_SYNC_VAULT_CREATE_BODY_BYTES).await.map_err(|_| {
         SyncHttpError::too_large(&instance, "shared-vault creation body is too large")
@@ -866,10 +939,12 @@ async fn create_vault<A: SyncAuthenticator>(
     state
         .authenticator
         .authorize(identity, vault, SyncOperation::CreateVault)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let account_id = state
         .authenticator
         .account_id(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     state
         .store
@@ -903,10 +978,11 @@ async fn vault_keys<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance).await?;
     let account_id = state
         .authenticator
         .account_id(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let keys = match state
         .store
@@ -973,7 +1049,8 @@ async fn publish_vault_epoch<A: SyncAuthenticator>(
         vault,
         SyncOperation::PublishVaultEpoch,
         &instance,
-    )?;
+    )
+    .await?;
     let body = to_bytes(body, api::MAX_SYNC_VAULT_EPOCH_BODY_BYTES).await.map_err(|_| {
         SyncHttpError::too_large(&instance, "shared-vault epoch body exceeds 4 MiB")
     })?;
@@ -1021,7 +1098,8 @@ async fn retire_vault_epoch<A: SyncAuthenticator>(
         vault,
         SyncOperation::RetireVaultEpoch,
         &instance,
-    )?;
+    )
+    .await?;
     to_bytes(body, 0).await.map_err(|_| {
         SyncHttpError::invalid(
             &instance,
@@ -1053,15 +1131,9 @@ async fn add_vault_member<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let _identity = authorize(
-        &state,
-        &method,
-        &uri,
-        &headers,
-        vault,
-        SyncOperation::AddVaultMember,
-        &instance,
-    )?;
+    let _identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::AddVaultMember, &instance)
+            .await?;
     let body = to_bytes(body, api::MAX_SYNC_VAULT_MEMBER_BODY_BYTES).await.map_err(|_| {
         SyncHttpError::too_large(&instance, "shared-vault member body exceeds 4 MiB")
     })?;
@@ -1109,7 +1181,8 @@ async fn remove_vault_member<A: SyncAuthenticator>(
         vault,
         SyncOperation::RemoveVaultMember,
         &instance,
-    )?;
+    )
+    .await?;
     to_bytes(body, 0).await.map_err(|_| {
         SyncHttpError::invalid(
             &instance,
@@ -1136,7 +1209,8 @@ async fn remove_vault_member<A: SyncAuthenticator>(
         vault,
         &api::SyncNotification::RotationPending { vault: Uuid::from_bytes(vault) },
         "rotation_pending",
-    );
+    )
+    .await;
     Ok(cbor_response(response_body))
 }
 
@@ -1150,14 +1224,17 @@ async fn keys_get<A: SyncAuthenticator>(
     let identity = state
         .authenticator
         .authenticate(&method, &uri, &headers)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let account_id = state
         .authenticator
         .account_id(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     state
         .authenticator
         .authorize_keys(identity, account_id, SyncKeysOperation::Read)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let bundle = state
         .store
@@ -1190,14 +1267,17 @@ async fn keys_put<A: SyncAuthenticator>(
     let identity = state
         .authenticator
         .authenticate(&method, &uri, &headers)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let account_id = state
         .authenticator
         .account_id(identity)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     state
         .authenticator
         .authorize_keys(identity, account_id, SyncKeysOperation::Write)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let body = to_bytes(body, api::MAX_SYNC_KEY_BODY_BYTES)
         .await
@@ -1215,6 +1295,7 @@ async fn keys_put<A: SyncAuthenticator>(
         state
             .authenticator
             .validate_key_bundle_update(identity, account_id, &update)
+            .await
             .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     }
     let result = state
@@ -1246,7 +1327,7 @@ async fn changes<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance).await?;
     let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
@@ -1277,7 +1358,8 @@ async fn snapshot<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Snapshot, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Snapshot, &instance)
+            .await?;
     let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
@@ -1309,7 +1391,8 @@ async fn versions<A: SyncAuthenticator>(
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let object = parse_uuid(&object, "object", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Versions, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Versions, &instance)
+            .await?;
     let versions = state
         .store
         .sync_versions(vault, object)
@@ -1339,7 +1422,7 @@ async fn objects<A: SyncAuthenticator>(
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Write, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Write, &instance).await?;
     state
         .write_rate_limiter
         .try_acquire(identity.device_id)
@@ -1374,6 +1457,7 @@ async fn objects<A: SyncAuthenticator>(
     let key_epochs = state
         .authenticator
         .validate_write(identity, vault, &batch.writes)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     if key_epochs.len() != batch.writes.len() || key_epochs.contains(&0) {
         return Err(SyncHttpError::known(
@@ -1400,8 +1484,8 @@ async fn objects<A: SyncAuthenticator>(
         })
         .collect::<Vec<_>>();
     let receipts = state
-        .store
-        .write_sync_batch(vault, &writes)
+        .authenticator
+        .commit_write(identity, vault, &writes, &state.store)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?;
     let response = api::SyncWriteBatchResponse {
@@ -1420,7 +1504,7 @@ async fn objects<A: SyncAuthenticator>(
         SyncHttpError::invalid(&instance, format!("could not encode write assignment: {error}"))
     })?;
     if let Some(seq) = response.assignments.iter().map(|assignment| assignment.seq).max() {
-        publish_vault_advanced(&state, vault, seq);
+        publish_vault_advanced(&state, vault, seq).await;
     }
     Ok(cbor_response(response_body))
 }
@@ -1450,7 +1534,7 @@ fn validate_write_body_limits(
     Ok(())
 }
 
-fn publish_vault_advanced<A: SyncAuthenticator>(
+async fn publish_vault_advanced<A: SyncAuthenticator>(
     state: &SyncHttpState<A>,
     vault: storage::VaultId,
     seq: u64,
@@ -1460,23 +1544,23 @@ fn publish_vault_advanced<A: SyncAuthenticator>(
         vault,
         &api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(vault), seq },
         "vault_advanced",
-    );
+    )
+    .await;
 }
 
-fn publish_vault_notification<A: SyncAuthenticator>(
+async fn publish_vault_notification<A: SyncAuthenticator>(
     state: &SyncHttpState<A>,
     vault: storage::VaultId,
     event: &api::SyncNotification,
     event_type: &'static str,
 ) {
-    for device_id in state.notifications.active_devices() {
-        let recipient = AuthenticatedDevice { device_id };
-        if state.authenticator.authorize_notifications(recipient).is_err()
-            || state.authenticator.authorize(recipient, vault, SyncOperation::Read).is_err()
+    for recipient in state.notifications.active_devices() {
+        if state.authenticator.authorize_notifications(recipient).await.is_err()
+            || state.authenticator.authorize(recipient, vault, SyncOperation::Read).await.is_err()
         {
             continue;
         }
-        if state.notifications.publish(device_id, event).is_err() {
+        if state.notifications.publish(recipient, event).is_err() {
             tracing::warn!(event_type, "could not encode sync notification");
         }
     }
@@ -1494,7 +1578,8 @@ async fn ack<A: SyncAuthenticator>(
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Acknowledge, &instance)?;
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Acknowledge, &instance)
+            .await?;
     let body = to_bytes(body, MAX_ACK_REQUEST_BYTES)
         .await
         .map_err(|_| SyncHttpError::invalid(&instance, "acknowledgement request is too large"))?;
@@ -1502,8 +1587,8 @@ async fn ack<A: SyncAuthenticator>(
         SyncHttpError::invalid(&instance, format!("invalid acknowledgement: {error}"))
     })?;
     let cursor = state
-        .store
-        .ack_sync_cursor(vault, identity.device_id, request.cursor)
+        .authenticator
+        .commit_ack(identity, vault, request.cursor, &state.store)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?;
     Ok(cbor_response(api::SyncAckResponse { cursor }.to_cbor().map_err(|error| {
@@ -1511,7 +1596,7 @@ async fn ack<A: SyncAuthenticator>(
     })?))
 }
 
-fn authorize<A: SyncAuthenticator>(
+async fn authorize<A: SyncAuthenticator>(
     state: &SyncHttpState<A>,
     method: &Method,
     uri: &Uri,
@@ -1523,10 +1608,12 @@ fn authorize<A: SyncAuthenticator>(
     let identity = state
         .authenticator
         .authenticate(method, uri, headers)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, instance))?;
     state
         .authenticator
         .authorize(identity, vault, operation)
+        .await
         .map_err(|error| SyncHttpError::from_auth(error, instance))?;
     Ok(identity)
 }
@@ -1654,6 +1741,33 @@ impl SyncHttpError {
     #[allow(clippy::too_many_lines)]
     fn from_store(error: storage::SyncStoreError, instance: &str) -> Box<Self> {
         match error {
+            storage::SyncStoreError::AccessDenied => Self::known(
+                instance,
+                StatusCode::FORBIDDEN,
+                "policy.denied",
+                "Access denied",
+                "The device can no longer mutate this Personal vault; no data changed.",
+                false,
+                false,
+            ),
+            storage::SyncStoreError::AuthorizationUnavailable => Self::known(
+                instance,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sync.storage_unavailable",
+                "Sync service unavailable",
+                "The server could not verify current device access; no data changed and retry with a fresh proof.",
+                false,
+                true,
+            ),
+            storage::SyncStoreError::CommitOutcomeUnknown => Self::known(
+                instance,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sync.storage_unavailable",
+                "Sync outcome unknown",
+                "The server could not confirm the sync transaction; data may have changed. Keep local edits and keys, pull current state, and reconcile before another write. Do not automatically replay the batch or advance a cursor from this error.",
+                true,
+                false,
+            ),
             storage::SyncStoreError::VaultAlreadyExists => Self::known(
                 instance,
                 StatusCode::CONFLICT,
@@ -2067,10 +2181,15 @@ mod tests {
         fn account_id() -> key_storage::AccountId {
             [0, 0, 0, 0, 0, 0, 0x70, 0, 0x80, 0, 0, 0, 0, 0, 0, 42]
         }
+
+        fn identity(device_id: storage::DeviceId) -> AuthenticatedDevice {
+            AuthenticatedDevice { device_id, account_id: Self::account_id() }
+        }
     }
 
+    #[async_trait::async_trait]
     impl SyncAuthenticator for TestAuthenticator {
-        fn authenticate(
+        async fn authenticate(
             &self,
             method: &Method,
             uri: &Uri,
@@ -2093,16 +2212,17 @@ mod tests {
                 )
                 .expect("test auth failure"));
             }
-            Ok(AuthenticatedDevice { device_id: self.device_id })
+            Ok(AuthenticatedDevice { device_id: self.device_id, account_id: Self::account_id() })
         }
 
-        fn authorize(
+        async fn authorize(
             &self,
             identity: AuthenticatedDevice,
             vault: storage::VaultId,
             operation: SyncOperation,
         ) -> Result<(), AuthFailure> {
             if self.allowed
+                && identity.account_id == Self::account_id()
                 && !(operation == SyncOperation::Read
                     && self.denied_read == Some((identity.device_id, vault)))
             {
@@ -2119,7 +2239,7 @@ mod tests {
             }
         }
 
-        fn validate_write(
+        async fn validate_write(
             &self,
             _identity: AuthenticatedDevice,
             _vault: storage::VaultId,
@@ -2139,14 +2259,17 @@ mod tests {
             }
         }
 
-        fn account_id(
+        async fn account_id(
             &self,
             _identity: AuthenticatedDevice,
         ) -> Result<key_storage::AccountId, AuthFailure> {
             Ok(Self::account_id())
         }
 
-        fn authorize_session(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
+        async fn authorize_session(
+            &self,
+            _identity: AuthenticatedDevice,
+        ) -> Result<(), AuthFailure> {
             if self.allowed {
                 Ok(())
             } else {
@@ -2161,7 +2284,7 @@ mod tests {
             }
         }
 
-        fn authorize_keys(
+        async fn authorize_keys(
             &self,
             _identity: AuthenticatedDevice,
             _account_id: key_storage::AccountId,
@@ -2181,7 +2304,7 @@ mod tests {
             }
         }
 
-        fn validate_key_bundle_update(
+        async fn validate_key_bundle_update(
             &self,
             _identity: AuthenticatedDevice,
             _account_id: key_storage::AccountId,
@@ -2205,13 +2328,16 @@ mod tests {
             }
         }
 
-        fn authenticate_notification(
+        async fn authenticate_notification(
             &self,
             _uri: &Uri,
             first_message: &[u8],
         ) -> Result<AuthenticatedDevice, AuthFailure> {
             if first_message == b"notify-test-token" {
-                Ok(AuthenticatedDevice { device_id: self.device_id })
+                Ok(AuthenticatedDevice {
+                    device_id: self.device_id,
+                    account_id: Self::account_id(),
+                })
             } else {
                 Err(AuthFailure::new(
                     StatusCode::UNAUTHORIZED,
@@ -2224,11 +2350,14 @@ mod tests {
             }
         }
 
-        fn authorize_notifications(
+        async fn authorize_notifications(
             &self,
             identity: AuthenticatedDevice,
         ) -> Result<(), AuthFailure> {
-            if self.allowed && self.denied_notifications != Some(identity.device_id) {
+            if self.allowed
+                && identity.account_id == Self::account_id()
+                && self.denied_notifications != Some(identity.device_id)
+            {
                 Ok(())
             } else {
                 Err(AuthFailure::new(
@@ -2308,6 +2437,116 @@ mod tests {
         )
         .body(Body::from(batch.to_cbor().expect("encode write batch")))
         .expect("write request")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn sqlite_sync_failures_preserve_commit_phase_and_ack_no_ops() {
+        let (store, vault, device) = test_store().await;
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let object = Uuid::now_v7();
+        let batch = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                object_id: object,
+                base_seq: None,
+                payload: vec![1],
+                tombstone: false,
+            }],
+        };
+        store.ack_sync_cursor(vault, device, 0).await.expect("initial acknowledgement");
+        let response = app.clone().oneshot(write_request(vault, &batch)).await.expect("write");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        sqlx::raw_sql(
+            "CREATE TABLE commit_failure_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE commit_failure_child (
+               id INTEGER REFERENCES commit_failure_parent(id) DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE TRIGGER fail_sync_commit AFTER UPDATE ON sync_vaults
+             BEGIN INSERT INTO commit_failure_child (id) VALUES (1); END;",
+        )
+        .execute(store.pool())
+        .await
+        .expect("deferred commit failure fixture");
+        let updated_batch = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                base_seq: Some(1),
+                payload: vec![2],
+                ..batch.writes[0].clone()
+            }],
+        };
+        for request in [
+            write_request(vault, &updated_batch),
+            request_headers(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sync/v1/vaults/{}/ack", path(vault)))
+                    .header(header::CONTENT_TYPE, "application/cbor"),
+            )
+            .body(Body::from(SyncAckRequest { cursor: 1 }.to_cbor().expect("ACK")))
+            .expect("acknowledgement request"),
+        ] {
+            let response = app.clone().oneshot(request).await.expect("commit failure response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
+            let problem = ProblemDetails::from_cbor(&body).expect("CBOR problem");
+            assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+            assert!(problem.changed);
+            assert!(!problem.retryable);
+        }
+        let no_op = request_headers(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sync/v1/vaults/{}/ack", path(vault)))
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(SyncAckRequest { cursor: 0 }.to_cbor().expect("ACK")))
+        .expect("no-op request");
+        let response = app.clone().oneshot(no_op).await.expect("no-op commit failure response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
+        let problem = ProblemDetails::from_cbor(&body).expect("no-op problem");
+        assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+        assert!(!problem.changed);
+        assert!(problem.retryable);
+
+        sqlx::query("DROP TRIGGER fail_sync_commit")
+            .execute(store.pool())
+            .await
+            .expect("remove commit failure");
+        assert_eq!(
+            store.sync_versions(vault, object.into_bytes()).await.expect("versions").len(),
+            1
+        );
+        assert_eq!(store.ack_sync_cursor(vault, device, 0).await.expect("stored cursor"), 0);
+        sqlx::query(
+            "CREATE TRIGGER fail_sync_before_commit BEFORE UPDATE ON sync_vaults
+             BEGIN SELECT RAISE(ABORT, 'injected precommit failure'); END",
+        )
+        .execute(store.pool())
+        .await
+        .expect("precommit fixture");
+        let response = app
+            .clone()
+            .oneshot(write_request(vault, &updated_batch))
+            .await
+            .expect("precommit failure response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("body");
+        let problem = ProblemDetails::from_cbor(&body).expect("precommit problem");
+        assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+        assert!(!problem.changed);
+        assert!(problem.retryable);
+        sqlx::query("DROP TRIGGER fail_sync_before_commit")
+            .execute(store.pool())
+            .await
+            .expect("remove precommit failure");
+        let response = app
+            .clone()
+            .oneshot(write_request(vault, &updated_batch))
+            .await
+            .expect("retry after confirmed rollback");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
@@ -3711,10 +3950,10 @@ mod tests {
         let removed_reader = Uuid::now_v7().into_bytes();
         let revoked_reader = Uuid::now_v7().into_bytes();
         let hub = NotificationHub::default();
-        let mut admin_events = hub.subscribe(admin_device);
-        let mut remaining_events = hub.subscribe(remaining_reader);
-        let mut removed_events = hub.subscribe(removed_reader);
-        let mut revoked_events = hub.subscribe(revoked_reader);
+        let mut admin_events = hub.subscribe(TestAuthenticator::identity(admin_device));
+        let mut remaining_events = hub.subscribe(TestAuthenticator::identity(remaining_reader));
+        let mut removed_events = hub.subscribe(TestAuthenticator::identity(removed_reader));
+        let mut revoked_events = hub.subscribe(TestAuthenticator::identity(revoked_reader));
         let mut authenticator = TestAuthenticator::new(admin_device, true);
         authenticator.denied_read = Some((removed_reader, vault.into_bytes()));
         authenticator.denied_notifications = Some(revoked_reader);
@@ -3870,12 +4109,15 @@ mod tests {
 
         let event = api::SyncNotification::VaultAdvanced { vault: Uuid::now_v7(), seq: 4 };
         for _ in 0..100 {
-            if hub.receiver_count(device) == 1 {
+            if hub.receiver_count(TestAuthenticator::identity(device)) == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        assert_eq!(hub.publish(device, &event).expect("encode event"), 1);
+        assert_eq!(
+            hub.publish(TestAuthenticator::identity(device), &event).expect("encode event"),
+            1
+        );
         let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
             .await
             .expect("notification delivery timeout")
@@ -3900,9 +4142,13 @@ mod tests {
         let removed_reader = Uuid::now_v7().into_bytes();
         let revoked_reader = Uuid::now_v7().into_bytes();
         let hub = NotificationHub::default();
-        let mut writer_events = hub.subscribe(writer);
-        let mut removed_events = hub.subscribe(removed_reader);
-        let mut revoked_events = hub.subscribe(revoked_reader);
+        let mut writer_events = hub.subscribe(TestAuthenticator::identity(writer));
+        let mut removed_events = hub.subscribe(TestAuthenticator::identity(removed_reader));
+        let mut revoked_events = hub.subscribe(TestAuthenticator::identity(revoked_reader));
+        let mut foreign_events = hub.subscribe(AuthenticatedDevice {
+            device_id: writer,
+            account_id: Uuid::now_v7().into_bytes(),
+        });
         let mut authenticator = TestAuthenticator::new(writer, true);
         authenticator.denied_read = Some((removed_reader, first_vault));
         authenticator.denied_notifications = Some(revoked_reader);
@@ -3962,13 +4208,14 @@ mod tests {
             Ok(second_event)
         );
         assert!(matches!(revoked_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(foreign_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[tokio::test]
     async fn rejected_writes_never_notify_and_disconnected_receivers_do_not_fail_writes() {
         let (store, vault, writer) = test_store().await;
         let hub = NotificationHub::default();
-        let mut events = hub.subscribe(writer);
+        let mut events = hub.subscribe(TestAuthenticator::identity(writer));
         let app = router_with_notifications(
             store.clone(),
             TestAuthenticator::new(writer, true),

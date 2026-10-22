@@ -115,3 +115,9 @@ jobs:
         env:
           SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_device_auth_http_ci
         run: cargo test -p scoplen-server --lib --features postgres-integration device_auth::tests::postgres_real_http_device_refresh_and_jwks -- --exact
+      - name: Create isolated Personal sync authentication database
+        run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_personal_sync_ci'
+      - name: Check PostgreSQL public Personal sync authentication
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_personal_sync_ci
+        run: cargo test -p scoplen-server --lib --features postgres-integration personal_sync::tests::postgres_listener_personal_sync_authentication_and_denial -- --exact

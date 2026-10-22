@@ -9,8 +9,9 @@ use std::{
 };
 
 use scoplen_api::sync::SyncNotification;
-use scoplen_store::sync::DeviceId;
 use tokio::sync::broadcast;
+
+use crate::http::AuthenticatedDevice;
 
 const CHANNEL_CAPACITY: usize = 64;
 
@@ -22,31 +23,31 @@ const CHANNEL_CAPACITY: usize = 64;
 /// `LISTEN`/`NOTIFY`.
 #[derive(Clone, Debug, Default)]
 pub struct NotificationHub {
-    channels: Arc<Mutex<HashMap<DeviceId, broadcast::Sender<Vec<u8>>>>>,
+    channels: Arc<Mutex<HashMap<AuthenticatedDevice, broadcast::Sender<Vec<u8>>>>>,
 }
 
 impl NotificationHub {
     /// Subscribe one device to content-free event bytes.
     #[must_use]
-    pub fn subscribe(&self, device_id: DeviceId) -> broadcast::Receiver<Vec<u8>> {
+    pub fn subscribe(&self, identity: AuthenticatedDevice) -> broadcast::Receiver<Vec<u8>> {
         let mut channels = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         channels
-            .entry(device_id)
+            .entry(identity)
             .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0)
             .subscribe()
     }
 
     /// Return the number of active WebSocket receivers for one device.
-    pub fn receiver_count(&self, device_id: DeviceId) -> usize {
+    pub fn receiver_count(&self, identity: AuthenticatedDevice) -> usize {
         self.channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&device_id)
+            .get(&identity)
             .map_or(0, broadcast::Sender::receiver_count)
     }
 
     /// List connected devices for authorization before local publication.
-    pub(crate) fn active_devices(&self) -> Vec<DeviceId> {
+    pub(crate) fn active_devices(&self) -> Vec<AuthenticatedDevice> {
         let mut channels = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         channels.retain(|_, sender| sender.receiver_count() > 0);
         channels.keys().copied().collect()
@@ -62,7 +63,7 @@ impl NotificationHub {
     /// Returns the protocol codec error when the event cannot be encoded canonically.
     pub fn publish(
         &self,
-        device_id: DeviceId,
+        identity: AuthenticatedDevice,
         event: &SyncNotification,
     ) -> Result<usize, scoplen_api::sync::SyncCodecError> {
         let payload = event.to_cbor()?;
@@ -70,7 +71,7 @@ impl NotificationHub {
             .channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&device_id)
+            .get(&identity)
             .cloned();
         Ok(sender.map_or(0, |sender| sender.send(payload).unwrap_or(0)))
     }
@@ -81,11 +82,15 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn identity(device_id: [u8; 16]) -> AuthenticatedDevice {
+        AuthenticatedDevice { device_id, account_id: [4; 16] }
+    }
+
     #[tokio::test]
     async fn publishes_only_to_the_target_device() {
         let hub = NotificationHub::default();
-        let first_device = [1; 16];
-        let second_device = [2; 16];
+        let first_device = identity([1; 16]);
+        let second_device = identity([2; 16]);
         let mut first = hub.subscribe(first_device);
         let mut second = hub.subscribe(second_device);
         let event = SyncNotification::VaultAdvanced { vault: Uuid::now_v7(), seq: 4 };
@@ -102,19 +107,40 @@ mod tests {
     fn publishing_without_a_connection_is_a_noop() {
         let hub = NotificationHub::default();
         let event = SyncNotification::DeviceRevoked;
-        assert_eq!(hub.publish([3; 16], &event).expect("event encodes"), 0);
+        assert_eq!(hub.publish(identity([3; 16]), &event).expect("event encodes"), 0);
     }
 
     #[test]
     fn active_devices_excludes_closed_connections() {
         let hub = NotificationHub::default();
-        let first_device = [1; 16];
-        let second_device = [2; 16];
+        let first_device = identity([1; 16]);
+        let second_device = identity([2; 16]);
         let first = hub.subscribe(first_device);
         let _second = hub.subscribe(second_device);
         drop(first);
 
         assert_eq!(hub.active_devices(), vec![second_device]);
         assert_eq!(hub.receiver_count(first_device), 0);
+    }
+
+    #[tokio::test]
+    async fn isolates_different_accounts_with_the_same_device_id() {
+        let hub = NotificationHub::default();
+        let first = identity([1; 16]);
+        let other = AuthenticatedDevice { account_id: [5; 16], ..first };
+        let mut first_events = hub.subscribe(first);
+        let mut other_events = hub.subscribe(other);
+        let event = SyncNotification::DeviceRevoked;
+
+        assert_eq!(hub.publish(first, &event).expect("event encodes"), 1);
+        assert_eq!(
+            SyncNotification::from_cbor(&first_events.recv().await.expect("first event")),
+            Ok(event)
+        );
+        assert!(matches!(other_events.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        let active = hub.active_devices();
+        assert_eq!(active.len(), 2);
+        assert!(active.contains(&first));
+        assert!(active.contains(&other));
     }
 }
