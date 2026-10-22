@@ -10,6 +10,13 @@ Changes are recorded here for released or reviewable repository outcomes.
   without refunding quotas; failed embedded registration commits ceremony consumption, cooldown
   and denial audit together. The HTTP adapters and browser login/session remain incomplete.
 
+- Added an independent SQLite/PostgreSQL Operator access-token keyring and public
+  `GET /.well-known/operator-jwks.json`. Dedicated seeds, `operator-` key identifiers, and
+  purpose-bound encrypted envelopes prevent device-key reuse. Creation and 30-day rotation
+  commit with deployment audit events; retired keys remain public for seven days. KMS,
+  integrity, storage, or required audit failures return a non-cacheable 503 without partial
+  keys. Device JWKS stays independent. Updated all proto pins to `0c06293` and UUID to 1.28.0
+  in the lockfile for the shared Operator profile. Operator setup and sign-in are not mounted.
 - Added durable first-operator setup and real ES256 WebAuthn verification on SQLite and
   PostgreSQL. API initialization discloses a digest-only one-hour setup entitlement once after
   confirmed commit; restarts and background roles never reproduce or extend it. The local

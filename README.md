@@ -70,12 +70,18 @@ per-endpoint admission and cooldowns, same-transaction nonce consumption and tok
 absolute-expiry refresh families, single-use rotation and reuse revocation, and cross-instance
 DPoP replay claims on SQLite and PostgreSQL. Native refresh uses a JSON credential; browser
 refresh accepts only the scoped `HttpOnly` cookie with the exact trusted Origin and returns the
-rotated credential only in `Set-Cookie`. Independent Operator authentication storage now also
+rotated credential only in `Set-Cookie`. Independent Operator authentication storage also
 provides per-endpoint source, setup-digest, ceremony and verified-Operator admission, durable
 DPoP replay claims, and audit-atomic setup finish cooldown updates on both databases.
 Browser sign-in and control-plane authorization remain
-separate roadmap work. All server proto dependencies are pinned to `scoplen-proto@4a5d602` for
-the shared authentication, scope, and object-signature contracts.
+separate roadmap work. A dedicated Operator keyring uses independent Ed25519 seeds, `operator-`
+key identifiers, and purpose-bound encrypted envelopes, with the same audited 30-day rotation
+and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
+the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
+integrity, KMS validation, or a required audit write fails. Operator setup, sign-in, and
+invitation-issuance authorization remain separate roadmap work. All server proto dependencies
+are pinned to `scoplen-proto@0c06293` for the shared authentication, Operator token, scope, and
+object-signature contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key

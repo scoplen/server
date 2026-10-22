@@ -13,6 +13,7 @@ pub mod kms;
 pub mod object_storage;
 pub mod operator_admission;
 pub mod operator_setup;
+pub mod operator_token_keys;
 pub mod personal_admission;
 pub mod personal_enrollment;
 #[cfg(test)]
