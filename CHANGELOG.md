@@ -11,6 +11,13 @@ Changes are recorded here for released or reviewable repository outcomes.
   integrity, storage, or required audit failures return a non-cacheable 503 without partial
   keys. Device JWKS stays independent. Updated all proto pins to `0c06293` and UUID to 1.28.0
   in the lockfile for the shared Operator profile. Operator setup and sign-in are not mounted.
+
+- Added independent durable Operator authentication admission and DPoP replay claims on both
+  stores. Per-endpoint source, setup-digest, ceremony and authenticated-Operator windows enforce
+  quotas and bounded exponential cooldowns across replicas. Setup completion clears failures
+  without refunding quotas; failed embedded registration commits ceremony consumption, cooldown
+  and denial audit together. The HTTP adapters and browser login/session remain incomplete.
+
 - Added durable first-operator setup and real ES256 WebAuthn verification on SQLite and
   PostgreSQL. API initialization discloses a digest-only one-hour setup entitlement once after
   confirmed commit; restarts and background roles never reproduce or extend it. The local

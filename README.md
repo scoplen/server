@@ -78,7 +78,9 @@ the device JWKS remains separate. Both routes return a non-cacheable 503 if key 
 integrity, KMS validation, or a required audit write fails. Operator setup, sign-in, and
 invitation-issuance authorization remain separate roadmap work. All server proto dependencies
 are pinned to `scoplen-proto@0c06293` for the shared authentication, Operator token, scope, and
-object-signature contracts.
+object-signature contracts. Independent Operator authentication storage now also
+provides per-endpoint source, setup-digest, ceremony and verified-Operator admission, durable
+DPoP replay claims, and audit-atomic setup finish cooldown updates on both databases.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
