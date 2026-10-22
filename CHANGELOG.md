@@ -4,6 +4,17 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted the enrolled-device Personal sync routes on the API listener for SQLite and PostgreSQL.
+  Requests verify signed device tokens, method/path/access-token-bound DPoP proofs, durable replay
+  claims, current certificates, route scopes, and vault ownership. Object writes verify device
+  signatures; writes and acknowledgements recheck authorization inside the mutation transaction.
+  Configured body and write-rate limits apply across connections, including TLS listeners.
+  Object and business-state ACK commits with an unconfirmed result return 503 with `changed: true`
+  and `retryable: false`; precommit failures and no-op ACK failures preserve no-change retry semantics.
+  SQLite deferred-commit and PostgreSQL lost-acknowledgement regressions exercise these distinctions.
+  Notification fan-out preserves each authenticated account/device identity. Shared mutations,
+  account-key updates, and production notifications
+  remain unmounted.
 - Centralized SQLite integration-fixture cleanup with a ten-second deadline for Windows
   sharing and lock violations after connection-pool shutdown. Other cleanup errors still fail
   immediately. A real exclusive Windows file handle held beyond the former one-second budget

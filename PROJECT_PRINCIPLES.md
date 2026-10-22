@@ -18,13 +18,15 @@ self-hosted server, host agent, administration CLI, and web console.
 
 - ACME TLS-ALPN-01 issuance and renewal are integrated; live CA issuance and renewal have not been
   verified against an external authority.
-- SQLite migration, transaction, initial sync storage, an atomic retention primitive, a durable
-  leased job queue with worker lease cleanup, and an explicitly authenticated K-4 HTTP/CBOR adapter
-  exist. The baseline listener does not mount the adapter until production identity is available.
-  Membership-aware purge scheduling, production identity, policy, certificate, gateway, audit,
-  agent, CLI, and console behavior remain on the roadmap. The worker can use the PostgreSQL query
-  backend; API and edge can start with PostgreSQL and check its readiness. The authenticated sync
-  router accepts either database backend through injection but remains unmounted.
+- SQLite migrations, transactions, sync storage, an atomic retention primitive, and a durable
+  leased job queue with worker lease cleanup exist. The API listener mounts the Personal K-4
+  subset on SQLite or PostgreSQL with enrolled-device tokens, durable DPoP replay protection,
+  current certificates, scopes, vault ownership, signed envelopes, and transaction-local write
+  authorization. Configured rate and body limits apply across connections. Shared-vault mutations,
+  account-key updates, and production notifications remain unmounted. First-operator setup,
+  invitation issuance, complete identity and policy workflows, membership-aware purge scheduling,
+  certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
+  can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.
 - Deployment, backup/restore, upgrade, and release artifacts require their own validated gates.
 
 ## Review

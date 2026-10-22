@@ -7,9 +7,10 @@ rust-version.workspace = true
 description = "Scoplen encrypted synchronization service."
 
 [dependencies]
+async-trait = "0.1.92"
 axum.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "26699ff" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3" }
 scoplen-store = { path = "../scoplen-store" }
 semver.workspace = true
 tokio.workspace = true
@@ -21,6 +22,7 @@ futures-util = "0.3.34"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio-tungstenite = "0.26.2"
 tower = "0.5.2"
+url = "2.5.8"
 
 [features]
 postgres-integration = []

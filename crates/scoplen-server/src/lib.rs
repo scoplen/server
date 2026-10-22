@@ -7,6 +7,7 @@ mod config;
 mod device_auth;
 mod error;
 mod personal_enrollment;
+mod personal_sync;
 mod private_material;
 mod roles;
 mod runtime;

@@ -292,11 +292,12 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
-struct CurrentPrincipal {
-    account_id: [u8; 16],
-    device_id: [u8; 16],
-    signing_public_key: Vec<u8>,
-    jkt: String,
+/// Current enrolled device state after certificate publication and revocation checks.
+pub struct CurrentPrincipal {
+    pub account_id: [u8; 16],
+    pub device_id: [u8; 16],
+    pub signing_public_key: Vec<u8>,
+    pub jkt: String,
 }
 
 struct RefreshFamily {
@@ -519,7 +520,7 @@ fn sign_response(
     Ok((response, digest))
 }
 
-async fn load_sqlite_principal(
+pub(crate) async fn load_sqlite_principal(
     tx: &mut Transaction<'_, Sqlite>,
     device_id: [u8; 16],
 ) -> Result<Option<CurrentPrincipal>, DeviceAuthenticationError> {
@@ -559,7 +560,7 @@ async fn load_sqlite_principal(
     .map(Some)
 }
 
-async fn load_postgres_principal(
+pub(crate) async fn load_postgres_principal(
     tx: &mut Transaction<'_, Postgres>,
     device_id: [u8; 16],
     lock_identity: bool,
@@ -602,7 +603,7 @@ async fn load_postgres_principal(
     .map(Some)
 }
 
-async fn lock_postgres_account_key_state(
+pub(crate) async fn lock_postgres_account_key_state(
     tx: &mut Transaction<'_, Postgres>,
     account_id: &[u8; 16],
 ) -> Result<(), DeviceAuthenticationError> {
@@ -689,6 +690,21 @@ async fn deny_postgres_refresh(
 }
 
 impl SqliteStore {
+    /// Load the current enrolled device; a revoked or unpublished certificate is denied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the current certificate or transaction cannot be read.
+    pub async fn current_device_principal(
+        &self,
+        device_id: [u8; 16],
+    ) -> Result<Option<CurrentPrincipal>, DeviceAuthenticationError> {
+        let mut tx = self.pool().begin().await?;
+        let principal = load_sqlite_principal(&mut tx, device_id).await?;
+        tx.commit().await?;
+        Ok(principal)
+    }
+
     /// Charge a source before parsing an authentication request body.
     ///
     /// # Errors
@@ -1158,6 +1174,21 @@ async fn clear_sqlite_bucket(
 }
 
 impl PostgresStore {
+    /// Load the current enrolled device; a revoked or unpublished certificate is denied.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if the current certificate or transaction cannot be read.
+    pub async fn current_device_principal(
+        &self,
+        device_id: [u8; 16],
+    ) -> Result<Option<CurrentPrincipal>, DeviceAuthenticationError> {
+        let mut tx = self.pool().begin().await?;
+        let principal = load_postgres_principal(&mut tx, device_id, false).await?;
+        tx.commit().await?;
+        Ok(principal)
+    }
+
     /// Charge a source before parsing an authentication request body.
     ///
     /// # Errors

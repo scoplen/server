@@ -41,7 +41,12 @@ shared-vault membership and opaque epoch-1 key wrap, adds and removes members wi
 opaque wraps, validates account-key signatures and active-device wraps, and validates encrypted
 envelopes before storage. The caller selects a SQLite or PostgreSQL store for the entire
 authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR against PostgreSQL
-17; the baseline listener does not mount either backend without production identity. The
+17. The API listener now mounts only the Personal session, account-key read, vault-key read,
+changes, snapshot, version read, signed object write, and ACK routes. It verifies the enrolled
+device token, exact method/path/ath DPoP proof, durable replay claim, current device certificate,
+required scope, and Personal vault ownership. Writes verify the envelope signature and current
+key epoch; writes and ACKs recheck authorization inside the storage transaction. Shared-vault
+mutations, account-key updates, and notifications remain unmounted. The
 `scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
@@ -65,15 +70,15 @@ per-endpoint admission and cooldowns, same-transaction nonce consumption and tok
 absolute-expiry refresh families, single-use rotation and reuse revocation, and cross-instance
 DPoP replay claims on SQLite and PostgreSQL. Native refresh uses a JSON credential; browser
 refresh accepts only the scoped `HttpOnly` cookie with the exact trusted Origin and returns the
-rotated credential only in `Set-Cookie`. Browser sign-in and protected-route authorization remain
-separate roadmap work. All server proto dependencies are pinned to `scoplen-proto@26699ff` for
-the shared authentication and scope contracts.
+rotated credential only in `Set-Cookie`. Browser sign-in and control-plane authorization remain
+separate roadmap work. All server proto dependencies are pinned to `scoplen-proto@4a5d602` for
+the shared authentication, scope, and object-signature contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. Production identity
-and authentication, policy filtering, membership-aware purge orchestration, multi-instance
+backend and include it in `/readyz`. Browser sign-in, complete control-plane policy filtering,
+membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
 roadmap work. The audit crate and SQLite/PostgreSQL stores provide bounded canonical-event SHA-256
@@ -92,6 +97,13 @@ the K-4 bounds, it returns `503 sync.storage_unavailable` instead of an incomple
 Authenticated change, snapshot, object-version, account-key, and vault-key reads also return
 `503 sync.storage_unavailable` when persisted data cannot form a valid complete response; malformed
 caller input retains its request error and no partial success body is sent.
+Object writes and business-state ACK commits return that same status and code with `changed: true`
+and `retryable: false` when COMMIT was attempted without a confirmed result. A confirmed precommit
+failure, or failure to close an idempotent ACK no-op, uses `changed: false` and `retryable: true`.
+Clients keep their local edits and keys, do not advance a cursor from an uncertain response, and
+pull current state for merge/CAS reconciliation before another object write instead of replaying
+the batch automatically. SQLite deferred-commit failures and PostgreSQL committed writes and ACKs
+with deliberately withheld acknowledgements cover these paths through the HTTP/CBOR adapter.
 The SQLite and PostgreSQL sync stores enforce configured current-object, shared-vault-per-account,
 and member-per-vault cardinality limits in mutation transactions. Defaults are 100,000 current
 objects per vault (including tombstones), 1,000
@@ -122,8 +134,8 @@ settings. Other route body limits and multi-instance rate admission remain roadm
 The SQLite and PostgreSQL stores atomically provision one personal vault per account with an opaque
 ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
 vault and current shared memberships. The authenticated K-4 vault-key route delivers that key only
-to its owner using the shared `{keys}` response shape on either backend. Enrollment wiring,
-production identity, and personal-key rotation remain open.
+to its owner using the shared `{keys}` response shape on either backend. Personal enrollment and
+device authentication use these primitives; personal-key rotation remains open.
 Both stores also atomically create a shared vault with its admin membership and epoch-one wrap,
 list current shared memberships in vault-id order, and return only a member's non-retired wraps.
 Both stores publish the next epoch for exactly the current member set, add members with every
@@ -138,7 +150,8 @@ vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also suppo
 batches with gap-free vault sequences, current change and full-reconciliation snapshot pages from
 one read transaction, bounded retained-version reads, and monotone device acknowledgements. The
 runtime passes the configured object limit to that writer. The injected sync HTTP adapter selects
-SQLite or PostgreSQL consistently for all K-4 routes; the baseline listener does not mount it.
+SQLite or PostgreSQL consistently for all K-4 routes; the API listener mounts the Personal subset
+described above.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
@@ -222,7 +235,8 @@ listener returns no-store JSON and RFC 9457 problems. Device and refresh admissi
 across API instances; a verified spent-token reuse revokes its 30-day family. A refresh response
 whose commit cannot be confirmed requires a new device challenge instead of retrying the old
 credential. `GET /.well-known/jwks.json` publishes only the active and unexpired overlap public
-token keys. These routes do not yet authorize the protected sync or control-plane APIs.
+token keys. The protected Personal sync subset above uses these credentials; control-plane APIs
+are not yet mounted.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
@@ -235,17 +249,17 @@ checks both the database and the configured object-storage backend.
 Set the three `[sync]` cardinality values in `spl-server.example.toml` or override them with
 `SPL_SYNC_MAX_OBJECTS_PER_VAULT`, `SPL_SYNC_MAX_SHARED_VAULTS_PER_ACCOUNT`, and
 `SPL_SYNC_MAX_MEMBERS_PER_SHARED_VAULT`. Values must be positive; object and account limits must fit
-SQLite's signed count range, and the member limit must be at most 1,000. The baseline listener does
-not mount the K-4 router until production identity is available.
+SQLite's signed count range, and the member limit must be at most 1,000.
 Set `sync.write_requests_per_second` and `sync.write_burst` in the same file, or use
 `SPL_SYNC_WRITE_REQUESTS_PER_SECOND` and `SPL_SYNC_WRITE_BURST`. Both values must be positive. The
-authenticated K-4 router takes the validated write-rate settings when it is mounted; limits are
-enforced per process until shared admission is implemented.
+mounted Personal sync router uses the validated write-rate settings. Limits are enforced per
+process until shared admission is implemented; connections share the same buckets on plain HTTP,
+configured-certificate TLS, and ACME TLS listeners.
 Set `sync.max_envelope_bytes`, `sync.max_batch_objects`, and `sync.max_batch_bytes` in the same file,
 or use `SPL_SYNC_MAX_ENVELOPE_BYTES`, `SPL_SYNC_MAX_BATCH_OBJECTS`, and
 `SPL_SYNC_MAX_BATCH_BYTES`. Each must be positive and no greater than its default: 266,240 bytes,
 500 objects, and 4,194,304 encoded bytes respectively. The authenticated K-4 router takes these
-validated write bounds when mounted.
+validated write bounds on the mounted Personal sync routes.
 
 ## Security
 

@@ -3348,7 +3348,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=26699ff#26699ffcb3a90cdb8cd787a4f5bae7ea14df2401"
+source = "git+https://github.com/scoplen/proto.git?rev=4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3#4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -3386,7 +3386,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=26699ff#26699ffcb3a90cdb8cd787a4f5bae7ea14df2401"
+source = "git+https://github.com/scoplen/proto.git?rev=4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3#4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3434,7 +3434,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=26699ff#26699ffcb3a90cdb8cd787a4f5bae7ea14df2401"
+source = "git+https://github.com/scoplen/proto.git?rev=4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3#4a5d6026fb72cd8dbb2346db60cb16d7266a9ab3"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -3445,6 +3445,7 @@ dependencies = [
 name = "scoplen-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "clap",
  "ed25519-dalek 2.2.0",
@@ -3459,6 +3460,7 @@ dependencies = [
  "scoplen-audit",
  "scoplen-crypto",
  "scoplen-identity",
+ "scoplen-model",
  "scoplen-store",
  "scoplen-sync",
  "serde",
@@ -3502,6 +3504,7 @@ dependencies = [
 name = "scoplen-sync"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "futures-util",
  "scoplen-api",
@@ -3513,6 +3516,7 @@ dependencies = [
  "tokio-tungstenite 0.26.2",
  "tower",
  "tracing",
+ "url",
  "uuid",
 ]
 
