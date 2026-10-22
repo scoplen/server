@@ -4,6 +4,8 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Updated `rustls-webpki` to 0.103.16 and both `webpki-roots` and `webpki-root-certs` to 1.0.10,
+  fixing RUSTSEC-2026-0382, RUSTSEC-2026-0381, and RUSTSEC-2026-0383 for TLS certificate trust.
 - Mounted the enrolled-device Personal sync routes on the API listener for SQLite and PostgreSQL.
   Requests verify signed device tokens, method/path/access-token-bound DPoP proofs, durable replay
   claims, current certificates, route scopes, and vault ownership. Object writes verify device
