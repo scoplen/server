@@ -33,6 +33,7 @@ use scoplen_store::{
     },
     device_token_keys::{DeviceTokenKeyError, DeviceTokenKeyring},
     kms::LocalKeyFile,
+    operator_token_keys::{OperatorTokenKeyError, OperatorTokenKeyring},
 };
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
@@ -130,6 +131,16 @@ impl AuthBackend {
         }
     }
 
+    pub(crate) async fn operator_keyring(
+        &self,
+        kms: &LocalKeyFile,
+    ) -> Result<OperatorTokenKeyring, OperatorTokenKeyError> {
+        match self {
+            Self::Sqlite(store) => store.ensure_operator_token_keyring(kms).await,
+            Self::Postgres(store) => store.ensure_operator_token_keyring(kms).await,
+        }
+    }
+
     pub(crate) async fn current_principal(
         &self,
         device_id: [u8; 16],
@@ -199,6 +210,7 @@ pub(crate) fn router(
         .route("/api/v1/auth/device", post(device))
         .route("/api/v1/auth/refresh", post(refresh).options(refresh_options))
         .route("/.well-known/jwks.json", get(jwks))
+        .route("/.well-known/operator-jwks.json", get(operator_jwks))
         .with_state(state)
 }
 
@@ -719,6 +731,42 @@ async fn refresh_options(State(state): State<Arc<AuthState>>, request: Request<B
 async fn jwks(State(state): State<Arc<AuthState>>) -> Response {
     let request_id = Uuid::new_v4().to_string();
     let keyring = match state.backend.keyring(&state.kms).await {
+        Ok(value) => value,
+        Err(_) => {
+            return problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.storage_unavailable",
+                false,
+                true,
+                &request_id,
+                None,
+            );
+        }
+    };
+    let document = keyring
+        .verification_keys()
+        .iter()
+        .map(|key| AuthJwk::new(&key.kid, key.public_key))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(AuthJwks::new)
+        .and_then(|value| value.to_json());
+    match document {
+        Ok(body) => response(StatusCode::OK, "application/json", body),
+        Err(_) => problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "auth.storage_unavailable",
+            false,
+            true,
+            &request_id,
+            None,
+        ),
+    }
+}
+
+#[allow(clippy::manual_let_else)]
+async fn operator_jwks(State(state): State<Arc<AuthState>>) -> Response {
+    let request_id = Uuid::new_v4().to_string();
+    let keyring = match state.backend.operator_keyring(&state.kms).await {
         Ok(value) => value,
         Err(_) => {
             return problem(
@@ -1847,6 +1895,165 @@ mod tests {
         );
         assert!(!limited.body_text().contains("127.0.0.1"));
         cleanup(store, server, directory).await;
+    }
+
+    fn checked_operator_jwks(reply: &HttpReply) -> AuthJwks {
+        assert_eq!(reply.status, 200, "{}", reply.body_text());
+        assert_eq!(reply.header("content-type"), Some("application/json"));
+        assert_eq!(reply.header("cache-control"), Some("no-store"));
+        assert!(reply.body.len() <= 4_096);
+        let document: serde_json::Value = serde_json::from_slice(&reply.body).expect("JWKS JSON");
+        for key in document["keys"].as_array().expect("keys") {
+            let mut fields =
+                key.as_object().expect("public JWK").keys().map(String::as_str).collect::<Vec<_>>();
+            fields.sort_unstable();
+            assert_eq!(fields, ["alg", "crv", "kid", "kty", "use", "x"]);
+        }
+        let keys = AuthJwks::from_json(&reply.body).expect("bounded public JWKS");
+        assert!(keys.keys().iter().all(|key| key.kid().starts_with("operator-")));
+        assert!(keys.keys().windows(2).all(|pair| pair[0].kid() < pair[1].kid()));
+        keys
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn sqlite_real_http_operator_jwks_isolated_rotation_and_failure() {
+        let directory = directory();
+        let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("store");
+        let kms = key_management(&directory);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let backend = AuthBackend::Sqlite(Arc::new(store.clone()));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(ORIGIN.into(), backend, kms)
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve Operator JWKS");
+        });
+        sqlx::query("CREATE TRIGGER fail_operator_audit BEFORE INSERT ON deployment_audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+            .execute(store.pool()).await.expect("fail audit");
+        http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await.problem(
+            503,
+            "auth.storage_unavailable",
+            false,
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operator_access_token_keys")
+            .fetch_one(store.pool())
+            .await
+            .expect("rolled back key count");
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER fail_operator_audit")
+            .execute(store.pool())
+            .await
+            .expect("restore audit");
+        let initial = http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await;
+        let original = checked_operator_jwks(&initial);
+        assert_eq!(original.keys().len(), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_access_token_keys")
+            .fetch_one(store.pool())
+            .await
+            .expect("device key count");
+        assert_eq!(count, 0);
+        let same = http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await;
+        assert_eq!(same.body, initial.body);
+        let device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
+        assert_eq!(device.status, 200);
+        let device_keys = AuthJwks::from_json(&device.body).expect("device JWKS");
+        assert_eq!(device_keys.keys().len(), 1);
+        assert_ne!(device_keys.keys()[0].public_key(), original.keys()[0].public_key());
+        assert_eq!(device_keys.keys()[0].kid().len(), 32);
+        let old_at = i64::try_from(now_seconds()).expect("clock") * 1_000
+            - 30 * 24 * 60 * 60 * 1_000
+            - 1_000;
+        sqlx::query("UPDATE operator_access_token_keys SET activated_at_ms = ?")
+            .bind(old_at)
+            .execute(store.pool())
+            .await
+            .expect("age Operator key");
+        sqlx::query("CREATE TRIGGER fail_operator_audit BEFORE INSERT ON deployment_audit_events BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END")
+            .execute(store.pool()).await.expect("fail rotation audit");
+        http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await.problem(
+            503,
+            "auth.storage_unavailable",
+            false,
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operator_access_token_keys")
+            .fetch_one(store.pool())
+            .await
+            .expect("rotation rolled back");
+        assert_eq!(count, 1);
+        sqlx::query("DROP TRIGGER fail_operator_audit")
+            .execute(store.pool())
+            .await
+            .expect("restore rotation audit");
+        let rotated = http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await;
+        let rotated = checked_operator_jwks(&rotated);
+        assert_eq!(rotated.keys().len(), 2);
+        assert!(rotated.keys().iter().any(|key| key.kid() == original.keys()[0].kid()));
+        sqlx::query("UPDATE operator_access_token_keys SET encrypted_seed = zeroblob(73) WHERE active_slot = 1")
+            .execute(store.pool()).await.expect("corrupt Operator envelope");
+        http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await.problem(
+            503,
+            "auth.storage_unavailable",
+            false,
+        );
+        let healthy_device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
+        assert_eq!(healthy_device.status, 200);
+        assert_eq!(healthy_device.body, device.body);
+        cleanup(store, server, directory).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_real_http_operator_jwks_isolated_and_fail_closed() {
+        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let directory = directory();
+        let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+        let kms = key_management(&directory);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let backend = AuthBackend::Postgres(Arc::new(store.clone()));
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(ORIGIN.into(), backend, kms)
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("serve PostgreSQL Operator JWKS");
+        });
+        let initial = http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await;
+        let keys = checked_operator_jwks(&initial);
+        assert_eq!(keys.keys().len(), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_access_token_keys")
+            .fetch_one(store.pool())
+            .await
+            .expect("device key count");
+        assert_eq!(count, 0, "use an isolated PostgreSQL integration database");
+        let device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
+        assert_eq!(device.status, 200);
+        let device_keys = AuthJwks::from_json(&device.body).expect("device JWKS");
+        assert_eq!(device_keys.keys().len(), 1);
+        assert_ne!(keys.keys()[0].public_key(), device_keys.keys()[0].public_key());
+        sqlx::query("UPDATE operator_access_token_keys SET encrypted_seed = decode(repeat('00', 73), 'hex') WHERE active_slot = 1")
+            .execute(store.pool()).await.expect("corrupt Operator envelope");
+        http(address, "GET", "/.well-known/operator-jwks.json", "", &[]).await.problem(
+            503,
+            "auth.storage_unavailable",
+            false,
+        );
+        let healthy_device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
+        assert_eq!(healthy_device.status, 200);
+        assert_eq!(healthy_device.body, device.body);
+        server.abort();
+        let _ = server.await;
+        store.pool().close().await;
+        drop(store);
+        std::fs::remove_dir_all(directory).expect("remove test KMS directory");
     }
 
     #[cfg(feature = "postgres-integration")]

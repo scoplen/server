@@ -271,6 +271,54 @@ const DEVICE_ACCESS_TOKEN_KEYS: TableSpec = TableSpec {
     }],
 };
 
+const OPERATOR_ACCESS_TOKEN_KEYS: TableSpec = TableSpec {
+    name: "operator_access_token_keys",
+    columns: &[
+        ColumnSpec { name: "kid", kind: LogicalType::Text, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "encrypted_seed",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "activated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retired_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "verify_until_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "active_slot",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "operator_access_token_keys_one_active",
+        columns: &["active_slot"],
+    }],
+};
+
 const SYNC_VAULTS: TableSpec = TableSpec {
     name: "sync_vaults",
     columns: &[
@@ -1250,6 +1298,7 @@ const TABLES: &[TableSpec] = &[
     DEPLOYMENT_AUDIT_EVENTS,
     DEPLOYMENT_AUDIT_CHECKPOINTS,
     DEVICE_ACCESS_TOKEN_KEYS,
+    OPERATOR_ACCESS_TOKEN_KEYS,
     DEVICE_AUTH_CHALLENGES,
     DEVICE_REFRESH_FAMILIES,
     DEVICE_REFRESH_TOKENS,
@@ -1647,6 +1696,8 @@ mod tests {
         include_str!("../migrations/sqlite/20261020020000_personal_admission.sql");
     const SQLITE_DEVICE_TOKEN_KEYS: &str =
         include_str!("../migrations/sqlite/20261020030000_device_token_keys.sql");
+    const SQLITE_OPERATOR_TOKEN_KEYS: &str =
+        include_str!("../migrations/sqlite/20261022060000_operator_token_keys.sql");
     const SQLITE_DEVICE_AUTHENTICATION: &str =
         include_str!("../migrations/sqlite/20261020040000_device_authentication.sql");
     const POSTGRES_ORGANIZATIONS: &str =
@@ -1671,6 +1722,8 @@ mod tests {
         include_str!("../migrations/postgres/20261020020000_personal_admission.sql");
     const POSTGRES_DEVICE_TOKEN_KEYS: &str =
         include_str!("../migrations/postgres/20261020030000_device_token_keys.sql");
+    const POSTGRES_OPERATOR_TOKEN_KEYS: &str =
+        include_str!("../migrations/postgres/20261022060000_operator_token_keys.sql");
     const POSTGRES_DEVICE_AUTHENTICATION: &str =
         include_str!("../migrations/postgres/20261020040000_device_authentication.sql");
 
@@ -1708,6 +1761,7 @@ mod tests {
             SQLITE_PERSONAL_ADMISSION,
             SQLITE_DEVICE_TOKEN_KEYS,
             SQLITE_DEVICE_AUTHENTICATION,
+            SQLITE_OPERATOR_TOKEN_KEYS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -1723,6 +1777,7 @@ mod tests {
             POSTGRES_PERSONAL_ADMISSION,
             POSTGRES_DEVICE_TOKEN_KEYS,
             POSTGRES_DEVICE_AUTHENTICATION,
+            POSTGRES_OPERATOR_TOKEN_KEYS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -1772,7 +1827,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 13);
+        assert_eq!(migration_count, 14);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -1781,7 +1836,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 13);
+        assert_eq!(replay_count, 14);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

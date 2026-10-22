@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added an independent SQLite/PostgreSQL Operator access-token keyring and public
+  `GET /.well-known/operator-jwks.json`. Dedicated seeds, `operator-` key identifiers, and
+  purpose-bound encrypted envelopes prevent device-key reuse. Creation and 30-day rotation
+  commit with deployment audit events; retired keys remain public for seven days. KMS,
+  integrity, storage, or required audit failures return a non-cacheable 503 without partial
+  keys. Device JWKS stays independent. Updated all proto pins to `0c06293` and UUID to 1.28.0
+  in the lockfile for the shared Operator profile. Operator setup and sign-in are not mounted.
 - Updated `rustls-webpki` to 0.103.16 and both `webpki-roots` and `webpki-root-certs` to 1.0.10,
   fixing RUSTSEC-2026-0382, RUSTSEC-2026-0381, and RUSTSEC-2026-0383 for TLS certificate trust.
 - Mounted the enrolled-device Personal sync routes on the API listener for SQLite and PostgreSQL.
