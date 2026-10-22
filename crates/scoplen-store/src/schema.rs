@@ -1291,6 +1291,26 @@ const DEVICE_AUTH_ADMISSION: TableSpec = TableSpec {
     }],
 };
 
+const OPERATOR_AUTH_ADMISSION: TableSpec = TableSpec {
+    name: "operator_auth_admission",
+    columns: DEVICE_AUTH_ADMISSION.columns,
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "operator_auth_admission_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
+const OPERATOR_DPOP_REPLAYS: TableSpec = TableSpec {
+    name: "operator_dpop_replays",
+    columns: DEVICE_DPOP_REPLAYS.columns,
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "operator_dpop_replays_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
 const DEPLOYMENT_OPERATORS: TableSpec = TableSpec {
     name: "deployment_operators",
     columns: &[
@@ -1498,6 +1518,8 @@ const OPERATOR_CEREMONIES: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    OPERATOR_AUTH_ADMISSION,
+    OPERATOR_DPOP_REPLAYS,
     DEPLOYMENT_OPERATORS,
     OPERATOR_CREDENTIALS,
     OPERATOR_SETUP,
@@ -1910,6 +1932,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261022060000_operator_token_keys.sql");
     const SQLITE_OPERATOR_SETUP: &str =
         include_str!("../migrations/sqlite/20261022000000_operator_setup.sql");
+    const SQLITE_OPERATOR_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261022070000_operator_admission.sql");
+    const POSTGRES_OPERATOR_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261022070000_operator_admission.sql");
     const POSTGRES_OPERATOR_SETUP: &str =
         include_str!("../migrations/postgres/20261022000000_operator_setup.sql");
     const SQLITE_DEVICE_AUTHENTICATION: &str =
@@ -1976,6 +2002,7 @@ mod tests {
             SQLITE_DEVICE_TOKEN_KEYS,
             SQLITE_DEVICE_AUTHENTICATION,
             SQLITE_OPERATOR_SETUP,
+            SQLITE_OPERATOR_ADMISSION,
             SQLITE_OPERATOR_TOKEN_KEYS,
         ];
         let postgres = [
@@ -1993,6 +2020,7 @@ mod tests {
             POSTGRES_DEVICE_TOKEN_KEYS,
             POSTGRES_DEVICE_AUTHENTICATION,
             POSTGRES_OPERATOR_SETUP,
+            POSTGRES_OPERATOR_ADMISSION,
             POSTGRES_OPERATOR_TOKEN_KEYS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
@@ -2043,7 +2071,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 15);
+        assert_eq!(migration_count, 16);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2052,7 +2080,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 15);
+        assert_eq!(replay_count, 16);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

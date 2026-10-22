@@ -13,8 +13,13 @@ use scoplen_identity::operator_passkeys::{
 };
 use scoplen_store::{
     RelationalStore, SqliteStore,
+    operator_admission::{
+        OperatorAuthEndpoint as Endpoint, OperatorAuthFailureReason as Reason,
+        OperatorPrivateBucket as Private,
+    },
     operator_setup::{OperatorRegistration, OperatorSetupError, SetupDisclosure},
 };
+use sha2::{Digest as _, Sha256};
 use sqlx::Row;
 use webauthn_authenticator_rs::prelude::Url;
 
@@ -62,6 +67,7 @@ macro_rules! lifecycle {
             .expect("real software passkey");
         let binding = jkt();
         let make_input = |ceremony_id| OperatorRegistration {
+            source: "192.0.2.70".parse().expect("source"),
             setup_token: &old,
             ceremony_id,
             browser_jkt: &binding,
@@ -78,6 +84,24 @@ macro_rules! lifecycle {
             Err(OperatorSetupError::WrongKey)
         ));
         input.browser_jkt = &binding;
+        let digest: [u8; 32] = Sha256::digest(old).into();
+        store
+            .admit_operator_auth_source(Endpoint::SetupFinish, input.source)
+            .await
+            .expect("admission");
+        store
+            .admit_operator_auth_private(Endpoint::SetupFinish, Private::SetupDigest(&digest))
+            .await
+            .expect("private admission");
+        store
+            .audit_operator_auth_failure(
+                Endpoint::SetupFinish,
+                Reason::AuthenticationDenied,
+                input.source,
+                Some(Private::SetupDigest(&digest)),
+            )
+            .await
+            .expect("prior failed attempt");
         let replica = store.clone();
         let (first, second) = tokio::join!(
             store.finish_operator_setup(&input, &verifier),
@@ -89,6 +113,17 @@ macro_rules! lifecycle {
             results => panic!("exactly one concurrent setup must succeed: {results:?}"),
         };
         assert_eq!(operator.get_version_num(), 7);
+        let admission: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT attempts, failure_streak FROM operator_auth_admission ORDER BY kind",
+        )
+        .fetch_all(store.pool())
+        .await
+        .expect("success clears streak atomically");
+        assert_eq!(
+            admission,
+            vec![(1, 0), (1, 0)],
+            "successful finish clears failures without refunding quota"
+        );
         assert!(matches!(
             store.finish_operator_setup(&input, &verifier).await,
             Err(OperatorSetupError::Denied { consumed: false })
@@ -181,6 +216,7 @@ async fn sqlite_bad_embedded_response_consumes_only_ceremony_and_audit_is_atomic
     let options =
         store.operator_setup_options(&secret, &binding, &verifier).await.expect("options");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,
@@ -204,6 +240,11 @@ async fn sqlite_bad_embedded_response_consumes_only_ceremony_and_audit_is_atomic
         .await
         .expect("read ceremony");
     assert!(consumed.is_none());
+    let admission: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operator_auth_admission")
+        .fetch_one(store.pool())
+        .await
+        .expect("rolled back cooldown");
+    assert_eq!(admission, 0);
     sqlx::query("DROP TRIGGER deny_operator_audit")
         .execute(store.pool())
         .await
@@ -212,6 +253,12 @@ async fn sqlite_bad_embedded_response_consumes_only_ceremony_and_audit_is_atomic
         store.finish_operator_setup(&input, &verifier).await,
         Err(OperatorSetupError::Denied { consumed: true })
     ));
+    let streaks: Vec<i64> =
+        sqlx::query_scalar("SELECT failure_streak FROM operator_auth_admission")
+            .fetch_all(store.pool())
+            .await
+            .expect("same-transaction cooldown");
+    assert_eq!(streaks, vec![1, 1]);
     assert!(matches!(
         store.finish_operator_setup(&input, &verifier).await,
         Err(OperatorSetupError::Denied { consumed: false })
@@ -269,6 +316,7 @@ async fn sqlite_restart_concurrency_expiry_and_state_version() {
         )
         .expect("registration");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,
@@ -419,6 +467,7 @@ async fn sqlite_success_audit_rollback_and_locked_expiry_are_atomic() {
         )
         .expect("registration");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,
@@ -457,6 +506,7 @@ async fn sqlite_success_audit_rollback_and_locked_expiry_are_atomic() {
     let ceremony_id = input.ceremony_id;
     let mut finish = tokio::spawn(async move {
         let input = OperatorRegistration {
+            source: "192.0.2.70".parse().expect("source"),
             setup_token: &secret,
             ceremony_id,
             browser_jkt: &binding,
@@ -496,6 +546,7 @@ async fn sqlite_attempted_finish_commit_failure_preserves_unknown_outcome() {
     sqlx::raw_sql("CREATE TABLE operator_commit_parent (id INTEGER PRIMARY KEY); CREATE TABLE operator_commit_child (id INTEGER REFERENCES operator_commit_parent (id) DEFERRABLE INITIALLY DEFERRED); CREATE TRIGGER operator_commit_failure AFTER UPDATE OF consumed_at_s ON operator_ceremonies BEGIN INSERT INTO operator_commit_child VALUES (1); END;")
         .execute(store.pool()).await.expect("deferred failure fixture");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,
@@ -541,6 +592,7 @@ async fn postgres_denial_audit_failure_rolls_back_ceremony_consumption() {
     sqlx::raw_sql("CREATE FUNCTION reject_operator_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture audit failure'; END; $$; CREATE TRIGGER reject_operator_audit BEFORE INSERT ON deployment_audit_events FOR EACH ROW EXECUTE FUNCTION reject_operator_audit();")
         .execute(store.pool()).await.expect("failure fixture");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,
@@ -633,6 +685,7 @@ async fn postgres_lost_commit_ack_preserves_uncertainty_without_disclosure() {
         )
         .expect("registration");
     let input = OperatorRegistration {
+        source: "192.0.2.70".parse().expect("source"),
         setup_token: &secret,
         ceremony_id: options.ceremony_id,
         browser_jkt: &binding,

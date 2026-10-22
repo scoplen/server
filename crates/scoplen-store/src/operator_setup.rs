@@ -3,6 +3,7 @@
 
 use std::{
     fmt,
+    net::IpAddr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,10 +23,13 @@ use crate::{
         append_deployment_audit_event_in_postgres_transaction,
         append_deployment_audit_event_in_transaction,
     },
+    operator_admission::{OperatorAdmissionError, OperatorAuthEndpoint, OperatorPrivateBucket},
 };
 
 #[derive(Debug, Error)]
 pub enum OperatorSetupError {
+    #[error("operator setup admission unavailable")]
+    Admission(#[from] OperatorAdmissionError),
     #[error("operator setup authentication denied")]
     Denied { consumed: bool },
     #[error("operator setup proof key does not match")]
@@ -87,6 +91,7 @@ impl fmt::Debug for OperatorSetupOptions {
 
 /// Structurally decoded transport artifacts. Embedded `WebAuthn` validation occurs after binding.
 pub struct OperatorRegistration<'a> {
+    pub source: IpAddr,
     pub setup_token: &'a [u8; 32],
     pub ceremony_id: Uuid,
     pub browser_jkt: &'a str,
@@ -126,7 +131,7 @@ fn audit_time(now: i64) -> Result<i64, OperatorSetupError> {
 }
 
 macro_rules! setup_store {
-    ($store:ty, $db:ty, $begin:expr, $lock:expr, $append:path) => {
+    ($store:ty, $db:ty, $begin:expr, $lock:expr, $append:path, $admission_lock:path, $outcome:path) => {
         impl $store {
             /// Initialize once, or explicitly replace an uncompleted local entitlement.
             ///
@@ -208,6 +213,7 @@ macro_rules! setup_store {
                     || !(1..=16_384).contains(&input.attestation_object.len()) { return Err(OperatorSetupError::InvalidRequest); }
                 let mut tx = $begin(self).await?;
                 $lock(&mut tx).await?;
+                $admission_lock(&mut tx).await?;
                 let now = now_s()?;
                 let digest: [u8;32] = Sha256::digest(input.setup_token).into();
                 let entitlement = sqlx::query::<$db>("SELECT singleton FROM operator_setup WHERE singleton = 1 AND token_digest = $1 AND trusted_origin = $2 AND completed_at_s IS NULL AND expires_at_s > $3")
@@ -240,10 +246,12 @@ macro_rules! setup_store {
                         .bind(verified.credential_id()).bind(operator_id.as_bytes().as_slice()).bind(verifier.origin()).bind(verifier.rp_id()).bind(credential).bind(now).execute(&mut *tx).await?;
                     sqlx::query::<$db>("UPDATE operator_setup SET completed_at_s = $1 WHERE singleton = 1").bind(now).execute(&mut *tx).await?;
                     sqlx::query::<$db>("UPDATE operator_ceremonies SET consumed_at_s = $1 WHERE purpose = 1 AND consumed_at_s IS NULL").bind(now).execute(&mut *tx).await?;
+                    $outcome(&mut tx, OperatorAuthEndpoint::SetupFinish, input.source, Some(OperatorPrivateBucket::SetupDigest(&digest)), true).await?;
                     $append(&mut tx, &audit(3, now, Some(operator_id)), audit_time(now)?).await?;
                     tx.commit().await.map_err(|_| OperatorSetupError::CommitOutcomeUnknown)?;
                     Ok(operator_id)
                 } else {
+                    $outcome(&mut tx, OperatorAuthEndpoint::SetupFinish, input.source, Some(OperatorPrivateBucket::SetupDigest(&digest)), false).await?;
                     $append(&mut tx, &audit(4, now, None), audit_time(now)?).await?;
                     tx.commit().await.map_err(|_| OperatorSetupError::CommitOutcomeUnknown)?;
                     Err(OperatorSetupError::Denied { consumed: true })
@@ -279,12 +287,16 @@ setup_store!(
     sqlx::Sqlite,
     sqlite_begin,
     sqlite_lock,
-    append_deployment_audit_event_in_transaction
+    append_deployment_audit_event_in_transaction,
+    crate::operator_admission::sqlite_lock,
+    crate::operator_admission::sqlite_outcome
 );
 setup_store!(
     PostgresStore,
     sqlx::Postgres,
     postgres_begin,
     postgres_lock,
-    append_deployment_audit_event_in_postgres_transaction
+    append_deployment_audit_event_in_postgres_transaction,
+    crate::operator_admission::postgres_lock,
+    crate::operator_admission::postgres_outcome
 );

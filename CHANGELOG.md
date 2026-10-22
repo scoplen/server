@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added independent durable Operator authentication admission and DPoP replay claims on both
+  stores. Per-endpoint source, setup-digest, ceremony and authenticated-Operator windows enforce
+  quotas and bounded exponential cooldowns across replicas. Setup completion clears failures
+  without refunding quotas; failed embedded registration commits ceremony consumption, cooldown
+  and denial audit together. The HTTP adapters and browser login/session remain incomplete.
+
 - Added an independent SQLite/PostgreSQL Operator access-token keyring and public
   `GET /.well-known/operator-jwks.json`. Dedicated seeds, `operator-` key identifiers, and
   purpose-bound encrypted envelopes prevent device-key reuse. Creation and 30-day rotation
