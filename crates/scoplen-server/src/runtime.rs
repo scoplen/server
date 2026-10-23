@@ -997,10 +997,14 @@ fn tls_config(config: &Config) -> Result<ServerConfig, ServerError> {
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_file)
         .map_err(|error| ServerError::Tls(error.to_string()))?
         .ok_or_else(|| ServerError::Tls("tls.key_file contains no private key".into()))?;
-    let mut server = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .map_err(|error| ServerError::Tls(error.to_string()))?;
+    let mut server = ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| ServerError::Tls(error.to_string()))?
+    .with_no_client_auth()
+    .with_single_cert(certificates, key)
+    .map_err(|error| ServerError::Tls(error.to_string()))?;
     server.alpn_protocols = application_alpn_protocols();
     Ok(server)
 }
@@ -1096,6 +1100,98 @@ mod tests {
                 Err(error) => panic!("remove test directory {}: {error}", path.display()),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn files_tls_negotiates_trusted_https_and_h2() {
+        use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
+        use tokio_rustls::TlsConnector;
+
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-files-tls-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data_dir).expect("owned TLS directory");
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("test certificate");
+        let mut config = Config::default();
+        config.tls.cert_file = Some(data_dir.join("localhost.pem"));
+        config.tls.key_file = Some(data_dir.join("localhost-key.pem"));
+        fs::write(config.tls.cert_file.as_ref().expect("certificate path"), cert.pem())
+            .expect("test certificate file");
+        fs::write(config.tls.key_file.as_ref().expect("key path"), key_pair.serialize_pem())
+            .expect("test private key file");
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config(&config).expect("files TLS config")));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("TLS listener");
+        let address = listener.local_addr().expect("TLS address");
+        let server = tokio::spawn(async move {
+            for protocol in [b"http/1.1".as_slice(), b"h2".as_slice()] {
+                let (tcp, _) = listener.accept().await.expect("incoming TLS connection");
+                let mut tls = acceptor.accept(tcp).await.expect("trusted TLS handshake");
+                assert_eq!(tls.get_ref().1.alpn_protocol(), Some(protocol));
+                if protocol == b"http/1.1" {
+                    serve_tls_connection(
+                        tls,
+                        Router::new().route("/healthz", get(|| async { "ok" })),
+                    )
+                    .await
+                    .expect("production HTTPS adapter");
+                } else {
+                    tls.shutdown().await.expect("close H2 handshake");
+                }
+            }
+            let (tcp, _) = listener.accept().await.expect("untrusted TLS connection");
+            assert!(acceptor.accept(tcp).await.is_err(), "unknown issuer must fail");
+        });
+        for protocol in [b"http/1.1".as_slice(), b"h2".as_slice(), b"untrusted".as_slice()] {
+            let mut roots = RootCertStore::empty();
+            if protocol != b"untrusted" {
+                roots.add(cert.der().clone()).expect("test-only trust root");
+            }
+            let mut client = ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("supported TLS versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            client.alpn_protocols = vec![if protocol == b"untrusted" {
+                b"http/1.1".to_vec()
+            } else {
+                protocol.to_vec()
+            }];
+            let connector = TlsConnector::from(Arc::new(client));
+            let tcp = tokio::net::TcpStream::connect(address).await.expect("TLS TCP connection");
+            let result =
+                connector.connect(ServerName::try_from("localhost").expect("SNI"), tcp).await;
+            if protocol == b"untrusted" {
+                let error = result.expect_err("test must retain certificate verification");
+                assert!(matches!(
+                    error.get_ref().and_then(|cause| cause.downcast_ref::<rustls::Error>()),
+                    Some(rustls::Error::InvalidCertificate(
+                        rustls::CertificateError::UnknownIssuer
+                    ))
+                ));
+                continue;
+            }
+            let mut tls = result.expect("verified HTTPS connection");
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(protocol));
+            if protocol == b"http/1.1" {
+                tls.write_all(
+                    b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("health request");
+                let mut reply = String::new();
+                tls.read_to_string(&mut reply).await.expect("HTTPS health response");
+                assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"));
+                assert!(reply.ends_with("\r\n\r\nok"));
+            } else {
+                let mut reply = Vec::new();
+                tls.read_to_end(&mut reply).await.expect("H2 handshake closed");
+                assert_eq!(reply, [] as [u8; 0]);
+            }
+        }
+        server.await.expect("TLS server completed");
+        remove_test_directory(&data_dir).await;
     }
 
     #[test]
