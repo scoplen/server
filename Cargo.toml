@@ -36,7 +36,7 @@ semver = "1.0.28"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
-tokio = { version = "1.44.2", features = ["macros", "net", "rt-multi-thread", "signal", "time", "io-util", "fs", "sync"] }
+tokio = { version = "1.53.3", features = ["macros", "net", "rt-multi-thread", "signal", "time", "io-util", "fs", "sync"] }
 tokio-rustls = "0.26.2"
 toml = "0.8.20"
 tracing = "0.1.41"

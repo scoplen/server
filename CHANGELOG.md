@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Raised the Tokio minimum and lock to 1.53.3 for RUSTSEC-2026-0386, addressing
+  Unix `AsyncFd` I/O safety.
+
 - PostgreSQL runtime readiness and audit-worker tests use private disposable schemas, keeping
   concurrent setup audit events and earlier runs from changing checkpoint assertions. All
   existing assertions remain intact; CI runs both PostgreSQL runtime fixtures together.
