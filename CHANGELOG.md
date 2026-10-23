@@ -12,6 +12,17 @@ Changes are recorded here for released or reviewable repository outcomes.
   PostgreSQL lost commit acknowledgement. Unknown outcomes disclose no success or cookie.
   Updated all proto pins to `e2dd140` and the route manifest; sign-in and console remain open.
 
+- Added durable discoverable Operator passkey login and independent browser sessions on SQLite
+  and PostgreSQL. Login compares against the current credential, then atomically updates its
+  counter/backup state, consumes the ceremony, creates a 30-day refresh family and appends the
+  mandatory audit. Refresh verifies and claims the original proof in its transaction, rotates
+  single-use digest-only credentials, and revokes a family on authenticated matching-token reuse.
+  Administration mutations can recheck current family, Operator and credential state under the
+  session lock. Complete browser JSON and scoped secure cookies are validated before commit;
+  uncertain commits disclose neither. HTTP login, refresh dispatch and console integration
+  remain incomplete.
+
+
 - Added an independent SQLite/PostgreSQL Operator access-token keyring and public
   `GET /.well-known/operator-jwks.json`. Dedicated seeds, `operator-` key identifiers, and
   purpose-bound encrypted envelopes prevent device-key reuse. Creation and 30-day rotation

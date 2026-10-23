@@ -1517,7 +1517,105 @@ const OPERATOR_CEREMONIES: TableSpec = TableSpec {
     indexes: &[IndexSpec { name: "operator_ceremonies_by_expiry", columns: &["expires_at_s"] }],
 };
 
+const OPERATOR_REFRESH_FAMILIES: TableSpec = TableSpec {
+    name: "operator_refresh_families",
+    columns: &[
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "principal_kind",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "operator_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "dpop_jkt",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trusted_origin",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "audience",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "scope", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "revoked_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "operator_id",
+            target_table: "deployment_operators",
+            target_column: "operator_id",
+        },
+        ForeignKey {
+            source_column: "credential_id",
+            target_table: "operator_credentials",
+            target_column: "credential_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "operator_refresh_families_by_expiry", columns: &["expires_at_ms"] },
+        IndexSpec {
+            name: "operator_refresh_families_by_operator",
+            columns: &["operator_id", "expires_at_ms"],
+        },
+    ],
+};
+const OPERATOR_REFRESH_TOKENS: TableSpec = TableSpec {
+    name: "operator_refresh_tokens",
+    columns: DEVICE_REFRESH_TOKENS.columns,
+    foreign_keys: &[ForeignKey {
+        source_column: "family_id",
+        target_table: "operator_refresh_families",
+        target_column: "family_id",
+    }],
+    indexes: &[IndexSpec { name: "operator_refresh_tokens_by_family", columns: &["family_id"] }],
+};
+
 const TABLES: &[TableSpec] = &[
+    OPERATOR_REFRESH_FAMILIES,
+    OPERATOR_REFRESH_TOKENS,
     OPERATOR_AUTH_ADMISSION,
     OPERATOR_DPOP_REPLAYS,
     DEPLOYMENT_OPERATORS,
@@ -1934,6 +2032,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261022000000_operator_setup.sql");
     const SQLITE_OPERATOR_ADMISSION: &str =
         include_str!("../migrations/sqlite/20261022070000_operator_admission.sql");
+    const SQLITE_OPERATOR_SESSIONS: &str =
+        include_str!("../migrations/sqlite/20261022080000_operator_sessions.sql");
+    const POSTGRES_OPERATOR_SESSIONS: &str =
+        include_str!("../migrations/postgres/20261022080000_operator_sessions.sql");
     const POSTGRES_OPERATOR_ADMISSION: &str =
         include_str!("../migrations/postgres/20261022070000_operator_admission.sql");
     const POSTGRES_OPERATOR_SETUP: &str =
@@ -2002,8 +2104,9 @@ mod tests {
             SQLITE_DEVICE_TOKEN_KEYS,
             SQLITE_DEVICE_AUTHENTICATION,
             SQLITE_OPERATOR_SETUP,
-            SQLITE_OPERATOR_TOKEN_KEYS,
             SQLITE_OPERATOR_ADMISSION,
+            SQLITE_OPERATOR_SESSIONS,
+            SQLITE_OPERATOR_TOKEN_KEYS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2020,8 +2123,9 @@ mod tests {
             POSTGRES_DEVICE_TOKEN_KEYS,
             POSTGRES_DEVICE_AUTHENTICATION,
             POSTGRES_OPERATOR_SETUP,
-            POSTGRES_OPERATOR_TOKEN_KEYS,
             POSTGRES_OPERATOR_ADMISSION,
+            POSTGRES_OPERATOR_SESSIONS,
+            POSTGRES_OPERATOR_TOKEN_KEYS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2071,7 +2175,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 16);
+        assert_eq!(migration_count, 17);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2080,7 +2184,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 16);
+        assert_eq!(replay_count, 17);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")
