@@ -98,11 +98,41 @@ fn test_directory() -> PathBuf {
     path
 }
 
+async fn assert_admission_windows(store: &SqliteStore, admitted: i64, limited: i64) {
+    // Concurrent real-clock calls can straddle a minute boundary. Verify the exact
+    // quota in each committed window instead of assuming all calls share one.
+    let windows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT COUNT(*), MAX(attempts) FROM admission_observations GROUP BY window_start_ms",
+    )
+    .fetch_all(store.pool())
+    .await
+    .expect("committed window decisions");
+    assert_ne!(windows.len(), 0);
+    assert_eq!(windows.iter().map(|(count, _)| count).sum::<i64>(), 40);
+    for &(count, quota_used) in &windows {
+        assert_eq!(quota_used, count.min(30));
+    }
+    assert_eq!(admitted, windows.iter().map(|(_, quota_used)| quota_used).sum::<i64>());
+    assert_eq!(admitted + limited, 40);
+}
+
 #[tokio::test]
 async fn sqlite_personal_admission_is_durable_atomic_and_audit_failure_rolls_back_cooldown() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("store");
     let source: IpAddr = "192.0.2.41".parse().expect("source IP");
+    sqlx::raw_sql(
+        "CREATE TABLE admission_observations (window_start_ms INTEGER, attempts INTEGER);
+         CREATE TRIGGER observe_admission_insert AFTER INSERT ON personal_admission BEGIN
+             INSERT INTO admission_observations VALUES (NEW.window_start_ms, NEW.attempts);
+         END;
+         CREATE TRIGGER observe_admission_update AFTER UPDATE ON personal_admission BEGIN
+             INSERT INTO admission_observations VALUES (NEW.window_start_ms, NEW.attempts);
+         END;",
+    )
+    .execute(store.pool())
+    .await
+    .expect("observe committed admission windows");
     let mut attempts = Vec::new();
     for _ in 0..40 {
         let store = store.clone();
@@ -121,7 +151,7 @@ async fn sqlite_personal_admission_is_durable_atomic_and_audit_failure_rolls_bac
             }
         }
     }
-    assert_eq!((admitted, limited), (30, 10));
+    assert_admission_windows(&store, admitted, limited).await;
     let source: IpAddr = "192.0.2.42".parse().expect("second source");
     let digest = [0x42; 32];
     assert_eq!(
