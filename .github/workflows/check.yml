@@ -98,6 +98,8 @@ jobs:
         run: cargo test -p scoplen-store --test device_token_keys --features postgres-integration postgres_ -- --test-threads=1
       - name: Check Personal invitation enrollment and rollback
         run: cargo test -p scoplen-store --test personal_enrollment --features postgres-integration postgres_ -- --test-threads=1
+      - name: Check pairing relay and atomic second-device enrollment
+        run: cargo test --locked -p scoplen-store --test pairing --features postgres-integration postgres -- --test-threads=1
       - name: Check pairing admission windows and cooldown transactions
         run: cargo test --locked -p scoplen-store --test pairing_admission --features postgres-integration postgres_ -- --test-threads=1
       - name: Check PostgreSQL operator setup, passkeys, and uncertain commits

@@ -4,11 +4,20 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a durable seven-slot second-device pairing relay and atomic completion on SQLite and
+  PostgreSQL. Digest-only capabilities, fixed expiry, original terminal retention, aggregate
+  deployment budgets, role/order checks, exact replay and payload erasure share one state
+  machine. Completion verifies current identity, signed certificate/history, complete next
+  K-4 membership, unchanged account ciphertexts and new-device possession; response overflow
+  or audit failure rolls back the full candidate. Retained receipt replay never reverses
+  later revocation, and a lost commit acknowledgement discloses no success body. Added real
+  signed SQLite/PostgreSQL concurrency, rollback, quota, expiry and lost-commit regressions.
+
 - Added independent durable pairing admission on SQLite and PostgreSQL, with per-route source,
   verified capability and account quotas; denial cooldowns; bounded cleanup; safe failure audit;
   and transaction-local authenticated-success clearing. Counts and cooldowns serialize across
-  replicas, and audit failure rolls back denial state. Pairing relay and public HTTP routes
-  remain separate work.
+  replicas, and audit failure rolls back denial state. Public pairing HTTP routes remain
+  separate work.
 
 - Added a registered `personal_live_bootstrap` development example and reproducible disposable
   HTTPS fixture procedure. New private directories hold localhost certificates/configuration;
