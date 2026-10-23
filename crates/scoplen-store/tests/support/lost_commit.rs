@@ -23,6 +23,10 @@ impl Drop for LostCommitProxy {
 
 impl LostCommitProxy {
     pub async fn start(database_url: &str) -> Self {
+        Self::start_skipping(database_url, 0).await
+    }
+
+    pub async fn start_skipping(database_url: &str, skip_commits: usize) -> Self {
         let mut url = url::Url::parse(database_url).expect("TCP PostgreSQL URL");
         let upstream = format!("{}:{}", url.host_str().expect("host"), url.port().unwrap_or(5432));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("proxy listener");
@@ -31,9 +35,11 @@ impl LostCommitProxy {
         url.query_pairs_mut().append_pair("sslmode", "disable");
         let armed = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicUsize::new(0));
+        let skip_commits = Arc::new(AtomicUsize::new(skip_commits));
         let task = {
             let armed = armed.clone();
             let dropped = dropped.clone();
+            let skip_commits = skip_commits.clone();
             tokio::spawn(async move {
                 let mut connections = tokio::task::JoinSet::new();
                 loop {
@@ -42,8 +48,10 @@ impl LostCommitProxy {
                         TcpStream::connect(&upstream).await.expect("PostgreSQL connection");
                     let armed = armed.clone();
                     let dropped = dropped.clone();
+                    let skip_commits = skip_commits.clone();
                     connections.spawn(async move {
-                        Box::pin(drop_commit_ack(client, server, armed, dropped)).await;
+                        Box::pin(drop_commit_ack(client, server, armed, dropped, skip_commits))
+                            .await;
                     });
                 }
             })
@@ -57,6 +65,7 @@ async fn drop_commit_ack(
     server: TcpStream,
     armed: Arc<AtomicBool>,
     dropped: Arc<AtomicUsize>,
+    skip_commits: Arc<AtomicUsize>,
 ) {
     let (mut client_read, mut client_write) = client.into_split();
     let (mut server_read, mut server_write) = server.into_split();
@@ -73,6 +82,12 @@ async fn drop_commit_ack(
                 }
                 tail.extend_from_slice(&buffer[..count]);
                 if tail.windows(7).any(|bytes| bytes == b"COMMIT\0")
+                    && armed.load(Ordering::SeqCst)
+                    && skip_commits
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                            count.checked_sub(1)
+                        })
+                        .is_err()
                     && armed.swap(false, Ordering::SeqCst)
                 {
                     commit_forwarded.store(true, Ordering::SeqCst);

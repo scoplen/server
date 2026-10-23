@@ -89,6 +89,7 @@ pub enum PairingFailureReason {
     RateLimited = 4,
     StorageUnavailable = 5,
     Conflict = 6,
+    AuthenticationDenied = 7,
 }
 
 #[derive(Debug, Error)]

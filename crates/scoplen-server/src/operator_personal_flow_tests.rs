@@ -26,6 +26,8 @@ use crate::runtime::{ListenerDatabase, api_router};
 mod account_devices;
 #[path = "account_profile_tests.rs"]
 mod account_profile;
+#[path = "pairing_http_tests.rs"]
+mod pairing;
 
 async fn mount_complete_api(f: &mut Fixture) {
     f.server.abort();
