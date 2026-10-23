@@ -11,11 +11,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use scoplen_crypto::validate_server_origin;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use scoplen_api::personal_enrollment::PersonalInvitationResponse;
+use scoplen_crypto::{VerifiedOperatorAccessToken, validate_server_origin};
 use scoplen_identity::VerifiedPersonalEnrollment;
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row, Sqlite, Transaction};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
@@ -40,6 +43,7 @@ pub struct IssuedPersonalInvitation {
     token: [u8; 32],
     trusted_origin: String,
     expires_at_ms: i64,
+    response_json: Zeroizing<Vec<u8>>,
 }
 
 impl IssuedPersonalInvitation {
@@ -62,6 +66,12 @@ impl IssuedPersonalInvitation {
     #[must_use]
     pub const fn expires_at_ms(&self) -> i64 {
         self.expires_at_ms
+    }
+
+    /// The bounded secret-bearing response, prepared before any invitation transaction commits.
+    #[must_use]
+    pub fn response_json(&self) -> &[u8] {
+        &self.response_json
     }
 }
 
@@ -167,8 +177,47 @@ impl SqliteStore {
         issuer_operator_id: AccountId,
         trusted_origin: &str,
     ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
+        self.issue_personal_invitation_checked(issuer_operator_id, trusted_origin, None).await
+    }
+
+    /// Issue under a current Operator session, holding its authorization lock through commit.
+    /// The HTTP caller must verify the signature, DPoP/replay, exact scope and Cedar first.
+    ///
+    /// # Errors
+    /// Returns `Denied` if current session authorization has expired or been revoked.
+    pub async fn issue_personal_invitation_for_operator(
+        &self,
+        verified: &VerifiedOperatorAccessToken,
+        trusted_origin: &str,
+    ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
+        self.issue_personal_invitation_checked(
+            verified.claims().sub.into_bytes(),
+            trusted_origin,
+            Some(verified),
+        )
+        .await
+    }
+
+    async fn issue_personal_invitation_checked(
+        &self,
+        issuer_operator_id: AccountId,
+        trusted_origin: &str,
+        verified: Option<&VerifiedOperatorAccessToken>,
+    ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
         let issue = prepare_issue(issuer_operator_id, trusted_origin)?;
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(verified) = verified
+            && (verified.claims().iss != trusted_origin
+                || crate::operator_sessions::verify_operator_session_in_sqlite_transaction(
+                    &mut transaction,
+                    verified,
+                )
+                .await
+                .map_err(|_| PersonalInvitationStoreError::Database)?
+                .is_none())
+        {
+            return Err(PersonalInvitationStoreError::Denied);
+        }
         sqlx::query(
             "INSERT INTO personal_invitations
              (invitation_id, token_digest, trusted_origin, issuer_operator_id, issued_at_ms, expires_at_ms)
@@ -304,8 +353,47 @@ impl PostgresStore {
         issuer_operator_id: AccountId,
         trusted_origin: &str,
     ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
+        self.issue_personal_invitation_checked(issuer_operator_id, trusted_origin, None).await
+    }
+
+    /// Issue under a current Operator session, holding its authorization lock through commit.
+    /// The HTTP caller must verify the signature, DPoP/replay, exact scope and Cedar first.
+    ///
+    /// # Errors
+    /// Returns `Denied` if current session authorization has expired or been revoked.
+    pub async fn issue_personal_invitation_for_operator(
+        &self,
+        verified: &VerifiedOperatorAccessToken,
+        trusted_origin: &str,
+    ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
+        self.issue_personal_invitation_checked(
+            verified.claims().sub.into_bytes(),
+            trusted_origin,
+            Some(verified),
+        )
+        .await
+    }
+
+    async fn issue_personal_invitation_checked(
+        &self,
+        issuer_operator_id: AccountId,
+        trusted_origin: &str,
+        verified: Option<&VerifiedOperatorAccessToken>,
+    ) -> Result<IssuedPersonalInvitation, PersonalInvitationStoreError> {
         let issue = prepare_issue(issuer_operator_id, trusted_origin)?;
         let mut transaction = self.pool().begin().await?;
+        if let Some(verified) = verified
+            && (verified.claims().iss != trusted_origin
+                || crate::operator_sessions::verify_operator_session_in_postgres_transaction(
+                    &mut transaction,
+                    verified,
+                )
+                .await
+                .map_err(|_| PersonalInvitationStoreError::Database)?
+                .is_none())
+        {
+            return Err(PersonalInvitationStoreError::Denied);
+        }
         sqlx::query(
             "INSERT INTO personal_invitations
              (invitation_id, token_digest, trusted_origin, issuer_operator_id, issued_at_ms, expires_at_ms)
@@ -443,6 +531,7 @@ struct PendingInvitation {
     token_digest: [u8; 32],
     issued_at_ms: i64,
     expires_at_ms: i64,
+    response_json: Zeroizing<Vec<u8>>,
 }
 
 impl PendingInvitation {
@@ -452,6 +541,7 @@ impl PendingInvitation {
             token: *self.token,
             trusted_origin: trusted_origin.to_owned(),
             expires_at_ms: self.expires_at_ms,
+            response_json: self.response_json,
         }
     }
 }
@@ -474,7 +564,25 @@ fn prepare_issue(
     let mut invitation_id = [0; 16];
     getrandom::fill(&mut invitation_id).map_err(|_| PersonalInvitationStoreError::Entropy)?;
     let token_digest = Sha256::digest(*token).into();
-    Ok(PendingInvitation { invitation_id, token, token_digest, issued_at_ms, expires_at_ms })
+    let expires_at = OffsetDateTime::from_unix_timestamp(expires_at_ms / 1_000)
+        .map_err(|_| PersonalInvitationStoreError::Clock)?
+        .format(&Rfc3339)
+        .map_err(|_| PersonalInvitationStoreError::Clock)?;
+    let mut response = PersonalInvitationResponse {
+        invitation_url: format!("{trusted_origin}/invite#token={}", URL_SAFE_NO_PAD.encode(*token)),
+        expires_at,
+    };
+    let encoded = response.to_json().map_err(|_| PersonalInvitationStoreError::InvalidOrigin);
+    response.invitation_url.zeroize();
+    let response_json = Zeroizing::new(encoded?);
+    Ok(PendingInvitation {
+        invitation_id,
+        token,
+        token_digest,
+        issued_at_ms,
+        expires_at_ms,
+        response_json,
+    })
 }
 
 fn now_ms() -> Result<i64, PersonalInvitationStoreError> {

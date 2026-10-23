@@ -987,6 +987,42 @@ const PERSONAL_ADMISSION: TableSpec = TableSpec {
     }],
 };
 
+const PERSONAL_INVITATION_ADMISSION: TableSpec = TableSpec {
+    name: "personal_invitation_admission",
+    columns: &[
+        ColumnSpec { name: "kind", kind: LogicalType::Integer, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "bucket_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "window_start_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "attempts",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "personal_invitation_admission_by_retention",
+        columns: &["retain_until_ms"],
+    }],
+};
+
 const JOBS: TableSpec = TableSpec {
     name: "jobs",
     columns: &[
@@ -1650,6 +1686,7 @@ const TABLES: &[TableSpec] = &[
     IDENTITY_DEVICES,
     PERSONAL_INVITATIONS,
     PERSONAL_ADMISSION,
+    PERSONAL_INVITATION_ADMISSION,
     JOBS,
 ];
 
@@ -2068,6 +2105,10 @@ mod tests {
         include_str!("../migrations/postgres/20261022060000_operator_token_keys.sql");
     const POSTGRES_DEVICE_AUTHENTICATION: &str =
         include_str!("../migrations/postgres/20261020040000_device_authentication.sql");
+    const SQLITE_PERSONAL_INVITATION_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261023010000_personal_invitation_admission.sql");
+    const POSTGRES_PERSONAL_INVITATION_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261023010000_personal_invitation_admission.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2107,6 +2148,7 @@ mod tests {
             SQLITE_OPERATOR_TOKEN_KEYS,
             SQLITE_OPERATOR_ADMISSION,
             SQLITE_OPERATOR_SESSIONS,
+            SQLITE_PERSONAL_INVITATION_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2126,6 +2168,7 @@ mod tests {
             POSTGRES_OPERATOR_TOKEN_KEYS,
             POSTGRES_OPERATOR_ADMISSION,
             POSTGRES_OPERATOR_SESSIONS,
+            POSTGRES_PERSONAL_INVITATION_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2175,7 +2218,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 17);
+        assert_eq!(migration_count, 18);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2184,7 +2227,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 17);
+        assert_eq!(replay_count, 18);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

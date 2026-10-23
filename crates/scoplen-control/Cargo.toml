@@ -8,3 +8,10 @@ description = "Scoplen organization and authorization service."
 
 [lints]
 workspace = true
+
+[dependencies]
+cedar-policy = "=4.4.0"
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

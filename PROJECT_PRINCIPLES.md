@@ -27,8 +27,11 @@ self-hosted server, host agent, administration CLI, and web console.
   setup and maintained WebAuthn verification exist on both stores, including discoverable login,
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict public setup HTTP adapters enforce
-  durable Origin/DPoP/admission boundaries. Login and refresh HTTP adapters, the console surface,
-  invitation issuance, complete identity and policy workflows, membership-aware purge scheduling,
+  durable Origin/DPoP/admission boundaries. Operator invitation HTTP issuance enforces exact
+  scope and published Cedar policies, independent database quotas, and transaction-local session
+  authorization; one-time URLs are disclosed only after an audited confirmed commit. Login and
+  refresh HTTP adapters, the console surface, complete identity and policy workflows,
+  membership-aware purge scheduling,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
   can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.
 - Deployment, backup/restore, upgrade, and release artifacts require their own validated gates.

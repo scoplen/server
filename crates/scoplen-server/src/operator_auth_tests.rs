@@ -1,13 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #[cfg(feature = "postgres-integration")]
-#[path = "../../scoplen-store/tests/support/lost_commit.rs"]
-mod lost_commit;
-#[path = "../../scoplen-store/tests/support/passkey.rs"]
-#[allow(dead_code)]
-mod passkey;
-#[path = "../../scoplen-store/tests/support/mod.rs"]
-mod support;
+use crate::test_lost_commit as lost_commit;
+use crate::{test_passkey as passkey, test_support as support};
 
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};

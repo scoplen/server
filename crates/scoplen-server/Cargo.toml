@@ -39,6 +39,7 @@ rustls-acme.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 scoplen-audit = { path = "../scoplen-audit" }
+scoplen-control = { version = "0.1.0", path = "../scoplen-control" }
 
 [lints]
 workspace = true
