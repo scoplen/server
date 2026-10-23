@@ -21,7 +21,7 @@ rust-version = "1.99"
 authors = ["Scoplen maintainers"]
 
 [workspace.dependencies]
-axum = { version = "0.8.4", features = ["ws"] }
+axum = { version = "0.8.4", features = ["ws", "http2"] }
 bytes = "1.10.1"
 ed25519-dalek = "2.1.1"
 clap = { version = "4.5.35", features = ["derive", "env"] }

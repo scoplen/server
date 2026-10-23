@@ -15,8 +15,8 @@ use scoplen_store::{
     sync::{ObjectWrite, PersonalMutation, PersonalSigner, SyncStoreError, WriteReceipt},
 };
 use scoplen_sync::http::{
-    AuthFailure, AuthenticatedDevice, SyncAuthenticator, SyncBackend, SyncKeysOperation,
-    SyncOperation,
+    AuthFailure, AuthenticatedDevice, AuthenticatedNotification, SyncAuthenticator, SyncBackend,
+    SyncKeysOperation, SyncOperation,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -98,6 +98,25 @@ impl PersonalSyncAuthenticator {
         let raw_token = single_header(headers, AUTHORIZATION.as_str(), 4_101)?
             .strip_prefix("DPoP ")
             .ok_or_else(authentication_required)?;
+        self.authenticate_credentials(
+            operation,
+            method,
+            uri,
+            raw_token,
+            single_header(headers, "dpop", 8_192)?,
+        )
+        .await
+        .map(|(principal, _)| principal)
+    }
+
+    async fn authenticate_credentials(
+        &self,
+        operation: DeviceAccessOperation,
+        method: &Method,
+        uri: &Uri,
+        raw_token: &str,
+        raw_proof: &str,
+    ) -> Result<(CurrentPrincipal, u64), AuthFailure> {
         let token = DeviceAccessToken::parse(raw_token).map_err(|_| authentication_required())?;
         let keyring = self.backend.keyring(&self.kms).await.map_err(|_| storage_unavailable())?;
         let mut trusted = TrustedDeviceAccessTokenKeys::new(&self.trusted_origin)
@@ -111,8 +130,7 @@ impl PersonalSyncAuthenticator {
         let claims = verified.claims();
         let target = DpopTarget::new(method.as_str(), &self.trusted_origin, uri.path())
             .map_err(|_| authentication_required())?;
-        let proof = DpopProof::parse(single_header(headers, "dpop", 8_192)?)
-            .map_err(|_| authentication_required())?;
+        let proof = DpopProof::parse(raw_proof).map_err(|_| authentication_required())?;
         self.backend
             .claim_dpop(&proof, &target, DpopToken::Protected(raw_token), &claims.cnf_jkt)
             .await
@@ -128,12 +146,46 @@ impl PersonalSyncAuthenticator {
         if !operation.required_scope().is_present_in(&claims.scope) {
             return Err(policy_denied());
         }
-        Ok(principal)
+        Ok((principal, claims.exp))
     }
 }
 
 #[async_trait::async_trait]
 impl SyncAuthenticator for PersonalSyncAuthenticator {
+    async fn authenticate_notification(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        credentials: &scoplen_api::sync::SyncNotificationAuth,
+    ) -> Result<AuthenticatedNotification, AuthFailure> {
+        let operation = DeviceAccessOperation::from_route(method.as_str(), uri.path())
+            .filter(|operation| *operation == DeviceAccessOperation::Notifications)
+            .ok_or_else(authentication_required)?;
+        let (principal, expires_at) = self
+            .authenticate_credentials(
+                operation,
+                method,
+                uri,
+                &credentials.access_token,
+                &credentials.dpop_proof,
+            )
+            .await?;
+        Ok(AuthenticatedNotification {
+            identity: AuthenticatedDevice {
+                account_id: principal.account_id,
+                device_id: principal.device_id,
+            },
+            expires_at,
+        })
+    }
+
+    async fn authorize_notifications(
+        &self,
+        identity: AuthenticatedDevice,
+    ) -> Result<(), AuthFailure> {
+        self.current(identity).await.map(|_| ())
+    }
+
     async fn authenticate(
         &self,
         method: &Method,
@@ -677,7 +729,7 @@ mod tests {
 
     async fn reject_unmounted_routes(address: SocketAddr) {
         assert_eq!(http(address, "POST", "/sync/v1/vaults", &[], &[]).await.status, 404);
-        assert_eq!(http(address, "GET", "/sync/v1/notify", &[], &[]).await.status, 404);
+        assert_eq!(http(address, "GET", "/sync/v1/notify", &[], &[]).await.status, 400);
         assert_eq!(http(address, "PUT", "/sync/v1/keys", &[], &[]).await.status, 405);
     }
 

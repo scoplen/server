@@ -11,14 +11,19 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crate::notify::NotificationHub;
+#[path = "notification.rs"]
+mod notification;
+
+#[cfg(test)]
+use {std::time::Duration, tokio::sync::broadcast};
+
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header},
     response::{IntoResponse, Response},
@@ -27,7 +32,6 @@ use axum::{
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
 use scoplen_model::CURRENT_SCHEMA_VERSION;
 use scoplen_store::{PostgresStore, SqliteStore, account_keys as key_storage, sync as storage};
-use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
 
 /// The hard protocol ceiling for write bodies. A deployment may enforce a lower limit on the
@@ -35,7 +39,7 @@ use uuid::{Uuid, Variant};
 pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 
 /// Maximum size of the first WebSocket message handed to the notification authenticator.
-pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
+pub const MAX_NOTIFICATION_AUTH_BYTES: usize = api::MAX_SYNC_NOTIFICATION_BODY_BYTES;
 /// Maximum encoded session handshake request size.
 pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
 // A one-entry CBOR map, the text key "cursor", and the largest encoded u64.
@@ -47,7 +51,6 @@ pub const WRITE_REQUESTS_PER_SECOND: u64 = 50;
 /// Default authenticated object-write burst advertised by the session handshake.
 pub const WRITE_BURST: u64 = 200;
 
-const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const TOKEN_SCALE: u128 = 1_000_000_000;
 
 /// Positive per-device object-write token bucket settings for one router.
@@ -250,6 +253,13 @@ pub struct AuthenticatedDevice {
     pub account_id: key_storage::AccountId,
 }
 
+/// Verified notification identity and the token's absolute Unix expiry, without credentials.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthenticatedNotification {
+    pub identity: AuthenticatedDevice,
+    pub expires_at: u64,
+}
+
 /// A problem returned by an authenticator at the request boundary.
 #[derive(Clone, Debug)]
 pub struct AuthFailure {
@@ -416,27 +426,26 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
 
     /// Authenticate the first binary message on a notification WebSocket.
     ///
-    /// The message is intentionally opaque to this adapter because the identity service owns the
-    /// DPoP-bound token and proof encoding. Implementations MUST bind the credentials to `uri`,
-    /// reject missing, malformed, expired, or revoked credentials, and return an enrolled device.
-    /// The adapter limits the message to [`MAX_NOTIFICATION_AUTH_BYTES`] before calling this
-    /// method.
+    /// The adapter has checked the shared strict CBOR codec. Implementations MUST verify the
+    /// token, exact opening method/HTTPS target, key binding, durable proof replay and current
+    /// device/scope before returning the identity and authenticated token expiry.
     ///
     /// # Errors
     ///
     /// Returns an authentication problem when the first message is not valid credentials.
     async fn authenticate_notification(
         &self,
+        _method: &Method,
         _uri: &Uri,
-        _first_message: &[u8],
-    ) -> Result<AuthenticatedDevice, AuthFailure> {
+        _credentials: &api::SyncNotificationAuth,
+    ) -> Result<AuthenticatedNotification, AuthFailure> {
         Err(notification_authentication_required())
     }
 
     /// Authorize an authenticated device to receive content-free notifications.
     ///
     /// Implementations MUST apply account and device lifecycle policy before allowing the socket
-    /// to remain open. The default fails closed until identity V3 supplies this boundary.
+    /// to remain open. The default fails closed unless the deployment supplies this boundary.
     ///
     /// # Errors
     ///
@@ -619,7 +628,7 @@ pub fn router<A: SyncAuthenticator>(store: impl Into<SyncBackend>, authenticator
 }
 
 /// Mount only the Personal routes whose production authorization is available.
-/// Shared-vault mutation, account-key rotation, and notification routes remain closed.
+/// Shared-vault mutation and account-key rotation remain closed.
 pub fn personal_router<A: SyncAuthenticator>(
     store: impl Into<SyncBackend>,
     authenticator: A,
@@ -649,6 +658,7 @@ pub fn personal_router_with_limits<A: SyncAuthenticator>(
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
         .route("/sync/v1/keys", get(keys_get::<A>))
+        .route("/sync/v1/notify", get(notification::notify::<A>).connect(notification::notify::<A>))
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
@@ -712,7 +722,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
-        .route("/sync/v1/notify", get(notify::<A>))
+        .route("/sync/v1/notify", get(notification::notify::<A>).connect(notification::notify::<A>))
         .route("/sync/v1/vaults", post(create_vault::<A>))
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/epochs", post(publish_vault_epoch::<A>))
@@ -835,73 +845,6 @@ async fn session<A: SyncAuthenticator>(
     Ok(cbor_response(response.to_cbor().map_err(|error| {
         SyncHttpError::invalid(&instance, format!("could not encode sync session: {error}"))
     })?))
-}
-
-async fn notify<A: SyncAuthenticator>(
-    ws: WebSocketUpgrade,
-    State(state): State<SyncHttpState<A>>,
-    uri: Uri,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| notification_session(socket, state, uri))
-}
-
-async fn notification_session<A: SyncAuthenticator>(
-    mut socket: WebSocket,
-    state: SyncHttpState<A>,
-    uri: Uri,
-) {
-    let first_message = match tokio::time::timeout(NOTIFICATION_AUTH_TIMEOUT, socket.recv()).await {
-        Ok(Some(Ok(Message::Binary(message)))) if message.len() <= MAX_NOTIFICATION_AUTH_BYTES => {
-            message
-        }
-        Ok(Some(Ok(Message::Binary(_)))) => {
-            close_notification(&mut socket, "sync.invalid_request").await;
-            return;
-        }
-        Ok(Some(Ok(_) | Err(_)) | None) | Err(_) => {
-            close_notification(&mut socket, "auth.authentication_required").await;
-            return;
-        }
-    };
-    let identity = match state.authenticator.authenticate_notification(&uri, &first_message).await {
-        Ok(identity) => identity,
-        Err(error) => {
-            close_notification(&mut socket, error.code.as_str()).await;
-            return;
-        }
-    };
-    if let Err(error) = state.authenticator.authorize_notifications(identity).await {
-        close_notification(&mut socket, error.code.as_str()).await;
-        return;
-    }
-
-    let mut events = state.notifications.subscribe(identity);
-    loop {
-        tokio::select! {
-            event = events.recv() => match event {
-                Ok(payload) => {
-                    if socket.send(Message::Binary(payload.into())).await.is_err() {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    close_notification(&mut socket, "sync.notification_lagged").await;
-                    return;
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
-            },
-            incoming = socket.recv() => match incoming {
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                Some(Ok(_)) => {}
-            },
-        }
-    }
-}
-
-async fn close_notification(socket: &mut WebSocket, code: &str) {
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame { code: 1008, reason: code.to_owned().into() })))
-        .await;
 }
 
 fn notification_authentication_required() -> AuthFailure {
@@ -2137,7 +2080,7 @@ impl IntoResponse for Box<SyncHttpError> {
 mod tests {
     use std::sync::{
         Mutex,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     };
 
     use axum::body::{Body, to_bytes};
@@ -2153,12 +2096,19 @@ mod tests {
 
     use super::*;
 
+    mod notifications {
+        include!("notification_tests.rs");
+    }
+
     #[derive(Clone)]
     struct TestAuthenticator {
         device_id: storage::DeviceId,
         allowed: bool,
         denied_read: Option<(storage::DeviceId, storage::VaultId)>,
         denied_notifications: Option<storage::DeviceId>,
+        notification_auth_delay: Duration,
+        notification_auth_blocks: bool,
+        notification_check_stalled: Arc<AtomicBool>,
         /// Test-only stand-in for the crypto and membership validator injected in production.
         reject_writes: bool,
         expected_key_signature: Option<Arc<AtomicU8>>,
@@ -2172,6 +2122,9 @@ mod tests {
                 allowed,
                 denied_read: None,
                 denied_notifications: None,
+                notification_auth_delay: Duration::ZERO,
+                notification_auth_blocks: false,
+                notification_check_stalled: Arc::default(),
                 reject_writes: false,
                 expected_key_signature: None,
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
@@ -2330,13 +2283,22 @@ mod tests {
 
         async fn authenticate_notification(
             &self,
+            _method: &Method,
             _uri: &Uri,
-            first_message: &[u8],
-        ) -> Result<AuthenticatedDevice, AuthFailure> {
-            if first_message == b"notify-test-token" {
-                Ok(AuthenticatedDevice {
-                    device_id: self.device_id,
-                    account_id: Self::account_id(),
+            credentials: &api::SyncNotificationAuth,
+        ) -> Result<AuthenticatedNotification, AuthFailure> {
+            if self.notification_auth_blocks {
+                std::thread::sleep(self.notification_auth_delay);
+            } else {
+                tokio::time::sleep(self.notification_auth_delay).await;
+            }
+            if credentials.access_token == "bm90aWZ5.dGVzdA.dG9rZW4" {
+                Ok(AuthenticatedNotification {
+                    identity: AuthenticatedDevice {
+                        device_id: self.device_id,
+                        account_id: Self::account_id(),
+                    },
+                    expires_at: 4_102_444_800,
                 })
             } else {
                 Err(AuthFailure::new(
@@ -2354,6 +2316,9 @@ mod tests {
             &self,
             identity: AuthenticatedDevice,
         ) -> Result<(), AuthFailure> {
+            if self.notification_check_stalled.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if self.allowed
                 && identity.account_id == Self::account_id()
                 && self.denied_notifications != Some(identity.device_id)
@@ -4102,10 +4067,33 @@ mod tests {
         let (mut socket, _) = connect_async(format!("ws://{address}/sync/v1/notify"))
             .await
             .expect("notification websocket");
+        let ClientMessage::Binary(context) =
+            socket.next().await.expect("context").expect("context frame")
+        else {
+            panic!("binary context")
+        };
+        assert_eq!(
+            api::SyncNotificationContext::from_cbor(&context).expect("context codec").htm,
+            api::SyncNotificationMethod::Get
+        );
         socket
-            .send(ClientMessage::Binary(b"notify-test-token".to_vec().into()))
+            .send(ClientMessage::Binary(
+                api::SyncNotificationAuth {
+                    access_token: "bm90aWZ5.dGVzdA.dG9rZW4".into(),
+                    dpop_proof: "ZA.ZQ.Zg".into(),
+                }
+                .to_cbor()
+                .expect("D75 authentication")
+                .into(),
+            ))
             .await
             .expect("send notification credentials");
+        let ClientMessage::Binary(ready) =
+            socket.next().await.expect("ready").expect("ready frame")
+        else {
+            panic!("binary ready")
+        };
+        api::SyncNotificationReady::from_cbor(&ready).expect("ready codec");
 
         let event = api::SyncNotification::VaultAdvanced { vault: Uuid::now_v7(), seq: 4 };
         for _ in 0..100 {
@@ -4307,6 +4295,15 @@ mod tests {
         let (mut socket, _) = connect_async(format!("ws://{address}/sync/v1/notify"))
             .await
             .expect("notification websocket");
+        let ClientMessage::Binary(context) =
+            socket.next().await.expect("context").expect("context frame")
+        else {
+            panic!("binary context")
+        };
+        assert_eq!(
+            api::SyncNotificationContext::from_cbor(&context).expect("context codec").htm,
+            api::SyncNotificationMethod::Get
+        );
         socket
             .send(ClientMessage::Binary(b"bad-token".to_vec().into()))
             .await

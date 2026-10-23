@@ -21,8 +21,8 @@ use scoplen_model::CURRENT_SCHEMA_VERSION;
 use scoplen_store::{PostgresStore, RelationalStore, account_keys as keys, sync as storage};
 use scoplen_sync::{
     http::{
-        AuthFailure, AuthenticatedDevice, MAX_REQUEST_BYTES, SyncAuthenticator, SyncKeysOperation,
-        SyncOperation, router_with_notifications,
+        AuthFailure, AuthenticatedDevice, AuthenticatedNotification, MAX_REQUEST_BYTES,
+        SyncAuthenticator, SyncKeysOperation, SyncOperation, router_with_notifications,
     },
     notify::NotificationHub,
 };
@@ -140,11 +140,16 @@ impl SyncAuthenticator for TestAuthenticator {
 
     async fn authenticate_notification(
         &self,
+        _method: &Method,
         uri: &Uri,
-        first_message: &[u8],
-    ) -> Result<AuthenticatedDevice, AuthFailure> {
-        if uri.path() == "/sync/v1/notify" && first_message == b"notify-test-token" {
-            Ok(AuthenticatedDevice { device_id: self.device, account_id: self.account })
+        credentials: &api::SyncNotificationAuth,
+    ) -> Result<AuthenticatedNotification, AuthFailure> {
+        if uri.path() == "/sync/v1/notify" && credentials.access_token == "bm90aWZ5.dGVzdA.dG9rZW4"
+        {
+            Ok(AuthenticatedNotification {
+                identity: AuthenticatedDevice { device_id: self.device, account_id: self.account },
+                expires_at: 4_102_444_800,
+            })
         } else {
             Err(AuthFailure::new(
                 StatusCode::UNAUTHORIZED,
@@ -782,6 +787,7 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn postgres_router_notification_socket_authenticates_and_receives_committed_write() {
     let store = store().await;
     let account = Uuid::now_v7();
@@ -811,6 +817,12 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
     let (mut invalid_socket, _) = connect_async(format!("ws://{address}/sync/v1/notify"))
         .await
         .expect("invalid notification socket");
+    let ClientMessage::Binary(context) =
+        invalid_socket.next().await.expect("context").expect("context frame")
+    else {
+        panic!("binary context")
+    };
+    api::SyncNotificationContext::from_cbor(&context).expect("context codec");
     invalid_socket
         .send(ClientMessage::Binary(b"invalid".to_vec().into()))
         .await
@@ -830,10 +842,29 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
 
     let (mut socket, _) =
         connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("notification socket");
+    let ClientMessage::Binary(context) =
+        socket.next().await.expect("context").expect("context frame")
+    else {
+        panic!("binary context")
+    };
+    api::SyncNotificationContext::from_cbor(&context).expect("context codec");
     socket
-        .send(ClientMessage::Binary(b"notify-test-token".to_vec().into()))
+        .send(ClientMessage::Binary(
+            api::SyncNotificationAuth {
+                access_token: "bm90aWZ5.dGVzdA.dG9rZW4".into(),
+                dpop_proof: "ZA.ZQ.Zg".into(),
+            }
+            .to_cbor()
+            .expect("D75 authentication")
+            .into(),
+        ))
         .await
         .expect("send notification credential");
+    let ClientMessage::Binary(ready) = socket.next().await.expect("ready").expect("ready frame")
+    else {
+        panic!("binary ready")
+    };
+    api::SyncNotificationReady::from_cbor(&ready).expect("ready codec");
     tokio::time::timeout(Duration::from_secs(5), async {
         while hub.receiver_count(identity) != 1 {
             tokio::time::sleep(Duration::from_millis(10)).await;
