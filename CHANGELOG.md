@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- SQLite Operator session audit-rollback tests install one stable trigger and toggle a
+  fixture row, avoiding stale pooled schema state when replacing triggers repeatedly.
+  Login, refresh and reuse-revocation rollback checks retain their real audit failures.
+
 - PostgreSQL Operator keyring tests use a disposable schema per test, isolating deliberate
   key tampering from preceding device-key tests and later authentication checks in CI.
 
