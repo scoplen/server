@@ -4,6 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added durable discoverable Operator passkey login and independent browser sessions on SQLite
+  and PostgreSQL. Login compares against the current credential, then atomically updates its
+  counter/backup state, consumes the ceremony, creates a 30-day refresh family and appends the
+  mandatory audit. Refresh verifies and claims the original proof in its transaction, rotates
+  single-use digest-only credentials, and revokes a family on authenticated matching-token reuse.
+  Administration mutations can recheck current family, Operator and credential state under the
+  session lock. Complete browser JSON and scoped secure cookies are validated before commit;
+  uncertain commits disclose neither. HTTP login, refresh dispatch and console integration
+  remain incomplete.
+
 - Added independent durable Operator authentication admission and DPoP replay claims on both
   stores. Per-endpoint source, setup-digest, ceremony and authenticated-Operator windows enforce
   quotas and bounded exponential cooldowns across replicas. Setup completion clears failures
