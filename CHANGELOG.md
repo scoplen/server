@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added full public Personal bootstrap and sync regressions for SQLite and PostgreSQL: real
+  passkey setup and fresh login, protected invitation issuance, first-device enrollment,
+  challenge/token exchange, Personal session and keys, signed encrypted host write, downloaded
+  envelope verification/decryption and durable ACK. The tests use the complete production API
+  router and verify its deployment audit chain, without seeding account/device/vault rows.
+  This is server HTTP evidence; native desktop and two-device flows remain separate gates.
+
 - Mounted Operator-authenticated Personal invitation issuance on SQLite and PostgreSQL using
   the published strict JSON contract and real Cedar schema/policies. Dedicated durable source
   and Operator quotas, exact scope, protected DPoP replay claims and current-session checks

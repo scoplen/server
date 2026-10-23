@@ -107,6 +107,8 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_invitation::tests::postgres_
       - name: Check PostgreSQL Operator login and browser refresh HTTP
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::postgres_
+      - name: Check PostgreSQL public Personal bootstrap and sync
+        run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::postgres_
       - name: Check PostgreSQL public Personal enrollment listener
         run: cargo test -p scoplen-server --lib --features postgres-integration personal_enrollment::tests::postgres_real_listener_redeems_once_and_audits -- --exact
       - name: Check PostgreSQL personal vault ownership and concurrency
