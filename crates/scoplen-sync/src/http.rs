@@ -2107,6 +2107,7 @@ mod tests {
         denied_read: Option<(storage::DeviceId, storage::VaultId)>,
         denied_notifications: Option<storage::DeviceId>,
         notification_auth_delay: Duration,
+        notification_auth_blocks: bool,
         notification_check_stalled: Arc<AtomicBool>,
         /// Test-only stand-in for the crypto and membership validator injected in production.
         reject_writes: bool,
@@ -2122,6 +2123,7 @@ mod tests {
                 denied_read: None,
                 denied_notifications: None,
                 notification_auth_delay: Duration::ZERO,
+                notification_auth_blocks: false,
                 notification_check_stalled: Arc::default(),
                 reject_writes: false,
                 expected_key_signature: None,
@@ -2285,7 +2287,11 @@ mod tests {
             _uri: &Uri,
             credentials: &api::SyncNotificationAuth,
         ) -> Result<AuthenticatedNotification, AuthFailure> {
-            tokio::time::sleep(self.notification_auth_delay).await;
+            if self.notification_auth_blocks {
+                std::thread::sleep(self.notification_auth_delay);
+            } else {
+                tokio::time::sleep(self.notification_auth_delay).await;
+            }
             if credentials.access_token == "bm90aWZ5.dGVzdA.dG9rZW4" {
                 Ok(AuthenticatedNotification {
                     identity: AuthenticatedDevice {

@@ -141,6 +141,24 @@ async fn authentication_deadline_includes_credential_verification() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_non_yielding_verifier_result_never_subscribes_or_sends_ready() {
+    let (store, _, device) = test_store().await;
+    let mut authenticator = TestAuthenticator::new(device, true);
+    authenticator.notification_auth_delay = Duration::from_secs(11);
+    authenticator.notification_auth_blocks = true;
+    let hub = NotificationHub::default();
+    let (address, server) =
+        notification_server(router_with_notifications(store, authenticator, hub.clone())).await;
+    let (mut socket, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut socket).await;
+    socket.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    closed(&mut socket, 1008).await;
+    assert_eq!(hub.receiver_count(TestAuthenticator::identity(device)), 0);
+    server.abort();
+}
+
 #[tokio::test]
 async fn stalled_current_state_check_closes_without_waiting_for_token_expiry() {
     let (store, _, device) = test_store().await;

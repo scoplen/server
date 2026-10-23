@@ -43,18 +43,22 @@ async fn session<A: SyncAuthenticator>(
     uri: Uri,
     deadline: Instant,
 ) {
-    let authenticated =
-        match timeout_at(deadline, authenticate(&mut socket, &state, &method, &uri)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(failure)) => {
-                close(&mut socket, failure).await;
-                return;
-            }
-            Err(_) => {
-                close(&mut socket, Failure::Policy).await;
-                return;
-            }
-        };
+    let result = timeout_at(deadline, authenticate(&mut socket, &state, &method, &uri)).await;
+    if Instant::now() >= deadline {
+        close(&mut socket, Failure::Policy).await;
+        return;
+    }
+    let authenticated = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(failure)) => {
+            close(&mut socket, failure).await;
+            return;
+        }
+        Err(_) => {
+            close(&mut socket, Failure::Policy).await;
+            return;
+        }
+    };
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         close(&mut socket, Failure::Internal).await;
         return;
@@ -155,10 +159,16 @@ async fn current<A: SyncAuthenticator>(
     expires: Instant,
 ) -> Result<(), Failure> {
     let deadline = expires.min(Instant::now() + CURRENT_STATE_TIMEOUT);
-    timeout_at(deadline, state.authenticator.authorize_notifications(authenticated.identity))
-        .await
-        .map_err(|_| if Instant::now() >= expires { Failure::Policy } else { Failure::Internal })?
-        .map_err(|error| Failure::auth(&error))
+    let result =
+        timeout_at(deadline, state.authenticator.authorize_notifications(authenticated.identity))
+            .await;
+    if Instant::now() >= expires {
+        return Err(Failure::Policy);
+    }
+    if Instant::now() >= deadline {
+        return Err(Failure::Internal);
+    }
+    result.map_err(|_| Failure::Internal)?.map_err(|error| Failure::auth(&error))
 }
 
 enum Failure {
