@@ -4,15 +4,16 @@
 #[path = "../../scoplen-store/tests/support/lost_commit.rs"]
 mod lost_commit;
 #[path = "../../scoplen-store/tests/support/passkey.rs"]
-#[allow(dead_code)]
 mod passkey;
 #[path = "../../scoplen-store/tests/support/mod.rs"]
 mod support;
 
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use scoplen_api::ProblemDetails;
-use scoplen_crypto::P256SigningKey;
+use scoplen_api::{ProblemDetails, auth::BrowserAuthTokenResponse};
+use scoplen_crypto::{
+    OperatorAccessToken, P256SigningKey, TrustedOperatorAccessTokenKeys, dpop_jwk_thumbprint,
+};
 use scoplen_store::{RelationalStore, SqliteStore, kms::LocalKeyFile};
 use std::path::PathBuf;
 use tokio::{
@@ -20,6 +21,9 @@ use tokio::{
     net::TcpListener,
 };
 use webauthn_authenticator_rs::prelude::Url;
+
+#[path = "operator_session_http_tests.rs"]
+mod sessions;
 
 const ORIGIN: &str = "https://setup.example.com:9443";
 
@@ -243,9 +247,19 @@ impl Reply {
 }
 
 async fn http(address: SocketAddr, path: &str, body: &[u8], headers: &[(&str, &str)]) -> Reply {
+    http_method(address, "POST", path, body, headers).await
+}
+
+async fn http_method(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &[(&str, &str)],
+) -> Reply {
     let mut stream = tokio::net::TcpStream::connect(address).await.expect("connect");
     let mut request = format!(
-        "POST {path} HTTP/1.1\r\nHost: setup.example.com:9443\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: setup.example.com:9443\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (name, value) in headers {

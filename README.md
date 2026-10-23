@@ -79,23 +79,23 @@ verification, atomic ceremony consumption and audited browser-session creation, 
 proofs are reverified and durably claimed within the rotation transaction. Current family,
 Operator and credential authorization can be rechecked inside an administration mutation
 transaction. Complete token JSON and the scoped secure cookie are validated before commit, and
-an uncertain commit returns no session secrets. Browser HTTP sign-in, console integration and
+an uncertain commit returns no session secrets. The API listener mounts the strict Operator
+setup and login options/finish routes, and dispatches Operator browser refresh cookies to their
+independent verifier and family store. Console integration and
 control-plane authorization remain separate roadmap work. A dedicated Operator keyring uses
 independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encrypted envelopes,
 with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
-integrity, KMS validation, or a required audit write fails. Operator sign-in and
-invitation-issuance authorization remain separate roadmap work. All server proto dependencies
+integrity, KMS validation, or a required audit write fails. Invitation-issuance authorization
+remains separate roadmap work. All server proto dependencies
 are pinned to `scoplen-proto@e2dd140` for the shared authentication, Operator token, scope, and
-object-signature contracts. Independent Operator authentication storage now also
-provides per-endpoint source, setup-digest, ceremony and verified-Operator admission, durable
-DPoP replay claims, and audit-atomic setup finish cooldown updates on both databases.
+object-signature contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. Browser sign-in, complete control-plane policy filtering,
+backend and include it in `/readyz`. Browser console sign-in, complete control-plane policy filtering,
 membership-aware purge orchestration, multi-instance
 notification fan-out, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and console behavior are still
@@ -271,9 +271,18 @@ durable source/private admission and replay claims. Invalid outer requests or wr
 leave a ceremony usable; a failed embedded WebAuthn check consumes that ceremony with its audit
 but preserves the setup entitlement. Successful registration returns only the Operator id,
 without a token or cookie. An uncertain finish returns `auth.commit_outcome_unknown`; retain the
-passkey and attempt fresh login before explicitly returning to pending setup. Login/session and
-console integration remain incomplete, so the emitted link still requires that future browser
-surface. The Personal enrollment route
+passkey and attempt fresh login before explicitly returning to pending setup.
+`POST /api/v1/auth/operator/login/options` accepts exactly `{}` and returns discoverable passkey
+options without enumerating credentials. `/api/v1/auth/operator/login/finish` consumes the
+assertion ceremony and creates an independent Operator session with only the browser four-field
+token response and a scoped `HttpOnly; Secure; SameSite=Strict` refresh cookie. Both require the
+same exact Origin and fresh DPoP proof as setup. `POST /api/v1/auth/refresh` accepts that Operator
+credential only in the cookie with the exact Origin and `{}` body; it rotates the credential
+inside the proof/replay/session/audit transaction. Wrong proof keys or reused DPoP proofs cannot
+revoke a family. Authenticated matching-token reuse revokes it. Native JSON refresh remains a
+device-only surface. An uncertain login or refresh commit returns no token or cookie and must
+restart passkey login with a fresh ceremony. Console integration remains incomplete, so the
+emitted setup link still requires that future browser surface. The Personal enrollment route
 requires an already issued invitation and no existing session or cookie. It rejects
 `Authorization`, `DPoP`, and `Idempotency-Key` headers. It
 admits at most 30 attempts per peer address and five attempts per decoded invitation digest in

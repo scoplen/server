@@ -26,7 +26,9 @@ self-hosted server, host agent, administration CLI, and web console.
   account-key updates, and production notifications remain unmounted. Durable first-operator
   setup and maintained WebAuthn verification exist on both stores, including discoverable login,
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
-  transaction-local current-session authorization. Their HTTP/console surfaces, invitation
+  transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only
+  Operator refresh enforce exact Origin, durable DPoP/admission and non-disclosure after unknown
+  commits. Console surfaces, invitation
   issuance, complete identity and policy workflows, membership-aware purge scheduling,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
   can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.

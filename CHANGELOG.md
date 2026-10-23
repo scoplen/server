@@ -4,13 +4,21 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted discoverable Operator passkey login and cookie-only browser refresh on the API listener.
+  Strict shared codecs, exact Origin, durable admission and DPoP replay checks precede login;
+  refresh verifies proof binding, rotates and audits inside one transaction. Responses disclose
+  only four browser token fields and the scoped secure cookie after confirmed commit. Real
+  SQLite/PostgreSQL HTTP tests cover signed login, Operator JWKS, current state, native/device
+  separation, wrong keys, replay, matching-token reuse, quotas, races, mandatory audit rollback,
+  deferred failures and real PostgreSQL lost commit acknowledgements. Console remains open.
+
 - Mounted first-Operator setup options and finish on the API listener with shared strict wire
   codecs, exact Origin, presented-key DPoP verification, durable replay claims and source/private
   admission on SQLite and PostgreSQL. Registration returns only an Operator id. Real software
   passkey HTTP tests cover wrong keys, replay, malformed outer and embedded artifacts, expiry,
   quotas, concurrent completion, mandatory audit rollback, deferred commit failure and a real
   PostgreSQL lost commit acknowledgement. Unknown outcomes disclose no success or cookie.
-  Updated all proto pins to `e2dd140` and the route manifest; sign-in and console remain open.
+  Updated all proto pins to `e2dd140` and the route manifest.
 
 - PostgreSQL administration transaction guards hold shared row locks on the current Operator,
   credential and refresh family through commit or rollback. Direct concurrent revocations cannot
@@ -23,9 +31,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   single-use digest-only credentials, and revokes a family on authenticated matching-token reuse.
   Administration mutations can recheck current family, Operator and credential state under the
   session lock. Complete browser JSON and scoped secure cookies are validated before commit;
-  uncertain commits disclose neither. HTTP login, refresh dispatch and console integration
-  remain incomplete.
-
+  uncertain commits disclose neither.
 
 - Added an independent SQLite/PostgreSQL Operator access-token keyring and public
   `GET /.well-known/operator-jwks.json`. Dedicated seeds, `operator-` key identifiers, and
@@ -33,13 +39,13 @@ Changes are recorded here for released or reviewable repository outcomes.
   commit with deployment audit events; retired keys remain public for seven days. KMS,
   integrity, storage, or required audit failures return a non-cacheable 503 without partial
   keys. Device JWKS stays independent. Updated all proto pins to `0c06293` and UUID to 1.28.0
-  in the lockfile for the shared Operator profile. Operator sign-in remains unmounted.
+  in the lockfile for the shared Operator profile.
 
 - Added independent durable Operator authentication admission and DPoP replay claims on both
   stores. Per-endpoint source, setup-digest, ceremony and authenticated-Operator windows enforce
   quotas and bounded exponential cooldowns across replicas. Setup completion clears failures
   without refunding quotas; failed embedded registration commits ceremony consumption, cooldown
-  and denial audit together. Browser login/session remains incomplete.
+  and denial audit together.
 
 - Added durable first-operator setup and real ES256 WebAuthn verification on SQLite and
   PostgreSQL. API initialization discloses a digest-only one-hour setup entitlement once after
@@ -47,8 +53,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   `splctl bootstrap --reissue-pending` action replaces only an uncompleted entitlement.
   Registration, permanent setup completion, ceremony consumption and deployment audit commit
   together. Removed setup-link file creation. The maintained verifier requires vendored
-  OpenSSL build prerequisites. HTTP login, operator sessions and console integration
-  remain incomplete.
+  OpenSSL build prerequisites. Console integration remains incomplete.
 
 - Updated `rustls-webpki` to 0.103.16 and both `webpki-roots` and `webpki-root-certs` to 1.0.10,
   fixing RUSTSEC-2026-0382, RUSTSEC-2026-0381, and RUSTSEC-2026-0383 for TLS certificate trust.
