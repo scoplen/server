@@ -22,6 +22,9 @@ use std::fmt::Write as _;
 
 use crate::runtime::{ListenerDatabase, api_router};
 
+#[path = "account_profile_tests.rs"]
+mod account_profile;
+
 async fn mount_complete_api(f: &mut Fixture) {
     f.server.abort();
     let _ = (&mut f.server).await;
@@ -278,13 +281,21 @@ async fn sync_object(
     assert_eq!(f.count("SELECT cursor FROM sync_acks").await, 1);
 }
 
-async fn complete_flow(mut f: Fixture) {
-    mount_complete_api(&mut f).await;
+struct PersonalBootstrap {
+    receipt: PersonalEnrollmentResponse,
+    token: String,
+    client: P256SigningKey,
+    operator_token: String,
+    operator_key: P256SigningKey,
+}
+
+async fn bootstrap_personal(f: &mut Fixture) -> PersonalBootstrap {
+    mount_complete_api(f).await;
     let browser = key(1);
     let (mut authenticator, _) = f.enroll(&browser).await;
     let session = f.login(&mut authenticator, &browser).await.session();
     let reply = protected(
-        &f,
+        f,
         "POST",
         "/api/v1/admin/personal-invitations",
         b"{}",
@@ -323,7 +334,29 @@ async fn complete_flow(mut f: Fixture) {
         f.count("SELECT COUNT(*) FROM personal_invitations WHERE consumed_at_ms IS NOT NULL").await,
         1
     );
-    let token = authenticate_device(&f, receipt.device_id, &client).await;
+    let token = authenticate_device(f, receipt.device_id, &client).await;
+    PersonalBootstrap {
+        receipt,
+        token,
+        client,
+        operator_token: session.access_token,
+        operator_key: browser,
+    }
+}
+
+async fn complete_flow(mut f: Fixture) {
+    let PersonalBootstrap { receipt, token, client, .. } = bootstrap_personal(&mut f).await;
+    let reply = protected(&f, "GET", "/api/v1/accounts/me", &[], &token, &client).await;
+    assert_eq!(reply.status, 200);
+    let profile = scoplen_api::account_profile::AccountProfile::from_http_json(
+        &reply.body,
+        reply.header("etag"),
+        reply.header("cache-control"),
+        reply.header("pragma"),
+    )
+    .expect("bounded authenticated account profile");
+    assert_eq!(profile.id, receipt.account_id);
+    assert_eq!(profile.email, None);
     session_and_keys(&f, &receipt, &token, &client).await;
     sync_object(&f, &receipt, &token, &client).await;
     assert_eq!(f.count("SELECT COUNT(*) FROM operator_refresh_families").await, 1);

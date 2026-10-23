@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted `GET /api/v1/accounts/me` for enrolled devices with exact `account:read` scope,
+  JWT/DPoP/replay checks and transaction-local current account/device/proof-key/certificate
+  authorization on SQLite and PostgreSQL. The bounded shared Resource codec preserves null or
+  exact stored email, stable strong ETags and persisted timestamps; no-store/Pragma responses
+  and disclosure-free errors cover revoked, missing, corrupt and unavailable state. Added real
+  HTTP authorization/failure regressions, profile reads to the complete public Personal flow,
+  the production route manifest and PostgreSQL CI. Profile mutation remains separate work.
+
 - Added the real React Personal console for first-passkey setup, fresh discoverable Operator
   login, serialized cookie-only refresh and explicit Personal invitation creation. The setup
   fragment is scrubbed immediately and the non-extractable browser proof key and access token

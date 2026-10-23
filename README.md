@@ -342,13 +342,21 @@ listener returns no-store JSON and RFC 9457 problems. Device and refresh admissi
 across API instances; a verified spent-token reuse revokes its 30-day family. A refresh response
 whose commit cannot be confirmed requires a new device challenge instead of retrying the old
 credential. `GET /.well-known/jwks.json` publishes only the active and unexpired overlap public
-token keys. The protected Personal sync subset above uses these credentials; other control-plane
-APIs remain unmounted.
+token keys. `GET /api/v1/accounts/me` uses the same enrolled-device boundary with the exact
+`account:read` scope. It rechecks the account, device, proof key, certificate publication and
+revocation inside the read transaction, and returns only the caller's bounded account Resource.
+The HTTP ETag equals the stable strong body tag; responses disable caching and preserve
+`email: null` for invitation-created accounts. Stored email is returned exactly when valid;
+missing or corrupt state and storage failures disclose no profile. Origin is optional for
+native callers and must match the deployment exactly when supplied; GET bodies are rejected.
+Profiles currently have no mutation endpoint, so both timestamps come from persisted enrollment
+time. Profile mutation and email verification remain separate work. The protected Personal sync
+subset above also uses these credentials; other control-plane APIs remain unmounted.
 
 Server integration tests exercise the complete public Personal path on SQLite and PostgreSQL:
 passkey setup, fresh Operator login, invitation issuance, signed first-device enrollment,
-device challenge/token exchange, Personal session/key reads, encrypted signed host write,
-download verification/decryption, and durable ACK. They use the production API router and
+device challenge/token exchange, authenticated account-profile read, Personal session/key reads,
+encrypted signed host write, download verification/decryption, and durable ACK. They use the production API router and
 verify its deployment audit chain. Native desktop and two-device acceptance remain separate
 roadmap work.
 

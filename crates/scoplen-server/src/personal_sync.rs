@@ -87,15 +87,14 @@ impl PersonalSyncAuthenticator {
     }
 }
 
-#[async_trait::async_trait]
-impl SyncAuthenticator for PersonalSyncAuthenticator {
-    async fn authenticate(
+impl PersonalSyncAuthenticator {
+    pub(crate) async fn authenticate_operation(
         &self,
+        operation: DeviceAccessOperation,
         method: &Method,
         uri: &Uri,
         headers: &HeaderMap,
-    ) -> Result<AuthenticatedDevice, AuthFailure> {
-        let operation = operation_for(method, uri).ok_or_else(policy_denied)?;
+    ) -> Result<CurrentPrincipal, AuthFailure> {
         let raw_token = single_header(headers, AUTHORIZATION.as_str(), 4_101)?
             .strip_prefix("DPoP ")
             .ok_or_else(authentication_required)?;
@@ -129,7 +128,21 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         if !operation.required_scope().is_present_in(&claims.scope) {
             return Err(policy_denied());
         }
-        Ok(identity)
+        Ok(principal)
+    }
+}
+
+#[async_trait::async_trait]
+impl SyncAuthenticator for PersonalSyncAuthenticator {
+    async fn authenticate(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<AuthenticatedDevice, AuthFailure> {
+        let operation = operation_for(method, uri).ok_or_else(policy_denied)?;
+        let principal = self.authenticate_operation(operation, method, uri, headers).await?;
+        Ok(AuthenticatedDevice { account_id: principal.account_id, device_id: principal.device_id })
     }
 
     async fn authorize(
