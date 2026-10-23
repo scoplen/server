@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- SQLite Operator session audit-rollback tests install one stable trigger and toggle a
+  fixture row, avoiding stale pooled schema state when replacing triggers repeatedly.
+  Login, refresh and reuse-revocation rollback checks retain their real audit failures.
+
 - PostgreSQL device authentication and Operator JWKS HTTP tests use disposable schemas so
   deliberate key corruption cannot contaminate later runs or neighboring tests. CI now runs
   both public HTTP fixtures together, including the Operator JWKS failure boundary.

@@ -573,10 +573,21 @@ async fn sqlite_real_login_rotation_and_reuse_revocation() {
 #[tokio::test]
 async fn sqlite_login_rotation_and_revocation_roll_back_on_audit_failure() {
     let (store, dir) = sqlite().await;
+    // Toggle rows rather than repeatedly replacing DDL: pooled SQLite connections may
+    // retain an old trigger schema until their next stepped statement refreshes it.
+    sqlx::raw_sql(
+        "CREATE TABLE audit_failure_switch (enabled INTEGER PRIMARY KEY CHECK (enabled=1));
+         CREATE TRIGGER reject_operator_session_audit BEFORE INSERT ON deployment_audit_events
+         WHEN EXISTS (SELECT 1 FROM audit_failure_switch)
+         BEGIN SELECT RAISE(ABORT,'fixture failure'); END",
+    )
+    .execute(store.pool())
+    .await
+    .expect("install stable audit failure trigger");
     rollback!(
         store,
-        "CREATE TRIGGER reject_operator_session_audit BEFORE INSERT ON deployment_audit_events BEGIN SELECT RAISE(ABORT,'fixture failure'); END",
-        "DROP TRIGGER reject_operator_session_audit"
+        "INSERT INTO audit_failure_switch (enabled) VALUES (1)",
+        "DELETE FROM audit_failure_switch"
     );
     store.pool().close().await;
     support::remove_test_directory(dir).await;
