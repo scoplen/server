@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Included the mounted Operator JWKS endpoint in the control-plane route manifest so the
+  three-platform contract checks validate both independent public key discovery routes.
+
 - Added independent durable Operator authentication admission and DPoP replay claims on both
   stores. Per-endpoint source, setup-digest, ceremony and authenticated-Operator windows enforce
   quotas and bounded exponential cooldowns across replicas. Setup completion clears failures

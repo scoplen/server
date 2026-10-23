@@ -1,5 +1,6 @@
 [
   { "method": "GET", "path": "/.well-known/jwks.json" },
+  { "method": "GET", "path": "/.well-known/operator-jwks.json" },
   { "method": "POST", "path": "/auth/challenge" },
   { "method": "POST", "path": "/auth/device" },
   { "method": "POST", "path": "/auth/personal-enroll" },
