@@ -38,7 +38,7 @@ fn denied(reply: &Reply, status: u16, code: &str) {
     reply.privacy();
 }
 
-async fn signed_token(
+pub(super) async fn signed_token(
     f: &Fixture,
     identity: &PersonalBootstrap,
     account: Uuid,
@@ -75,7 +75,12 @@ async fn signed_token(
     .to_owned()
 }
 
-fn proof_for(identity: &PersonalBootstrap, method: &str, path: &str, token: &str) -> DpopProof {
+pub(super) fn proof_for(
+    identity: &PersonalBootstrap,
+    method: &str,
+    path: &str,
+    token: &str,
+) -> DpopProof {
     DpopProof::sign(
         &identity.client,
         &identity.client.public_key_sec1(),

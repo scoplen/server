@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_devices;
 mod account_profile;
 mod config;
 mod console;

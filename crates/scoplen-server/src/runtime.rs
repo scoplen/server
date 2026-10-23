@@ -883,6 +883,11 @@ pub(crate) fn api_router_with_limits(
     if enrollment_enabled {
         router
             .merge(personal_enrollment::router(trusted_origin.clone(), enrollment_backend))
+            .merge(crate::account_devices::router(
+                trusted_origin.clone(),
+                auth_backend.clone(),
+                key_management.clone(),
+            ))
             .merge(crate::account_profile::router(
                 trusted_origin.clone(),
                 auth_backend.clone(),
