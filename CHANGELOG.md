@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Raised the Tokio minimum and lock to 1.53.3 for RUSTSEC-2026-0386, addressing
+  Unix `AsyncFd` I/O safety.
+
 - Added the real React Personal console for first-passkey setup, fresh discoverable Operator
   login, serialized cookie-only refresh and explicit Personal invitation creation. The setup
   fragment is scrubbed immediately and the non-extractable browser proof key and access token
