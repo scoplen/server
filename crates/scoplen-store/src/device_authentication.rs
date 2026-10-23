@@ -543,11 +543,12 @@ pub(crate) async fn load_sqlite_principal(
     .bind(&certificate)
     .fetch_one(&mut **tx)
     .await?;
-    let revocations: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT revocation FROM sync_account_key_revocations WHERE account_id=? ORDER BY revocation",
+    let revocations = crate::account_devices::sqlite_statements(
+        tx,
+        &account_id,
+        crate::account_devices::StatementKind::Revocation,
+        &mut 0,
     )
-    .bind(&account_id)
-    .fetch_all(&mut **tx)
     .await?;
     verify_current_principal(
         account_id,
@@ -586,11 +587,12 @@ pub(crate) async fn load_postgres_principal(
     .bind(&certificate)
     .fetch_one(&mut **tx)
     .await?;
-    let revocations: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT revocation FROM sync_account_key_revocations WHERE account_id=$1 ORDER BY revocation",
+    let revocations = crate::account_devices::postgres_statements(
+        tx,
+        &account_id,
+        crate::account_devices::StatementKind::Revocation,
+        &mut 0,
     )
-    .bind(&account_id)
-    .fetch_all(&mut **tx)
     .await?;
     verify_current_principal(
         account_id,

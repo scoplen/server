@@ -350,15 +350,24 @@ The HTTP ETag equals the stable strong body tag; responses disable caching and p
 missing or corrupt state and storage failures disclose no profile. Origin is optional for
 native callers and must match the deployment exactly when supplied; GET bodies are rejected.
 Profiles currently have no mutation endpoint, so both timestamps come from persisted enrollment
-time. Profile mutation and email verification remain separate work. The protected Personal sync
-subset above also uses these credentials; other control-plane APIs remain unmounted.
+time. Profile mutation and email verification remain separate work.
+`GET /api/v1/accounts/me/devices` uses the same exact `account:read` boundary and returns the
+complete signed certificate and revocation snapshot for that account. Each artifact is at most
+64 KiB, their combined decoded size is at most 4 MiB, and the JSON response is at most 6 MiB.
+The read transaction rechecks caller admission and verifies every stored signature, account
+binding and device-id uniqueness; inactive peer enrollment rows do not remove signed statements.
+Missing key state, corrupt collections and capacity failures return a non-cacheable 503 without
+partial data. The read accepts no body, query, `Idempotency-Key` or `If-Match`, and returns no ETag
+or pagination fields. Names and platforms remain signed account claims. Device admission,
+revocation mutations and additional-device enrollment remain separate work. The protected Personal
+sync subset above also uses these credentials; other control-plane APIs remain unmounted.
 
 Server integration tests exercise the complete public Personal path on SQLite and PostgreSQL:
 passkey setup, fresh Operator login, invitation issuance, signed first-device enrollment,
-device challenge/token exchange, authenticated account-profile read, Personal session/key reads,
-encrypted signed host write, download verification/decryption, and durable ACK. They use the production API router and
-verify its deployment audit chain. Native desktop and two-device acceptance remain separate
-roadmap work.
+device challenge/token exchange, authenticated account-profile and device-statement reads,
+Personal session/key reads, encrypted signed host write, download verification/decryption, and
+durable ACK. They use the production API router and verify its deployment audit chain. Native
+desktop and two-device acceptance remain separate roadmap work.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use

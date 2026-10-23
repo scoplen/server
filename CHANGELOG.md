@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted `GET /api/v1/accounts/me/devices` with exact enrolled-device `account:read`
+  authorization, durable DPoP replay protection and transaction-local caller rechecks on SQLite
+  and PostgreSQL. Complete bounded snapshots include every stored signed certificate and
+  revocation, including inactive peers, and verify signatures, account bindings and unique
+  device ids before disclosure. Corrupt, missing or oversized state fails as a whole. Added
+  real public HTTP denial/boundary regressions, concurrent statement and key-bundle coverage,
+  the complete Personal flow read, production route manifest and PostgreSQL CI.
+
 - Raised the Tokio minimum and lock to 1.53.3 for RUSTSEC-2026-0386, addressing
   Unix `AsyncFd` I/O safety.
 

@@ -22,6 +22,8 @@ use std::fmt::Write as _;
 
 use crate::runtime::{ListenerDatabase, api_router};
 
+#[path = "account_devices_tests.rs"]
+mod account_devices;
 #[path = "account_profile_tests.rs"]
 mod account_profile;
 
@@ -357,6 +359,21 @@ async fn complete_flow(mut f: Fixture) {
     .expect("bounded authenticated account profile");
     assert_eq!(profile.id, receipt.account_id);
     assert_eq!(profile.email, None);
+    let reply = protected(&f, "GET", "/api/v1/accounts/me/devices", &[], &token, &client).await;
+    assert_eq!(reply.status, 200);
+    let devices = scoplen_api::account_devices::AccountDeviceStatements::from_http_json(
+        &reply.body,
+        reply.header("cache-control"),
+        reply.header("pragma"),
+    )
+    .expect("complete authenticated device statements");
+    assert_eq!(devices.account_id, receipt.account_id);
+    assert_eq!(devices.certificates.len(), 1);
+    assert_eq!(devices.revocations, Vec::<Vec<u8>>::new());
+    assert_eq!(
+        DeviceCertificate::decode(&devices.certificates[0]).expect("signed certificate").device_id,
+        receipt.device_id
+    );
     session_and_keys(&f, &receipt, &token, &client).await;
     sync_object(&f, &receipt, &token, &client).await;
     assert_eq!(f.count("SELECT COUNT(*) FROM operator_refresh_families").await, 1);

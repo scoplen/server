@@ -31,6 +31,11 @@ self-hosted server, host agent, administration CLI, and web console.
   commits. Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
   independent database quotas, and transaction-local session authorization; one-time URLs are
   disclosed only after an audited confirmed commit.
+  Enrolled devices can read their complete signed certificate/revocation snapshot with current
+  admission checked in the same account transaction. Every statement is verified before
+  disclosure; inactive peer rows do not silently filter the signed set, and invalid or
+  oversized collections fail without partial results. Signed device claims are not hardware
+  attestations or server observation timestamps. Device lifecycle mutations remain open.
   The Personal React console connects setup, fresh passkey sign-in and invitation
   requests through the generated public API contract. Its proof key and access token stay in
   memory; reloads require a new login. Manifest-validated static assets fail independently of
