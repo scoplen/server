@@ -4,6 +4,17 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- PostgreSQL device authentication and Operator JWKS HTTP tests use disposable schemas so
+  deliberate key corruption cannot contaminate later runs or neighboring tests. CI now runs
+  both public HTTP fixtures together, including the Operator JWKS failure boundary.
+
+- Added full public Personal bootstrap and sync regressions for SQLite and PostgreSQL: real
+  passkey setup and fresh login, protected invitation issuance, first-device enrollment,
+  challenge/token exchange, Personal session and keys, signed encrypted host write, downloaded
+  envelope verification/decryption and durable ACK. The tests use the complete production API
+  router and verify its deployment audit chain, without seeding account/device/vault rows.
+  This is server HTTP evidence; native desktop and two-device flows remain separate gates.
+
 - PostgreSQL Operator keyring tests use a disposable schema per test, isolating deliberate
   key tampering from preceding device-key tests and later authentication checks in CI.
 

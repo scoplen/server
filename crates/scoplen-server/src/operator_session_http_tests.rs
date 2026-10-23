@@ -4,6 +4,9 @@ use super::*;
 
 type Authenticator = webauthn_authenticator_rs::WebauthnAuthenticator<passkey::ResidentPasskey>;
 
+#[path = "operator_personal_flow_tests.rs"]
+mod personal_flow;
+
 impl Fixture {
     async fn enroll(&self, client: &P256SigningKey) -> (Authenticator, Uuid) {
         let token = self.token().await;

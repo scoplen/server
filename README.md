@@ -310,6 +310,13 @@ credential. `GET /.well-known/jwks.json` publishes only the active and unexpired
 token keys. The protected Personal sync subset above uses these credentials; other control-plane
 APIs remain unmounted.
 
+Server integration tests exercise the complete public Personal path on SQLite and PostgreSQL:
+passkey setup, fresh Operator login, invitation issuance, signed first-device enrollment,
+device challenge/token exchange, Personal session/key reads, encrypted signed host write,
+download verification/decryption, and durable ACK. They use the production API router and
+verify its deployment audit chain. Native desktop and two-device acceptance remain separate
+roadmap work.
+
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
 PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or
