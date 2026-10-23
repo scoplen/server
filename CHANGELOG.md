@@ -14,9 +14,27 @@ Changes are recorded here for released or reviewable repository outcomes.
   production build, bundled fonts/licenses, failure-path tests and CI checks. Physical passkey
   and release-package verification remain open.
 
+- PostgreSQL Operator keyring tests use a disposable schema per test, isolating deliberate
+  key tampering from preceding device-key tests and later authentication checks in CI.
+
+- Mounted Operator-authenticated Personal invitation issuance on SQLite and PostgreSQL using
+  the published strict JSON contract and real Cedar schema/policies. Dedicated durable source
+  and Operator quotas, exact scope, protected DPoP replay claims and current-session checks
+  precede issuance. The mutation holds authorization locks through its mandatory audit and
+  commit; one-time URLs are disclosed only after confirmed commit. Live HTTP regressions cover
+  ordinary-device and reduced-scope denials, revocation during body delivery, concurrent quota
+  contention, audit rollback, SQLite deferred commit failure and PostgreSQL lost commit ACK.
+  Added the admission migration, schema parity, production route manifest and PostgreSQL CI.
+
 - PostgreSQL HTTP lost-commit fixtures wait for the exact held business advisory lock before
   withholding its acknowledgement. Parallel admission/keyring waits cannot redirect the fault
   into a preceding transaction.
+
+- Updated `ctutils` to 0.4.4 for RUSTSEC-2026-0385, fixing non-constant-time mask
+  generation and integer comparison in the shared cryptographic dependency graph.
+
+- Included the mounted Operator JWKS endpoint in the control-plane route manifest so the
+  three-platform contract checks validate both independent public key discovery routes.
 
 - Mounted discoverable Operator passkey login and cookie-only browser refresh on the API listener.
   Strict shared codecs, exact Origin, durable admission and DPoP replay checks precede login;

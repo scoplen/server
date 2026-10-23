@@ -206,6 +206,8 @@ pub(crate) fn router(
 ) -> Router {
     let operator_router =
         crate::operator_auth::router(trusted_origin.clone(), backend.clone(), kms.clone());
+    let invitation_router =
+        crate::operator_invitation::router(trusted_origin.clone(), backend.clone(), kms.clone());
     let state = Arc::new(AuthState { trusted_origin, backend, kms });
     Router::new()
         .route("/api/v1/auth/challenge", post(challenge))
@@ -215,6 +217,7 @@ pub(crate) fn router(
         .route("/.well-known/operator-jwks.json", get(operator_jwks))
         .with_state(state)
         .merge(operator_router)
+        .merge(invitation_router)
 }
 
 #[allow(clippy::too_many_lines, clippy::manual_let_else)]
