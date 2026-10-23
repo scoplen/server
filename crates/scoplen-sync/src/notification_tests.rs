@@ -14,6 +14,89 @@ use tokio_tungstenite::{
     },
 };
 
+#[tokio::test]
+async fn unavailable_source_and_generation_changes_close_with_1011() {
+    let (store, _, device) = test_store().await;
+    let hub = NotificationHub::default();
+    hub.unavailable();
+    let app = router_with_notifications(store, TestAuthenticator::new(device, true), hub.clone());
+    let (address, server) = notification_server(app).await;
+    let (mut unavailable, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut unavailable).await;
+    unavailable.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    closed(&mut unavailable, 1011).await;
+
+    let (mut opened_offline, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut opened_offline).await;
+    hub.available();
+    opened_offline.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    closed(&mut opened_offline, 1011).await;
+
+    let (mut active, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut active).await;
+    active.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    ready(&mut active).await;
+    hub.unavailable();
+    hub.available();
+    closed(&mut active, 1011).await;
+
+    let (mut recovering, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut recovering).await;
+    hub.unavailable();
+    hub.available();
+    recovering.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    closed(&mut recovering, 1011).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn bounded_dispatch_overflow_and_hung_authorization_force_reconciliation() {
+    let (store, vault, device) = test_store().await;
+    let hub = NotificationHub::default();
+    let authenticator = TestAuthenticator::new(device, true);
+    let app = router_with_notifications(store, authenticator.clone(), hub.clone());
+    let (address, server) = notification_server(app).await;
+    let (mut socket, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut socket).await;
+    socket.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    ready(&mut socket).await;
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    let event = api::SyncNotification::VaultAdvanced { vault: Uuid::from_bytes(vault), seq: 1 };
+    for _ in 0..3 {
+        crate::notification_fanout::enqueue(&send, &hub, event.clone());
+    }
+    closed(&mut socket, 1011).await;
+    assert!(hub.is_available());
+    drop(receive);
+
+    let (mut offline, _) =
+        connect_async(format!("ws://{address}/sync/v1/notify")).await.expect("connect");
+    context(&mut offline).await;
+    offline.send(ClientMessage::Binary(credentials().into())).await.expect("credentials");
+    ready(&mut offline).await;
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    authenticator.notification_check_stalled.store(true, Ordering::SeqCst);
+    send.send(event).await.expect("queued hint");
+    let worker_hub = hub.clone();
+    let worker = tokio::spawn(async move {
+        crate::notification_fanout::dispatch(&authenticator, &worker_hub, receive).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!worker.is_finished(), "authorization is pending");
+    hub.unavailable();
+    closed(&mut offline, 1011).await;
+    // The stalled dispatcher must not turn an offline reader healthy when its deadline elapses.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert!(!hub.is_available());
+    worker.abort();
+    server.abort();
+}
+
 fn credentials() -> Vec<u8> {
     api::SyncNotificationAuth {
         access_token: "bm90aWZ5.dGVzdA.dG9rZW4".into(),

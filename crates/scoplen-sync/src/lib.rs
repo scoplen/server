@@ -14,6 +14,7 @@ pub use scoplen_store::sync::{
 };
 
 pub mod http;
+pub mod notification_fanout;
 pub mod notify;
 
 /// Sync contract marker.

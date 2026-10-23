@@ -25,6 +25,7 @@ pub mod personal_enrollment;
 #[cfg(test)]
 mod schema;
 pub mod sync;
+pub mod sync_notifications;
 
 pub use audit::{
     AuditChainHead, AuditCheckpoint, AuditEvent, AuditStoreError,

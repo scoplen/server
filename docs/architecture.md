@@ -85,12 +85,18 @@ prevents startup. `/readyz` queries the database and returns 503 when the query 
 listener mounts Personal enrollment, device authentication, Operator setup/login/refresh and
 the authenticated Personal sync subset. The injected sync router selects one SQLite or PostgreSQL
 backend for its account-key, object-sync, and shared-vault operations.
-It covers local notifications but still delegates authentication, signature verification,
-membership, and policy decisions to the service. Notification events are
-encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
-process-local broadcast hub. A parallel PostgreSQL migration set is checked against the SQLite
-logical schema in tests; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
-identity and vault services remain open. `scoplen-store` also exposes a backend-neutral object
+It delegates authentication, signature verification, membership, and policy decisions to the
+service. Notification events are encoded by `scoplen-api` and delivered only to authenticated
+device subscriptions through a process-local broadcast hub. SQLite publishes after a committed
+write. PostgreSQL queues content-free hints inside the mutation transaction and uses schema-scoped
+`LISTEN`/`NOTIFY` for both local and cross-instance delivery. An owned listener and bounded
+64-hint dispatcher recheck current recipient authorization with five-second deadlines. Startup
+awaits LISTEN; readiness fails while it is unavailable. Observed gaps, queue overflow,
+authorization outages, and worker shutdown fence current sockets with 1011; sockets opened
+during an outage also fail with 1011. Fresh LISTEN restores admission after bounded reconnect
+attempts. Hints remain best effort and clients reconcile or poll after interruption. A parallel
+PostgreSQL migration set is checked against the SQLite logical schema in tests.
+`scoplen-store` also exposes a backend-neutral object
 storage boundary for local filesystem and S3-compatible stores, with validated keys and streaming
 or multipart access. Database-backed roles initialize the configured object backend at startup and
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores

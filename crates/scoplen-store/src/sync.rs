@@ -1717,6 +1717,14 @@ impl PostgresStore {
             .bind(vault_id.as_slice())
             .execute(&mut *transaction)
             .await?;
+        crate::sync_notifications::publish(
+            &mut transaction,
+            &scoplen_api::sync::SyncNotification::VaultAdvanced {
+                vault: uuid::Uuid::from_bytes(vault_id),
+                seq: last_sequence,
+            },
+        )
+        .await?;
         transaction.commit().await.map_err(|_| SyncStoreError::CommitOutcomeUnknown)?;
         Ok(receipts)
     }
@@ -2415,6 +2423,13 @@ impl PostgresStore {
             .bind(vault_id.as_slice())
             .execute(&mut *transaction)
             .await?;
+        crate::sync_notifications::publish(
+            &mut transaction,
+            &scoplen_api::sync::SyncNotification::RotationPending {
+                vault: uuid::Uuid::from_bytes(vault_id),
+            },
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }

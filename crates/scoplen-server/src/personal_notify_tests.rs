@@ -36,11 +36,16 @@ struct Listener {
     address: SocketAddr,
     roots: RootCertStore,
     task: tokio::task::JoinHandle<()>,
+    fanout: Option<tokio::task::JoinHandle<Result<(), scoplen_store::sync::SyncStoreError>>>,
+    hub: scoplen_sync::notify::NotificationHub,
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(task) = &self.fanout {
+            task.abort();
+        }
     }
 }
 
@@ -57,7 +62,36 @@ impl Listener {
             AuthBackend::Sqlite(store) => ListenerDatabase::Sqlite(store.clone()),
             AuthBackend::Postgres(store) => ListenerDatabase::Postgres(store.clone()),
         };
-        let app = api_router(database, Arc::new(storage), Arc::new(kms), ORIGIN.into(), true);
+        let kms = Arc::new(kms);
+        let hub = scoplen_sync::notify::NotificationHub::default();
+        let fanout = match &f.backend {
+            AuthBackend::Postgres(store) => {
+                let worker =
+                    scoplen_sync::notification_fanout::PostgresNotificationFanout::connect(
+                        store.clone(),
+                        crate::personal_sync::PersonalSyncAuthenticator::new(
+                            f.backend.clone(),
+                            kms.clone(),
+                            ORIGIN.into(),
+                        ),
+                        hub.clone(),
+                    )
+                    .await
+                    .expect("LISTEN ready before accepting sockets");
+                Some(tokio::spawn(worker.run()))
+            }
+            AuthBackend::Sqlite(_) => None,
+        };
+        let app = crate::runtime::api_router_with_notifications(
+            database,
+            Arc::new(storage),
+            kms,
+            ORIGIN.into(),
+            true,
+            scoplen_sync::http::WriteRateLimits::default(),
+            scoplen_sync::http::WriteBodyLimits::default(),
+            hub.clone(),
+        );
         let plain = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");
         f.address = plain.local_addr().expect("HTTP address");
         let plain_app = app.clone();
@@ -101,7 +135,7 @@ impl Listener {
                 }
             }
         });
-        Self { address, roots, task }
+        Self { address, roots, task, fanout, hub }
     }
 
     async fn tls(&self, protocol: &[u8]) -> tokio_rustls::client::TlsStream<TcpStream> {
@@ -277,6 +311,7 @@ async fn delivery(mut f: Fixture) {
     let second = paired(&f, &identity).await;
     let (foreign, foreign_key) = another_account(&f, &identity).await;
     let listener = Listener::start(&mut f).await;
+    assert!(listener.hub.is_available());
     let mut first = listener.get().await;
     first.send(Message::Ping(vec![1].into())).await.expect("preauth ping");
     assert_eq!(next(&mut first).await, Message::Pong(vec![1].into()));
@@ -500,4 +535,174 @@ async fn postgres_real_tls_notifications_authentication_and_wire_denials() {
 #[tokio::test]
 async fn postgres_real_tls_notifications_token_expiry() {
     expiry(Fixture::postgres().await).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+async fn rewrite(f: &Fixture, identity: &PersonalBootstrap, base: u64) -> Reply {
+    let path =
+        format!("/sync/v1/vaults/{}/changes?after=0&limit=10", identity.receipt.personal_vault_id);
+    let reply = protected(f, "GET", &path, &[], &identity.token, &identity.client).await;
+    assert_eq!(reply.status, 200);
+    let changes = SyncChangesResponse::from_cbor(&reply.body).expect("current public changes");
+    let object = &changes.changes[0];
+    let batch = SyncWriteBatch {
+        writes: vec![SyncWrite {
+            object_id: object.object_id,
+            base_seq: Some(base),
+            payload: object.payload.clone(),
+            tombstone: false,
+        }],
+    }
+    .to_cbor()
+    .expect("signed rewrite");
+    protected(
+        f,
+        "POST",
+        &format!("/sync/v1/vaults/{}/objects", identity.receipt.personal_vault_id),
+        &batch,
+        &identity.token,
+        &identity.client,
+    )
+    .await
+}
+
+#[cfg(feature = "postgres-integration")]
+async fn advanced<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut WebSocketStream<S>,
+    vault: Uuid,
+    seq: u64,
+) {
+    let Message::Binary(body) = next(socket).await else { panic!("binary hint") };
+    assert_eq!(
+        SyncNotification::from_cbor(&body).expect("canonical hint"),
+        SyncNotification::VaultAdvanced { vault, seq }
+    );
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn postgres_independent_instances_commit_rollback_reconnect_and_revocation() {
+    let mut f = Fixture::postgres().await;
+    let identity = bootstrap_personal(&mut f).await;
+    let (foreign, foreign_key) = another_account(&f, &identity).await;
+    let first_store = match &f.backend {
+        AuthBackend::Postgres(store) => store.clone(),
+        AuthBackend::Sqlite(_) => unreachable!(),
+    };
+    let first = Listener::start(&mut f).await;
+    let mut one = first.get().await;
+    ready(&mut one, &credentials(&identity.client, &identity.token, "GET", PATH, &identity.token))
+        .await;
+    let mut unrelated = first.get().await;
+    ready(&mut unrelated, &credentials(&foreign_key, &foreign, "GET", PATH, &foreign)).await;
+
+    let (_, schema) = f.postgres.as_ref().expect("owned schema");
+    let mut url =
+        Url::parse(&std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("dedicated PG URL"))
+            .expect("test URL");
+    url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+    let second_store = Arc::new(
+        scoplen_store::PostgresStore::connect(url.as_str()).await.expect("independent pool"),
+    );
+    assert!(!Arc::ptr_eq(&first_store, &second_store));
+    f.backend = AuthBackend::Postgres(second_store.clone());
+    let second = Listener::start(&mut f).await;
+    let (mut two, h2_task) = second.h2().await;
+    ready(
+        &mut two,
+        &credentials(&identity.client, &identity.token, "CONNECT", PATH, &identity.token),
+    )
+    .await;
+    let vault = identity.receipt.personal_vault_id;
+    sync_object(&f, &identity.receipt, &identity.token, &identity.client).await;
+    advanced(&mut one, vault, 1).await;
+    advanced(&mut two, vault, 1).await;
+    no_event(&mut one).await;
+    no_event(&mut two).await;
+    no_event(&mut unrelated).await;
+
+    // A deferred failure happens after the hint has been queued, and rolls back both.
+    f.execute("CREATE FUNCTION fail_notification_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected rollback'; END $$; CREATE CONSTRAINT TRIGGER fail_notification_commit AFTER UPDATE ON sync_vaults DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_notification_commit()").await;
+    let failed = rewrite(&f, &identity, 1).await;
+    assert_eq!(failed.status, 503);
+    let failure =
+        scoplen_api::ProblemDetails::from_cbor(&failed.body).expect("uncertain sync problem");
+    assert_eq!(failure.code.as_str(), "sync.storage_unavailable");
+    assert!(failure.changed);
+    assert!(!failure.retryable);
+    no_event(&mut one).await;
+    no_event(&mut two).await;
+    assert_eq!(
+        f.count("SELECT current_seq FROM sync_vaults WHERE kind='personal' AND current_seq > 0")
+            .await,
+        1
+    );
+    f.execute("DROP TRIGGER fail_notification_commit ON sync_vaults; DROP FUNCTION fail_notification_commit()").await;
+    assert_eq!(rewrite(&f, &identity, 1).await.status, 200);
+    advanced(&mut one, vault, 2).await;
+    advanced(&mut two, vault, 2).await;
+    assert_eq!(rewrite(&f, &identity, 1).await.status, 409);
+    no_event(&mut one).await;
+    no_event(&mut two).await;
+
+    // Killing only this schema's LISTEN backends creates a real observable delivery gap.
+    let pids: Vec<i32> = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query = 'LISTEN \"scoplen_sync_v1_' || md5(current_schema()) || '\"'")
+        .fetch_all(second_store.pool()).await.expect("owned listener PIDs");
+    assert_eq!(pids.len(), 2);
+    for pid in pids {
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(second_store.pool())
+                .await
+                .expect("terminate owned listener")
+        );
+    }
+    closed(&mut one, 1011).await;
+    closed(&mut two, 1011).await;
+    closed(&mut unrelated, 1011).await;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while !first.hub.is_available() || !second.hub.is_available() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both subscriptions recovered");
+    let mut restored = first.get().await;
+    ready(
+        &mut restored,
+        &credentials(&identity.client, &identity.token, "GET", PATH, &identity.token),
+    )
+    .await;
+    assert_eq!(rewrite(&f, &identity, 2).await.status, 200);
+    advanced(&mut restored, vault, 3).await;
+
+    // Revocation on the writer instance closes an otherwise idle remote connection.
+    f.execute(&format!(
+        "UPDATE identity_devices SET active=false WHERE device_id=decode('{}','hex')",
+        identity.receipt.device_id.simple()
+    ))
+    .await;
+    closed(&mut restored, 1008).await;
+    let mut shutting_down = first.get().await;
+    ready(&mut shutting_down, &credentials(&foreign_key, &foreign, "GET", PATH, &foreign)).await;
+    first.fanout.as_ref().expect("owned worker").abort();
+    closed(&mut shutting_down, 1011).await;
+    assert!(!first.hub.is_available());
+    let mut stopped = first.get().await;
+    stopped
+        .send(Message::Binary(credentials(&foreign_key, &foreign, "GET", PATH, &foreign).into()))
+        .await
+        .expect("credentials during worker shutdown");
+    closed(&mut stopped, 1011).await;
+    drop((one, two, unrelated, restored));
+    drop((shutting_down, stopped));
+    h2_task.abort();
+    drop(first);
+    drop(second);
+    first_store.pool().close().await;
+    drop(first_store);
+    drop(second_store);
+    f.cleanup().await;
 }

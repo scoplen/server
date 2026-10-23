@@ -13,11 +13,12 @@ use axum::{
 };
 use scoplen_api::sync as api;
 use tokio::{
-    sync::broadcast,
+    sync::{broadcast, watch},
     time::{Instant, MissedTickBehavior, timeout_at},
 };
 
 use super::{AuthenticatedNotification, SyncAuthenticator, SyncHttpState};
+use crate::notify::NotificationLifecycle;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(api::SYNC_NOTIFICATION_AUTH_DEADLINE_SECS);
 const CURRENT_STATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -31,9 +32,13 @@ pub(super) async fn notify<A: SyncAuthenticator>(
     uri: Uri,
 ) -> impl IntoResponse {
     let deadline = Instant::now() + AUTH_TIMEOUT;
+    let mut lifecycle = state.notifications.lifecycle();
+    let initial_source = *lifecycle.borrow_and_update();
     ws.max_message_size(api::MAX_SYNC_NOTIFICATION_BODY_BYTES)
         .max_frame_size(api::MAX_SYNC_NOTIFICATION_BODY_BYTES)
-        .on_upgrade(move |socket| session(socket, state, method, uri, deadline))
+        .on_upgrade(move |socket| {
+            session(socket, state, method, uri, deadline, lifecycle, initial_source)
+        })
 }
 
 async fn session<A: SyncAuthenticator>(
@@ -42,6 +47,8 @@ async fn session<A: SyncAuthenticator>(
     method: Method,
     uri: Uri,
     deadline: Instant,
+    mut lifecycle: watch::Receiver<NotificationLifecycle>,
+    initial_source: NotificationLifecycle,
 ) {
     let result = timeout_at(deadline, authenticate(&mut socket, &state, &method, &uri)).await;
     if Instant::now() >= deadline {
@@ -71,12 +78,22 @@ async fn session<A: SyncAuthenticator>(
         close(&mut socket, Failure::Internal).await;
         return;
     };
+    let source = *lifecycle.borrow_and_update();
+    if !initial_source.available
+        || !source.available
+        || source.generation != initial_source.generation
+    {
+        close(&mut socket, Failure::Internal).await;
+        return;
+    }
     let mut events = state.notifications.subscribe(authenticated.identity);
     let ready = api::SyncNotificationReady.to_cbor().expect("static notification acknowledgement");
-    if !matches!(
-        timeout_at(deadline.min(expires), socket.send(Message::Binary(ready.into()))).await,
-        Ok(Ok(()))
-    ) {
+    let sent = tokio::select! {
+        biased;
+        _ = lifecycle.changed() => { close(&mut socket, Failure::Internal).await; return; }
+        result = timeout_at(deadline.min(expires), socket.send(Message::Binary(ready.into()))) => result,
+    };
+    if !matches!(sent, Ok(Ok(()))) {
         close(&mut socket, Failure::Policy).await;
         return;
     }
@@ -86,6 +103,10 @@ async fn session<A: SyncAuthenticator>(
     loop {
         tokio::select! {
             biased;
+            _ = lifecycle.changed() => {
+                close(&mut socket, Failure::Internal).await;
+                return;
+            }
             () = tokio::time::sleep_until(expires) => {
                 close(&mut socket, Failure::Policy).await;
                 return;
