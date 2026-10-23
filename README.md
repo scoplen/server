@@ -91,8 +91,16 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Console integration and remaining
 control-plane authorization remain roadmap work. All server proto dependencies
-are pinned to `scoplen-proto@1e9e720` for shared authentication, Operator token, scope,
-object-signature and complete account-device statement contracts.
+are pinned to `proto@30f88360` for shared authentication, Operator token, scope,
+object-signature, complete account-device statement and D-114 pairing contracts.
+The stores also provide independent durable pairing admission for each method/route:
+30 mutation attempts or 120 reads per actual source, 30 mutations or 60 reads per verified
+capability, and 30 mutations or 120 reads per current authenticated account per 60 seconds.
+Denial cooldowns double from one to 300 seconds; authenticated success or ten minutes without
+failure clears the streak while preserving window counts. Failure audit and denial updates
+commit together; success clearing participates in its business transaction. Bounded cleanup
+and source normalization apply on both databases. Pairing relay and public HTTP routes remain
+unmounted.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
