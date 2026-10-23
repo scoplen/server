@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Updated `ctutils` to 0.4.4 for RUSTSEC-2026-0385, fixing non-constant-time mask
+  generation and integer comparison in the shared cryptographic dependency graph.
+
 - Included the mounted Operator JWKS endpoint in the control-plane route manifest so the
   three-platform contract checks validate both independent public key discovery routes.
 
