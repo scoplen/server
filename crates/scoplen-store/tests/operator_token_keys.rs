@@ -329,13 +329,36 @@ async fn sqlite_audit_failure_rolls_back_and_time_is_sampled_after_lock() {
 }
 
 #[cfg(feature = "postgres-integration")]
+async fn postgres_fixture() -> (scoplen_store::PostgresStore, sqlx::PgPool, String) {
+    let database = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let pool = sqlx::PgPool::connect(&database).await.expect("fixture admin pool");
+    let schema = format!("operator_token_keys_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}")).execute(&pool).await.expect("owned schema");
+    let mut url = url::Url::parse(&database).expect("PG URL");
+    url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+    let store = scoplen_store::PostgresStore::connect(url.as_str()).await.expect("PG store");
+    (store, pool, schema)
+}
+
+#[cfg(feature = "postgres-integration")]
+async fn cleanup_postgres(store: scoplen_store::PostgresStore, pool: sqlx::PgPool, schema: String) {
+    store.pool().close().await;
+    assert!(
+        schema.starts_with("operator_token_keys_")
+            && schema.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    );
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .expect("remove owned schema");
+    pool.close().await;
+}
+
+#[cfg(feature = "postgres-integration")]
 #[tokio::test]
 async fn postgres_operator_token_key_state_rejects_null_gaps() {
-    use scoplen_store::PostgresStore;
-
-    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
-    let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+    let (store, pool, schema) = postgres_fixture().await;
     for (retired_at, verify_until) in [(None::<i64>, None::<i64>), (Some(2), None)] {
         let result = sqlx::query("INSERT INTO operator_access_token_keys (kid, public_key, encrypted_seed, activated_at_ms, retired_at_ms, verify_until_ms, active_slot) VALUES ($1, $2, $3, 1, $4, $5, $6)")
             .bind("operator-0123456789abcdef0123456789abcdef")
@@ -348,18 +371,14 @@ async fn postgres_operator_token_key_state_rejects_null_gaps() {
             .await;
         assert!(matches!(result, Err(sqlx::Error::Database(error)) if error.is_check_violation()));
     }
-    store.pool().close().await;
+    cleanup_postgres(store, pool, schema).await;
 }
 
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn postgres_concurrent_creation_rotation_tamper_and_audit_rollback() {
-    use scoplen_store::PostgresStore;
-
-    let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
-    let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+    let (store, pool, schema) = postgres_fixture().await;
     let kms = TestKms([5; 32]);
     let baseline: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operator_access_token_keys")
         .fetch_one(store.pool())
@@ -500,4 +519,5 @@ async fn postgres_concurrent_creation_rotation_tamper_and_audit_rollback() {
         store.ensure_operator_token_keyring(&kms).await,
         Err(OperatorTokenKeyError::Integrity)
     ));
+    cleanup_postgres(store, pool, schema).await;
 }
