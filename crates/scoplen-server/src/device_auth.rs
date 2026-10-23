@@ -1256,6 +1256,43 @@ mod tests {
         Arc::new(LocalKeyFile::load(&path).expect("test KMS"))
     }
 
+    #[cfg(feature = "postgres-integration")]
+    async fn postgres_fixture() -> (PostgresStore, sqlx::PgPool, String) {
+        let database = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let pool = sqlx::PgPool::connect(&database).await.expect("fixture admin pool");
+        let schema = format!("device_auth_http_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}")).execute(&pool).await.expect("owned schema");
+        let mut url = url::Url::parse(&database).expect("fixture URL");
+        url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+        let store = PostgresStore::connect(url.as_str()).await.expect("PostgreSQL store");
+        (store, pool, schema)
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn cleanup_postgres(
+        store: PostgresStore,
+        pool: sqlx::PgPool,
+        schema: String,
+        server: tokio::task::JoinHandle<()>,
+        directory: PathBuf,
+    ) {
+        server.abort();
+        let _ = server.await;
+        store.pool().close().await;
+        drop(store);
+        assert!(
+            schema.starts_with("device_auth_http_")
+                && schema.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("remove owned schema");
+        pool.close().await;
+        crate::test_support::remove_test_directory(directory).await;
+    }
+
     fn certificate(account_id: Uuid, device_id: Uuid) -> Vec<u8> {
         let kem = DeviceKemKeyPair::from_private_bytes(&[3; 32]).expect("KEM");
         DeviceCertificate::issue(
@@ -2032,10 +2069,8 @@ mod tests {
     #[cfg(feature = "postgres-integration")]
     #[tokio::test]
     async fn postgres_real_http_operator_jwks_isolated_and_fail_closed() {
-        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
         let directory = directory();
-        let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+        let (store, pool, schema) = postgres_fixture().await;
         let kms = key_management(&directory);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let address = listener.local_addr().expect("address");
@@ -2056,7 +2091,7 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .expect("device key count");
-        assert_eq!(count, 0, "use an isolated PostgreSQL integration database");
+        assert_eq!(count, 0, "Operator JWKS must not initialize the device keyring");
         let device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
         assert_eq!(device.status, 200);
         let device_keys = AuthJwks::from_json(&device.body).expect("device JWKS");
@@ -2072,21 +2107,15 @@ mod tests {
         let healthy_device = http(address, "GET", "/.well-known/jwks.json", "", &[]).await;
         assert_eq!(healthy_device.status, 200);
         assert_eq!(healthy_device.body, device.body);
-        server.abort();
-        let _ = server.await;
-        store.pool().close().await;
-        drop(store);
-        std::fs::remove_dir_all(directory).expect("remove test KMS directory");
+        cleanup_postgres(store, pool, schema, server, directory).await;
     }
 
     #[cfg(feature = "postgres-integration")]
     #[tokio::test]
     async fn postgres_real_http_device_refresh_and_jwks() {
-        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
         let directory = directory();
         let kms = key_management(&directory);
-        let store = PostgresStore::connect(&database_url).await.expect("PostgreSQL store");
+        let (store, pool, schema) = postgres_fixture().await;
         let (account_id, device_id) = seed_postgres_identity(&store).await;
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let address = listener.local_addr().expect("address");
@@ -2147,10 +2176,6 @@ mod tests {
         let replay = http(address, "POST", "/api/v1/auth/device", &request, &json_headers()).await;
         replay.problem(401, "auth.authentication_required", false);
         store.verify_deployment_audit_chain().await.expect("audit chain").expect("audit head");
-        server.abort();
-        let _ = server.await;
-        store.pool().close().await;
-        drop(store);
-        std::fs::remove_dir_all(directory).expect("remove test KMS directory");
+        cleanup_postgres(store, pool, schema, server, directory).await;
     }
 }
