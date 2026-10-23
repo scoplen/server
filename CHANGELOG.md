@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- PostgreSQL Operator keyring tests use a disposable schema per test, isolating deliberate
+  key tampering from preceding device-key tests and later authentication checks in CI.
+
 - Mounted Operator-authenticated Personal invitation issuance on SQLite and PostgreSQL using
   the published strict JSON contract and real Cedar schema/policies. Dedicated durable source
   and Operator quotas, exact scope, protected DPoP replay claims and current-session checks
