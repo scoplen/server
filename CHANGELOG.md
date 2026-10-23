@@ -18,6 +18,10 @@ Changes are recorded here for released or reviewable repository outcomes.
   PostgreSQL lost commit acknowledgement. Unknown outcomes disclose no success or cookie.
   Updated all proto pins to `e2dd140` and the route manifest; sign-in and console remain open.
 
+- PostgreSQL administration transaction guards hold shared row locks on the current Operator,
+  credential and refresh family through commit or rollback. Direct concurrent revocations cannot
+  interleave between authorization and the protected mutation; expiry is rechecked after locks.
+
 - Added durable discoverable Operator passkey login and independent browser sessions on SQLite
   and PostgreSQL. Login compares against the current credential, then atomically updates its
   counter/backup state, consumes the ceremony, creates a 30-day refresh family and appends the

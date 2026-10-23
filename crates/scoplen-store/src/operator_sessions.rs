@@ -255,7 +255,7 @@ fn sign_response(
 }
 
 macro_rules! session_store {
-    ($store:ty,$db:ty,$begin:ident,$lock:ident,$admission_lock:path,$outcome:path,$admit:path,$claim:path,$credential:ident,$family:ident,$denied:ident,$current:ident,$append:ident) => {
+    ($store:ty,$db:ty,$begin:ident,$lock:ident,$admission_lock:path,$outcome:path,$admit:path,$claim:path,$credential:ident,$family:ident,$denied:ident,$current:ident,$current_suffix:literal,$append:ident) => {
         impl $store {
             /// Persist fresh discoverable state without looking up or disclosing any operator.
             /// # Errors
@@ -380,7 +380,8 @@ macro_rules! session_store {
 
         /// Check current Operator session inside a caller-owned mutation transaction. The
         /// SQLite caller starts `BEGIN IMMEDIATE`; PostgreSQL calls this before any other
-        /// business-state or audit lock. The session lock remains held until transaction end.
+        /// business-state or audit lock. The session lock and PostgreSQL family, Operator and
+        /// credential row locks remain held until transaction end.
         /// Exact route scope/policy, token signature and durably claimed DPoP/ath precede this.
         /// # Errors
         /// Identity storage failures abort authorization. Inactive or expired state returns none.
@@ -390,9 +391,13 @@ macro_rules! session_store {
             let now=now_ms()?;
             let seconds=u64::try_from(now/1000).map_err(|_|OperatorSessionError::Clock)?;
             if seconds>=claims.exp||claims.iat>seconds {return Ok(None);}
-            let row=sqlx::query::<$db>("SELECT f.scope,f.dpop_jkt,f.trusted_origin FROM operator_refresh_families f JOIN deployment_operators o ON o.operator_id=f.operator_id JOIN operator_credentials c ON c.credential_id=f.credential_id AND c.operator_id=f.operator_id WHERE f.family_id=$1 AND f.operator_id=$2 AND f.principal_kind='operator' AND f.audience='spl-admin/1' AND f.revoked_at_ms IS NULL AND f.expires_at_ms>$3 AND o.active=1 AND c.active=1 AND c.trusted_origin=f.trusted_origin")
+            let row=sqlx::query::<$db>(concat!("SELECT f.scope,f.dpop_jkt,f.trusted_origin,f.expires_at_ms FROM operator_refresh_families f JOIN deployment_operators o ON o.operator_id=f.operator_id JOIN operator_credentials c ON c.credential_id=f.credential_id AND c.operator_id=f.operator_id WHERE f.family_id=$1 AND f.operator_id=$2 AND f.principal_kind='operator' AND f.audience='spl-admin/1' AND f.revoked_at_ms IS NULL AND f.expires_at_ms>$3 AND o.active=1 AND c.active=1 AND c.trusted_origin=f.trusted_origin",$current_suffix))
                 .bind(claims.sid.as_bytes().as_slice()).bind(claims.sub.as_bytes().as_slice()).bind(now).fetch_optional(&mut **tx).await?;
-            let matches=if let Some(row)=row {row.try_get::<String,_>("scope")?==claims.scope&&claims.scope==INITIAL_OPERATOR_ACCESS_SCOPE&&row.try_get::<String,_>("dpop_jkt")?==claims.cnf_jkt&&row.try_get::<String,_>("trusted_origin")?==claims.iss}else{false};
+            let matches=if let Some(row)=row {
+                let locked_now=now_ms()?;
+                let locked_seconds=u64::try_from(locked_now/1000).map_err(|_|OperatorSessionError::Clock)?;
+                locked_seconds<claims.exp&&claims.iat<=locked_seconds&&row.try_get::<i64,_>("expires_at_ms")?>locked_now&&row.try_get::<String,_>("scope")?==claims.scope&&claims.scope==INITIAL_OPERATOR_ACCESS_SCOPE&&row.try_get::<String,_>("dpop_jkt")?==claims.cnf_jkt&&row.try_get::<String,_>("trusted_origin")?==claims.iss
+            }else{false};
             Ok(matches.then_some(CurrentOperatorSession {operator_id:claims.sub,family_id:claims.sid}))
         }
 
@@ -450,6 +455,7 @@ session_store!(
     sqlite_family,
     sqlite_denied,
     verify_operator_session_in_sqlite_transaction,
+    "",
     append_deployment_audit_event_in_transaction
 );
 session_store!(
@@ -465,5 +471,6 @@ session_store!(
     postgres_family,
     postgres_denied,
     verify_operator_session_in_postgres_transaction,
+    " FOR SHARE OF f,o,c",
     append_deployment_audit_event_in_postgres_transaction
 );
