@@ -18,6 +18,7 @@ pub mod operator_invitations;
 pub mod operator_sessions;
 pub mod operator_setup;
 pub mod operator_token_keys;
+pub mod pairing_admission;
 pub mod personal_admission;
 pub mod personal_enrollment;
 #[cfg(test)]
