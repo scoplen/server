@@ -1649,6 +1649,132 @@ const OPERATOR_REFRESH_TOKENS: TableSpec = TableSpec {
     indexes: &[IndexSpec { name: "operator_refresh_tokens_by_family", columns: &["family_id"] }],
 };
 
+const PAIRING_SESSIONS: TableSpec = TableSpec {
+    name: "pairing_sessions",
+    columns: &[
+        ColumnSpec {
+            name: "pairing_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "trusted_origin",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "responder_device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "capability_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "initiator_device_id",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "state", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "slot_count",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "payload_bytes",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "approval_fingerprint",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "completed_revision",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[
+        IndexSpec { name: "pairing_sessions_by_retention", columns: &["retain_until_ms"] },
+        IndexSpec { name: "pairing_sessions_by_expiry", columns: &["state", "expires_at_ms"] },
+    ],
+};
+
+const PAIRING_SLOTS: TableSpec = TableSpec {
+    name: "pairing_slots",
+    columns: &[
+        ColumnSpec {
+            name: "pairing_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "slot_index",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "payload",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "payload_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "pairing_id",
+        target_table: "pairing_sessions",
+        target_column: "pairing_id",
+    }],
+    indexes: &[],
+};
+
 const PAIRING_ADMISSION: TableSpec = TableSpec {
     name: "pairing_admission",
     columns: &[
@@ -1707,6 +1833,8 @@ const PAIRING_ADMISSION: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    PAIRING_SESSIONS,
+    PAIRING_SLOTS,
     PAIRING_ADMISSION,
     OPERATOR_REFRESH_FAMILIES,
     OPERATOR_REFRESH_TOKENS,
@@ -2171,6 +2299,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261024020000_pairing_admission.sql");
     const POSTGRES_PAIRING_ADMISSION: &str =
         include_str!("../migrations/postgres/20261024020000_pairing_admission.sql");
+    const SQLITE_PAIRING_SESSIONS: &str =
+        include_str!("../migrations/sqlite/20261024030000_pairing_sessions.sql");
+    const POSTGRES_PAIRING_SESSIONS: &str =
+        include_str!("../migrations/postgres/20261024030000_pairing_sessions.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2212,6 +2344,7 @@ mod tests {
             SQLITE_OPERATOR_SESSIONS,
             SQLITE_PERSONAL_INVITATION_ADMISSION,
             SQLITE_PAIRING_ADMISSION,
+            SQLITE_PAIRING_SESSIONS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2233,6 +2366,7 @@ mod tests {
             POSTGRES_OPERATOR_SESSIONS,
             POSTGRES_PERSONAL_INVITATION_ADMISSION,
             POSTGRES_PAIRING_ADMISSION,
+            POSTGRES_PAIRING_SESSIONS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2282,7 +2416,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 19);
+        assert_eq!(migration_count, 20);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2291,7 +2425,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 19);
+        assert_eq!(replay_count, 20);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

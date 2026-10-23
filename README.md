@@ -99,8 +99,18 @@ capability, and 30 mutations or 120 reads per current authenticated account per 
 Denial cooldowns double from one to 300 seconds; authenticated success or ten minutes without
 failure clears the streak while preserving window counts. Failure audit and denial updates
 commit together; success clearing participates in its business transaction. Bounded cleanup
-and source normalization apply on both databases. Pairing relay and public HTTP routes remain
-unmounted.
+and source normalization apply on both databases.
+The durable relay stores only a capability digest and seven ordered, role-specific opaque
+slots. Five-minute expiry, bounded cleanup, a 1,000-live/10,000-retained session limit and a
+256 MiB aggregate payload limit serialize across replicas. Cancellation and expiry erase
+payloads immediately and retain terminal metadata until original expiry plus 24 hours.
+Second-device completion rechecks current authorization and verifies the exact signed
+certificate, complete next K-4 bundle, certified/unrevoked recipient set and context-bound
+new-device acceptance in one transaction. It commits identity, keys, response-capacity checks,
+payload erasure, a 24-hour receipt/fingerprint and deployment audit together. Exact completion
+replay returns its retained receipt after current authorization, and never reactivates a later
+revoked device. Unconfirmed commit outcomes disclose no receipt. Public pairing HTTP routes
+remain unmounted.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
