@@ -671,6 +671,32 @@ async fn sqlite_real_http_setup_uncertain_commit_discloses_no_success() {
 }
 
 #[cfg(feature = "postgres-integration")]
+async fn wait_for_business_lock(pool: &sqlx::PgPool, application: &str, lock: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            // Other parallel tests can block admission or keyring transactions first.
+            // Arm only after this request reaches the held business-state lock.
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+                 WHERE a.application_name=$1 AND l.locktype='advisory' AND NOT l.granted \
+                 AND l.classid::bigint=1396916048 AND l.objid::bigint=$2 AND l.objsubid=2)",
+            )
+            .bind(application)
+            .bind(lock)
+            .fetch_one(pool)
+            .await
+            .expect("observe exact business lock");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("request reaches business lock after preceding admission, replay and keyring commits");
+}
+
+#[cfg(feature = "postgres-integration")]
 #[tokio::test]
 async fn postgres_real_http_setup_lost_commit_ack_discloses_no_success() {
     use std::sync::atomic::Ordering;
@@ -708,13 +734,7 @@ async fn postgres_real_http_setup_lost_commit_ack_discloses_no_success() {
         )
         .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'").bind(&application).fetch_one(direct.pool()).await.expect("observe finish barrier");
-            if waiting > 0 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.expect("finish must reach setup lock after the three admission/replay commits");
+    wait_for_business_lock(direct.pool(), &application, 1_330_660_690).await;
     proxy.armed.store(true, Ordering::SeqCst);
     barrier.commit().await.expect("release setup barrier");
     let reply = tokio::time::timeout(std::time::Duration::from_secs(10), request)

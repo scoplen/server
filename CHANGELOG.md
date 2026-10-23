@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- PostgreSQL HTTP lost-commit fixtures wait for the exact held business advisory lock before
+  withholding its acknowledgement. Parallel admission/keyring waits cannot redirect the fault
+  into a preceding transaction.
+
 - Updated `ctutils` to 0.4.4 for RUSTSEC-2026-0385, fixing non-constant-time mask
   generation and integer comparison in the shared cryptographic dependency graph.
 

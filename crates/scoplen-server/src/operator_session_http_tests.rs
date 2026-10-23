@@ -613,13 +613,7 @@ async fn session_lost_ack(refresh: bool) {
         }
         http(address, path, &body, &headers).await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock'").bind(&application).fetch_one(direct.pool()).await.expect("observe business lock");
-            if waiting > 0 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.expect("finish reaches session lock after admission/replay/keyring commits");
+    wait_for_business_lock(direct.pool(), &application, 1_397_052_243).await;
     proxy.armed.store(true, Ordering::SeqCst);
     barrier.commit().await.expect("release lock");
     let reply = tokio::time::timeout(std::time::Duration::from_secs(10), request)
