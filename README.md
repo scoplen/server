@@ -91,8 +91,8 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Console integration and remaining
 control-plane authorization remain roadmap work. All server proto dependencies
-are pinned to `scoplen-proto@e2dd140` for the shared authentication, Operator token, scope, and
-object-signature contracts.
+are pinned to `scoplen-proto@1e9e720` for shared authentication, Operator token, scope,
+object-signature and complete account-device statement contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key

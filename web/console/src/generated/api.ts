@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/e2dd140e06302d75d863c36e9dcba57a4b2562d1/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/1e9e720b4935849cd81ac6068821d469ee3577ac/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -47,6 +47,7 @@ export interface components {
     CertificateHostGroupRequest: CertificateHostGroupRequest;
     CertificateIssuanceResponse: CertificateIssuanceResponse;
     AccountProfile: AccountProfile;
+    AccountDeviceStatements: AccountDeviceStatements;
     PersonalInvitationRequest: PersonalInvitationRequest;
     PersonalInvitationResponse: PersonalInvitationResponse;
     PersonalEnrollmentRequest: PersonalEnrollmentRequest;
@@ -112,6 +113,17 @@ export interface AccountProfileData {
   [extension: string]: unknown;
 }
 // END GENERATED AccountProfile
+// BEGIN GENERATED AccountDeviceStatements
+/** Complete JSON <=6291456 bytes; decoded statements total <=4194304 bytes. */
+export interface AccountDeviceStatements {
+  account_id: string;
+  /** Canonical unpadded base64url, 1..65536 decoded bytes each, strictly ordered by decoded bytes. */
+  certificates: string[];
+  /** Same bounds/order as certificates; consumers verify every account signature before use. */
+  revocations: string[];
+  [extension: string]: unknown;
+}
+// END GENERATED AccountDeviceStatements
 // BEGIN GENERATED PersonalEnrollment
 export type PersonalInvitationRequest = Record<string, never>;
 
