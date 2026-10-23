@@ -6,8 +6,10 @@ use crate::{test_passkey as passkey, test_support as support};
 
 use super::*;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use scoplen_api::ProblemDetails;
-use scoplen_crypto::P256SigningKey;
+use scoplen_api::{ProblemDetails, auth::BrowserAuthTokenResponse};
+use scoplen_crypto::{
+    OperatorAccessToken, P256SigningKey, TrustedOperatorAccessTokenKeys, dpop_jwk_thumbprint,
+};
 use scoplen_store::{RelationalStore, SqliteStore, kms::LocalKeyFile};
 use std::path::PathBuf;
 use tokio::{
@@ -15,6 +17,9 @@ use tokio::{
     net::TcpListener,
 };
 use webauthn_authenticator_rs::prelude::Url;
+
+#[path = "operator_session_http_tests.rs"]
+mod sessions;
 
 const ORIGIN: &str = "https://setup.example.com:9443";
 
@@ -238,9 +243,19 @@ impl Reply {
 }
 
 async fn http(address: SocketAddr, path: &str, body: &[u8], headers: &[(&str, &str)]) -> Reply {
+    http_method(address, "POST", path, body, headers).await
+}
+
+async fn http_method(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &[(&str, &str)],
+) -> Reply {
     let mut stream = tokio::net::TcpStream::connect(address).await.expect("connect");
     let mut request = format!(
-        "POST {path} HTTP/1.1\r\nHost: setup.example.com:9443\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: setup.example.com:9443\r\nConnection: close\r\nContent-Length: {}\r\n",
         body.len()
     );
     for (name, value) in headers {
@@ -652,6 +667,32 @@ async fn sqlite_real_http_setup_uncertain_commit_discloses_no_success() {
 }
 
 #[cfg(feature = "postgres-integration")]
+async fn wait_for_business_lock(pool: &sqlx::PgPool, application: &str, lock: i64) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            // Other parallel tests can block admission or keyring transactions first.
+            // Arm only after this request reaches the held business-state lock.
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid \
+                 WHERE a.application_name=$1 AND l.locktype='advisory' AND NOT l.granted \
+                 AND l.classid::bigint=1396916048 AND l.objid::bigint=$2 AND l.objsubid=2)",
+            )
+            .bind(application)
+            .bind(lock)
+            .fetch_one(pool)
+            .await
+            .expect("observe exact business lock");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("request reaches business lock after preceding admission, replay and keyring commits");
+}
+
+#[cfg(feature = "postgres-integration")]
 #[tokio::test]
 async fn postgres_real_http_setup_lost_commit_ack_discloses_no_success() {
     use std::sync::atomic::Ordering;
@@ -689,13 +730,7 @@ async fn postgres_real_http_setup_lost_commit_ack_discloses_no_success() {
         )
         .await
     });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_stat_activity WHERE application_name = $1 AND wait_event_type = 'Lock'").bind(&application).fetch_one(direct.pool()).await.expect("observe finish barrier");
-            if waiting > 0 { break; }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    }).await.expect("finish must reach setup lock after the three admission/replay commits");
+    wait_for_business_lock(direct.pool(), &application, 1_330_660_690).await;
     proxy.armed.store(true, Ordering::SeqCst);
     barrier.commit().await.expect("release setup barrier");
     let reply = tokio::time::timeout(std::time::Duration::from_secs(10), request)

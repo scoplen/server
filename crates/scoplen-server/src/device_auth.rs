@@ -204,7 +204,8 @@ pub(crate) fn router(
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
 ) -> Router {
-    let operator_router = crate::operator_auth::router(trusted_origin.clone(), backend.clone());
+    let operator_router =
+        crate::operator_auth::router(trusted_origin.clone(), backend.clone(), kms.clone());
     let invitation_router =
         crate::operator_invitation::router(trusted_origin.clone(), backend.clone(), kms.clone());
     let state = Arc::new(AuthState { trusted_origin, backend, kms });
@@ -482,6 +483,16 @@ async fn refresh(
     State(state): State<Arc<AuthState>>,
     request: Request<Body>,
 ) -> Response {
+    if crate::operator_auth::operator_refresh_candidate(request.headers()) {
+        return crate::operator_auth::refresh_operator(
+            state.trusted_origin.clone(),
+            state.backend.clone(),
+            state.kms.clone(),
+            peer.ip(),
+            request,
+        )
+        .await;
+    }
     let source = peer.ip();
     let request_id = Uuid::new_v4().to_string();
     let endpoint = DeviceAuthEndpoint::Refresh;
@@ -1158,7 +1169,7 @@ pub(crate) fn response(status: StatusCode, content_type: &'static str, body: Vec
         .expect("static authentication response headers")
 }
 
-fn add_cors(response: &mut Response, origin: &str) {
+pub(crate) fn add_cors(response: &mut Response, origin: &str) {
     let headers = response.headers_mut();
     headers.insert(
         "access-control-allow-origin",
