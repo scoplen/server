@@ -1649,7 +1649,65 @@ const OPERATOR_REFRESH_TOKENS: TableSpec = TableSpec {
     indexes: &[IndexSpec { name: "operator_refresh_tokens_by_family", columns: &["family_id"] }],
 };
 
+const PAIRING_ADMISSION: TableSpec = TableSpec {
+    name: "pairing_admission",
+    columns: &[
+        ColumnSpec {
+            name: "endpoint",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "kind", kind: LogicalType::Integer, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "bucket_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "window_start_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "attempts",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "failure_streak",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "last_failure_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "cooldown_until_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retain_until_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec { name: "pairing_admission_by_retention", columns: &["retain_until_ms"] }],
+};
+
 const TABLES: &[TableSpec] = &[
+    PAIRING_ADMISSION,
     OPERATOR_REFRESH_FAMILIES,
     OPERATOR_REFRESH_TOKENS,
     OPERATOR_AUTH_ADMISSION,
@@ -2109,6 +2167,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261023010000_personal_invitation_admission.sql");
     const POSTGRES_PERSONAL_INVITATION_ADMISSION: &str =
         include_str!("../migrations/postgres/20261023010000_personal_invitation_admission.sql");
+    const SQLITE_PAIRING_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261024020000_pairing_admission.sql");
+    const POSTGRES_PAIRING_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261024020000_pairing_admission.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2149,6 +2211,7 @@ mod tests {
             SQLITE_OPERATOR_ADMISSION,
             SQLITE_OPERATOR_SESSIONS,
             SQLITE_PERSONAL_INVITATION_ADMISSION,
+            SQLITE_PAIRING_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2169,6 +2232,7 @@ mod tests {
             POSTGRES_OPERATOR_ADMISSION,
             POSTGRES_OPERATOR_SESSIONS,
             POSTGRES_PERSONAL_INVITATION_ADMISSION,
+            POSTGRES_PAIRING_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2218,7 +2282,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 18);
+        assert_eq!(migration_count, 19);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2227,7 +2291,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 18);
+        assert_eq!(replay_count, 19);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added independent durable pairing admission on SQLite and PostgreSQL, with per-route source,
+  verified capability and account quotas; denial cooldowns; bounded cleanup; safe failure audit;
+  and transaction-local authenticated-success clearing. Counts and cooldowns serialize across
+  replicas, and audit failure rolls back denial state. Pairing relay and public HTTP routes
+  remain separate work.
+
 - Added a registered `personal_live_bootstrap` development example and reproducible disposable
   HTTPS fixture procedure. New private directories hold localhost certificates/configuration;
   public Operator setup, discoverable software-passkey login and authorized invitation issuance
