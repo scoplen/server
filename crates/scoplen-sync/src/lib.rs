@@ -2,8 +2,8 @@
 //! Synchronization storage boundary and HTTP contract adapter.
 //!
 //! The HTTP adapter implements the K-4 CBOR request/response boundary over the selected durable
-//! SQLite or PostgreSQL backend. Authentication remains an explicit trait boundary: no production
-//! authenticator is provided until the V3 `DPoP` identity implementation exists.
+//! SQLite or PostgreSQL backend. Authentication remains an explicit trait boundary; the server
+//! supplies the production enrolled-device JWT/DPoP and current Personal authorization adapter.
 
 #![forbid(unsafe_code)]
 

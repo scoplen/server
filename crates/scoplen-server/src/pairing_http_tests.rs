@@ -64,7 +64,7 @@ async fn responder(
     .await
 }
 
-async fn create(f: &Fixture) -> PairingCreateResponse {
+pub(super) async fn create(f: &Fixture) -> PairingCreateResponse {
     let body = PairingCreateRequest { device_id: Uuid::now_v7() }.to_json().expect("create JSON");
     let reply = http(f.address, PATH, &body, &[("Content-Type", "application/json")]).await;
     success(&reply, 201);
@@ -146,7 +146,7 @@ async fn claimed(
     context
 }
 
-async fn ready(
+pub(super) async fn ready(
     f: &Fixture,
     identity: &PersonalBootstrap,
     created: &PairingCreateResponse,

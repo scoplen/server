@@ -4,6 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted Personal K-4 notifications on the production TLS listener for classic GET and HTTP/2
+  extended CONNECT. The D-75 context/authentication/ready sequence enforces a complete reassembled
+  16 KiB message limit and a ten-second deadline including credential verification. Enrolled-device
+  JWT, exact method/target/ath DPoP, durable replay, current identity and `sync:read` checks precede
+  subscription. Connections close on token expiry, revocation, stalled state checks or backpressure;
+  fixed safe close codes distinguish policy, wire and temporary failures. Real SQLite/PostgreSQL
+  TLS listener tests cover authentication, isolation, committed-write delivery, H2, denial, replay,
+  expiry and revocation. Fragmentation, verification deadlines and stalled I/O have targeted
+  regressions. Notification delivery remains single-instance; PostgreSQL fan-out is separate work.
+
 - Mounted all six second-device pairing HTTP operations and the static `/pair` link landing.
   Strict shared JSON codecs, source-before-parse admission, verified capability/account quotas,
   current enrolled-device DPoP and `keys:write` checks enforce the native role boundary.

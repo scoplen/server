@@ -22,8 +22,11 @@ self-hosted server, host agent, administration CLI, and web console.
   leased job queue with worker lease cleanup exist. The API listener mounts the Personal K-4
   subset on SQLite or PostgreSQL with enrolled-device tokens, durable DPoP replay protection,
   current certificates, scopes, vault ownership, signed envelopes, and transaction-local write
-  authorization. Configured rate and body limits apply across connections. Shared-vault mutations,
-  account-key updates, and production notifications remain unmounted. Durable first-operator
+  authorization. Configured rate and body limits apply across connections. Personal notifications
+  now use D-75 GET/H2 CONNECT context/authentication/ready, durable JWT/DPoP admission, bounded
+  transport and current-state checks, expiry/revocation closure and the committed-write local hub.
+  PostgreSQL cross-instance fan-out, shared-vault mutations and account-key updates remain open.
+  Durable first-operator
   setup and maintained WebAuthn verification exist on both stores, including discoverable login,
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only

@@ -1073,7 +1073,11 @@ async fn serve_tls_connection(
     serve_tls_io(stream, router, is_gateway).await
 }
 
-async fn serve_tls_io<S>(mut stream: S, router: Router, is_gateway: bool) -> Result<(), ServerError>
+pub(crate) async fn serve_tls_io<S>(
+    mut stream: S,
+    router: Router,
+    is_gateway: bool,
+) -> Result<(), ServerError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -1085,7 +1089,9 @@ where
     }
     let io = TokioIo::new(stream);
     let service = TowerToHyperService::new(router);
-    Builder::new(TokioExecutor::new())
+    let mut builder = Builder::new(TokioExecutor::new());
+    builder.http2().enable_connect_protocol();
+    builder
         .serve_connection_with_upgrades(io, service)
         .await
         .map_err(|error| ServerError::Task(error.to_string()))

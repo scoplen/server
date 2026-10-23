@@ -30,9 +30,11 @@ account-owned personal vaults and current shared-vault memberships with their ro
 shared-vault creation, key retrieval, epoch publication, and member addition and removal, plus
 account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
-`/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
-applies an injected device policy, and fans out deterministic CBOR events through a caller-owned
-local hub. Committed object writes publish a vault-advancement hint to connected devices that
+`/sync/v1/notify` WebSocket. The notification adapter sends the D-75 method context, verifies the
+strict binary CBOR token/proof message within ten seconds of opening, and acknowledges successful
+authentication before any event. Both classic GET and HTTP/2 extended CONNECT are supported.
+It fans out deterministic CBOR events through a caller-owned local hub. Committed object writes
+publish a vault-advancement hint to connected devices that
 still pass notification and vault-read authorization; notification delivery cannot roll back a
 write, and clients can fall back to polling. This fan-out remains process-local. The router
 requires an injected authenticator that binds DPoP proofs to the request method and
@@ -42,11 +44,16 @@ opaque wraps, validates account-key signatures and active-device wraps, and vali
 envelopes before storage. The caller selects a SQLite or PostgreSQL store for the entire
 authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR against PostgreSQL
 17. The API listener now mounts only the Personal session, account-key read, vault-key read,
-changes, snapshot, version read, signed object write, and ACK routes. It verifies the enrolled
+changes, snapshot, version read, signed object write, ACK, and notification routes. It verifies the enrolled
 device token, exact method/path/ath DPoP proof, durable replay claim, current device certificate,
 required scope, and Personal vault ownership. Writes verify the envelope signature and current
-key epoch; writes and ACKs recheck authorization inside the storage transaction. Shared-vault
-mutations, account-key updates, and notifications remain unmounted. The
+key epoch; writes and ACKs recheck authorization inside the storage transaction. Notifications
+require `sync:read`, close at token expiry, and recheck current device/account authorization every
+second and before sending events. State checks and event sends have bounded deadlines so stalled
+storage or a non-reading peer cannot retain a subscription until token expiry. The listener and
+committed writes use the same local hub on SQLite or PostgreSQL. PostgreSQL cross-instance
+notification fan-out remains incomplete. Shared-vault mutations and account-key updates remain
+unmounted. The
 `scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
