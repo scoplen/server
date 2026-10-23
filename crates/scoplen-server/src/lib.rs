@@ -7,11 +7,22 @@ mod config;
 mod device_auth;
 mod error;
 mod operator_auth;
+mod operator_invitation;
 mod personal_enrollment;
 mod personal_sync;
 mod private_material;
 mod roles;
 mod runtime;
+
+#[cfg(all(test, feature = "postgres-integration"))]
+#[path = "../../scoplen-store/tests/support/lost_commit.rs"]
+mod test_lost_commit;
+#[cfg(test)]
+#[path = "../../scoplen-store/tests/support/passkey.rs"]
+mod test_passkey;
+#[cfg(test)]
+#[path = "../../scoplen-store/tests/support/mod.rs"]
+mod test_support;
 
 pub use config::{
     Config, ConfigError, KmsSettings, ObjectStorageSettings, SecretValue, StorageSettings, TlsMode,

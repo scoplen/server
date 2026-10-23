@@ -8,5 +8,6 @@
   { "method": "POST", "path": "/auth/operator/login/options" },
   { "method": "POST", "path": "/auth/operator/login/finish" },
   { "method": "POST", "path": "/auth/personal-enroll" },
-  { "method": "POST", "path": "/auth/refresh" }
+  { "method": "POST", "path": "/auth/refresh" },
+  { "method": "POST", "path": "/admin/personal-invitations" }
 ]

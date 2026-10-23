@@ -28,7 +28,10 @@ self-hosted server, host agent, administration CLI, and web console.
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only
   Operator refresh enforce exact Origin, durable DPoP/admission and non-disclosure after unknown
-  commits. Console surfaces, invitation issuance, complete identity and policy workflows,
+  commits. Operator invitation HTTP issuance enforces exact
+  scope and published Cedar policies, independent database quotas, and transaction-local session
+  authorization; one-time URLs are disclosed only after an audited confirmed commit. Console
+  surfaces, complete identity and policy workflows,
   membership-aware purge scheduling,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
   can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.

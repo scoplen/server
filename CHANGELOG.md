@@ -4,6 +4,15 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted Operator-authenticated Personal invitation issuance on SQLite and PostgreSQL using
+  the published strict JSON contract and real Cedar schema/policies. Dedicated durable source
+  and Operator quotas, exact scope, protected DPoP replay claims and current-session checks
+  precede issuance. The mutation holds authorization locks through its mandatory audit and
+  commit; one-time URLs are disclosed only after confirmed commit. Live HTTP regressions cover
+  ordinary-device and reduced-scope denials, revocation during body delivery, concurrent quota
+  contention, audit rollback, SQLite deferred commit failure and PostgreSQL lost commit ACK.
+  Added the admission migration, schema parity, production route manifest and PostgreSQL CI.
+
 - PostgreSQL HTTP lost-commit fixtures wait for the exact held business advisory lock before
   withholding its acknowledgement. Parallel admission/keyring waits cannot redirect the fault
   into a preceding transaction.

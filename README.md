@@ -59,8 +59,10 @@ JSON and artifact validation, configured-origin checks, device possession verifi
 source and invitation-digest admission, failure auditing, and one-use redemption. It returns a
 uniform denial for unknown, expired, consumed, or conflicting invitations. A lost commit
 acknowledgement returns `auth.commit_outcome_unknown` so the client can retain its identity and
-attempt device authentication. Issuance remains an internal storage method that requires an
-operator-authenticated caller; no public issuance route is mounted. A separate SQLite/PostgreSQL
+attempt device authentication. `POST /api/v1/admin/personal-invitations` issues one-use invitations
+for current Operator sessions with the exact `personal-invitation:issue` scope, protected DPoP,
+durable replay claims and the published Cedar policy. It rechecks and locks the current Operator,
+credential and refresh family inside the issuance transaction. A separate SQLite/PostgreSQL
 device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
 keys, rotates the active key after 30 days with a seven-day verification overlap, and audits
 creation and rotation in the same transaction. The API listener mounts
@@ -87,8 +89,8 @@ independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encryp
 with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
-integrity, KMS validation, or a required audit write fails. Invitation-issuance authorization
-remains separate roadmap work. All server proto dependencies
+integrity, KMS validation, or a required audit write fails. Console integration and remaining
+control-plane authorization remain roadmap work. All server proto dependencies
 are pinned to `scoplen-proto@e2dd140` for the shared authentication, Operator token, scope, and
 object-signature contracts.
 
@@ -289,15 +291,24 @@ admits at most 30 attempts per peer address and five attempts per decoded invita
 each fixed 60-second window, with a bounded cooldown after an admitted denial. These counters
 are shared through the configured SQLite or PostgreSQL database. A reverse proxy without a
 verified peer-address resolver causes callers to share the proxy's address quota. The current
-server has no operator-authenticated HTTP path for issuing invitations.
+invitation-issuance route accepts exactly `{}` as JSON (at most 256 bytes), rejects query strings
+and idempotency headers, and requires any supplied Origin to match the configured trusted origin.
+Its independent durable quotas allow 30 requests per source and ten per authenticated Operator
+in each fixed 60-second window. Device credentials and Operator tokens without the required
+scope receive `policy.denied`; revoked sessions cannot issue. The one-time invitation URL and
+expiry are returned only after the invitation and mandatory deployment audit commit. An
+unconfirmed commit returns `auth.commit_outcome_unknown` with `changed: true` and
+`retryable: false`, without a URL or cookie. Its URL cannot be recovered: an Operator must
+explicitly decide whether to issue another invitation. Successes and failures are non-cacheable
+and use `Referrer-Policy: no-referrer`.
 Enrolled devices can request a 120-second challenge, sign it with their registered P-256 key,
 and receive a ten-minute DPoP-bound access token and a single-use refresh credential. The API
 listener returns no-store JSON and RFC 9457 problems. Device and refresh admission is durable
 across API instances; a verified spent-token reuse revokes its 30-day family. A refresh response
 whose commit cannot be confirmed requires a new device challenge instead of retrying the old
 credential. `GET /.well-known/jwks.json` publishes only the active and unexpired overlap public
-token keys. The protected Personal sync subset above uses these credentials; control-plane APIs
-are not yet mounted.
+token keys. The protected Personal sync subset above uses these credentials; other control-plane
+APIs remain unmounted.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
