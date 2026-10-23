@@ -10,6 +10,11 @@ description = "Scoplen's self-hosted server binary and role supervisor."
 name = "spl-server"
 path = "src/main.rs"
 
+[[example]]
+name = "personal_live_bootstrap"
+path = "examples/personal_live_bootstrap.rs"
+test = true
+
 [dependencies]
 async-trait = "0.1.92"
 axum.workspace = true
@@ -51,8 +56,10 @@ postgres-integration = []
 base64 = "0.22.1"
 ciborium = "0.2.2"
 ed25519-dalek.workspace = true
+hyper = { version = "1.12.0", features = ["client", "http2"] }
 scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "1e9e720b4935849cd81ac6068821d469ee3577ac" }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 url = "2.5.8"
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
 webauthn-rs-core = "=0.5.5"
+zeroize.workspace = true

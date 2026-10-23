@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a registered `personal_live_bootstrap` development example and reproducible disposable
+  HTTPS fixture procedure. New private directories hold localhost certificates/configuration;
+  public Operator setup, discoverable software-passkey login and authorized invitation issuance
+  produce the bounded four-field integration descriptor. SQLite and private loopback PostgreSQL
+  profiles use the production binary without identity SQL seeds. The caller manages the server
+  process and disposable database; failures publish no descriptor and prohibit automatic replay.
+
 - Mounted `GET /api/v1/accounts/me/devices` with exact enrolled-device `account:read`
   authorization, durable DPoP replay protection and transaction-local caller rechecks on SQLite
   and PostgreSQL. Complete bounded snapshots include every stored signed certificate and
