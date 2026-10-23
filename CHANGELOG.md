@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Upgraded the shared protocol pin to `cb4f248`, including the D-75 GET/CONNECT notification
+  scope lookup, and regenerated the console's public API types from the same published revision.
+
 - Mounted Personal K-4 notifications on the production TLS listener for classic GET and HTTP/2
   extended CONNECT. The D-75 context/authentication/ready sequence enforces a complete reassembled
   16 KiB message limit and a ten-second deadline including credential verification. Enrolled-device

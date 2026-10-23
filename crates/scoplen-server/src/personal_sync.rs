@@ -158,12 +158,12 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         uri: &Uri,
         credentials: &scoplen_api::sync::SyncNotificationAuth,
     ) -> Result<AuthenticatedNotification, AuthFailure> {
-        if uri.path() != "/sync/v1/notify" || !matches!(*method, Method::GET | Method::CONNECT) {
-            return Err(authentication_required());
-        }
+        let operation = DeviceAccessOperation::from_route(method.as_str(), uri.path())
+            .filter(|operation| *operation == DeviceAccessOperation::Notifications)
+            .ok_or_else(authentication_required)?;
         let (principal, expires_at) = self
             .authenticate_credentials(
-                DeviceAccessOperation::Notifications,
+                operation,
                 method,
                 uri,
                 &credentials.access_token,

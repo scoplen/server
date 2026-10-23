@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/1e9e720b4935849cd81ac6068821d469ee3577ac/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/cb4f2488ae1847ede2534a8585ba1907c8978f21/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -453,3 +453,29 @@ export type OperatorBodyTooLargeProblem = Omit<ProblemDetails, "status" | "code"
 
 export type OperatorContentTypeProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 415; code: "auth.invalid_request"; changed: false; retryable: false; };
 // END GENERATED OperatorAuthentication
+
+// BEGIN GENERATED Pairing
+export type PairingCreateRequest = { device_id: string; };
+
+export type PairingContext = { origin: string; pairing_id: string; initiator_device_id: string | null; responder_device_id: string; expires_at: string; [extension: string]: unknown; };
+
+export type PairingCreateResponse = { context: PairingContext; new_device_token: string; [extension: string]: unknown; };
+
+export type PairingClaimRequest = Record<string, never>;
+
+export type PairingClaimResponse = { context: PairingContext; [extension: string]: unknown; };
+
+export type PairingStep = "initiator_share" | "responder_share" | "responder_confirmation" | "initiator_confirmation" | "new_device" | "handoff" | "acceptance";
+
+export type PairingMessageRequest = { step: "initiator_share"; payload: string; } | { step: "responder_share"; payload: string; } | { step: "responder_confirmation"; payload: string; } | { step: "initiator_confirmation"; payload: string; } | { step: "new_device"; payload: string; } | { step: "handoff"; payload: string; } | { step: "acceptance"; payload: string; };
+
+export type PairingRelayMessage = { step: "initiator_share"; payload: string; [extension: string]: unknown; } | { step: "responder_share"; payload: string; [extension: string]: unknown; } | { step: "responder_confirmation"; payload: string; [extension: string]: unknown; } | { step: "initiator_confirmation"; payload: string; [extension: string]: unknown; } | { step: "new_device"; payload: string; [extension: string]: unknown; } | { step: "handoff"; payload: string; [extension: string]: unknown; } | { step: "acceptance"; payload: string; [extension: string]: unknown; };
+
+export type PairingMessageAck = { step: PairingStep; [extension: string]: unknown; };
+
+export type PairingReceipt = { account_id: string; device_id: string; revision: number; [extension: string]: unknown; };
+
+export type PairingSnapshot = { context: PairingContext; state: "waiting" | "exchanging" | "ready" | "completed" | "cancelled" | "expired"; messages: (PairingRelayMessage)[]; receipt: PairingReceipt | null; [extension: string]: unknown; };
+
+export type PairingCompleteRequest = { device_certificate: string; key_bundle_update: string; new_device_signature: string; };
+// END GENERATED Pairing
