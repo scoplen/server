@@ -173,6 +173,12 @@ async fn malformed_or_unbounded_manifests_fail_closed_and_edge_has_no_console() 
                 .starts_with("HTTP/1.1 503 Service Unavailable")
         );
     }
+    tokio::fs::write(root.join("manifest.json"), serde_json::to_vec(&base).expect("manifest"))
+        .await
+        .expect("restore valid manifest");
+    tokio::fs::remove_file(root.join("assets/console-a.js")).await.expect("remove owned fixture");
+    tokio::fs::create_dir(root.join("assets/console-a.js")).await.expect("non-file fixture");
+    assert_eq!(load(&root).await.err(), Some("asset is not a file"));
     tokio::fs::write(root.join("manifest.json"), vec![b' '; MAX_MANIFEST_BYTES + 1])
         .await
         .expect("large manifest");

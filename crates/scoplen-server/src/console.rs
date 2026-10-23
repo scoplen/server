@@ -127,6 +127,9 @@ async fn read_bounded(root: &Path, path: &str, maximum: usize) -> Result<Vec<u8>
     if !path.starts_with(root) {
         return Err("asset outside configured directory");
     }
+    if !tokio::fs::metadata(&path).await.map_err(|_| "asset unreadable")?.is_file() {
+        return Err("asset is not a file");
+    }
     let file = File::open(path).await.map_err(|_| "asset unreadable")?;
     if !file.metadata().await.map_err(|_| "asset unreadable")?.is_file() {
         return Err("asset is not a file");
