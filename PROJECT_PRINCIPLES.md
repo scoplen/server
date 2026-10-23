@@ -38,8 +38,10 @@ self-hosted server, host agent, administration CLI, and web console.
   attestations or server observation timestamps. Durable pairing storage now serializes bounded
   relay retention, current-device authorization and atomic second-device membership publication
   with its deployment audit on both databases. Exact completion recovery retains its receipt
-  without reversing later revocation; uncertain commits disclose no success body. Public pairing
-  routes and remaining device lifecycle mutations remain open.
+  without reversing later revocation; uncertain commits disclose no success body. All six native
+  pairing HTTP operations now enforce current-device DPoP, exact scope, verified role admission,
+  bounded shared codecs and noncacheable responses. The public link landing requests no password
+  and runs no script. Remaining device lifecycle mutations remain open.
   The Personal React console connects setup, fresh passkey sign-in and invitation
   requests through the generated public API contract. Its proof key and access token stay in
   memory; reloads require a new login. Manifest-validated static assets fail independently of

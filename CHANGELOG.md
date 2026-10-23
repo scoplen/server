@@ -4,6 +4,15 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mounted all six second-device pairing HTTP operations and the static `/pair` link landing.
+  Strict shared JSON codecs, source-before-parse admission, verified capability/account quotas,
+  current enrolled-device DPoP and `keys:write` checks enforce the native role boundary.
+  Responses prevent caching/referrer disclosure and accept no cookies, mixed credentials or
+  credentialed CORS. Failure-audit errors fail closed; unknown business commits preserve
+  `changed: true`/`retryable: false` and disclose no capability. Added real SQLite/PostgreSQL
+  public bootstrap, seven-slot completion, new-device authentication/key reads, denial and
+  quota regressions, lost-create-COMMIT acknowledgement coverage, route manifest and CI.
+
 - Added a durable seven-slot second-device pairing relay and atomic completion on SQLite and
   PostgreSQL. Digest-only capabilities, fixed expiry, original terminal retention, aggregate
   deployment budgets, role/order checks, exact replay and payload erasure share one state
@@ -16,8 +25,7 @@ Changes are recorded here for released or reviewable repository outcomes.
 - Added independent durable pairing admission on SQLite and PostgreSQL, with per-route source,
   verified capability and account quotas; denial cooldowns; bounded cleanup; safe failure audit;
   and transaction-local authenticated-success clearing. Counts and cooldowns serialize across
-  replicas, and audit failure rolls back denial state. Public pairing HTTP routes remain
-  separate work.
+  replicas, and audit failure rolls back denial state.
 
 - Added a registered `personal_live_bootstrap` development example and reproducible disposable
   HTTPS fixture procedure. New private directories hold localhost certificates/configuration;

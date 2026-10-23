@@ -109,8 +109,17 @@ certificate, complete next K-4 bundle, certified/unrevoked recipient set and con
 new-device acceptance in one transaction. It commits identity, keys, response-capacity checks,
 payload erasure, a 24-hour receipt/fingerprint and deployment audit together. Exact completion
 replay returns its retained receipt after current authorization, and never reactivates a later
-revoked device. Unconfirmed commit outcomes disclose no receipt. Public pairing HTTP routes
-remain unmounted.
+revoked device. Unconfirmed commit outcomes disclose no receipt.
+The API listener mounts all six `/api/v1/auth/pairings` operations with strict bounded JSON,
+canonical session ids, native configured-origin checks and no-store/no-cache/no-referrer
+responses. Creation is anonymous; the new role uses its verified session capability, and the
+old role requires a current enrolled-device token, durable token-bound DPoP and exact
+`keys:write`. Source admission precedes parsing; only verified roles select private quotas.
+Failure-audit storage is fail-closed, and an uncertain business commit returns
+`auth.commit_outcome_unknown` without a success body or capability. The public `/pair` page
+only explains how to paste the full fragment-bearing link into Scoplen; it has no password
+field, script or network action. Pairing routes reject cookies, mixed credentials, queries,
+idempotency and conditional cache headers, and never publish credentialed CORS access.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key

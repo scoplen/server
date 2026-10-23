@@ -893,6 +893,11 @@ pub(crate) fn api_router_with_limits(
                 auth_backend.clone(),
                 key_management.clone(),
             ))
+            .merge(crate::pairing::router(
+                trusted_origin.clone(),
+                auth_backend.clone(),
+                key_management.clone(),
+            ))
             .merge(device_auth::router(
                 trusted_origin.clone(),
                 auth_backend.clone(),
