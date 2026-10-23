@@ -39,6 +39,7 @@ struct TestAuthenticator {
     account: keys::AccountId,
     device: storage::DeviceId,
     vault_access: bool,
+    vault: Option<storage::VaultId>,
 }
 
 impl TestAuthenticator {
@@ -83,10 +84,14 @@ impl SyncAuthenticator for TestAuthenticator {
     async fn authorize(
         &self,
         identity: AuthenticatedDevice,
-        _vault: storage::VaultId,
-        _operation: SyncOperation,
+        vault: storage::VaultId,
+        operation: SyncOperation,
     ) -> Result<(), AuthFailure> {
-        if self.vault_access && identity.account_id == self.account {
+        if self.vault_access
+            && identity.account_id == self.account
+            && (operation != SyncOperation::Read
+                || self.vault.is_none_or(|allowed| vault == allowed))
+        {
             Ok(())
         } else {
             Err(Self::denied())
@@ -194,6 +199,20 @@ async fn store() -> Arc<PostgresStore> {
     let url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     Arc::new(PostgresStore::connect(&url).await.expect("connect PostgreSQL 17"))
+}
+
+async fn fanout(
+    store: Arc<PostgresStore>,
+    mut auth: TestAuthenticator,
+    hub: NotificationHub,
+    vault: Uuid,
+) -> tokio::task::JoinHandle<Result<(), storage::SyncStoreError>> {
+    auth.vault = Some(vault.into_bytes());
+    let worker =
+        scoplen_sync::notification_fanout::PostgresNotificationFanout::connect(store, auth, hub)
+            .await
+            .expect("prepared LISTEN");
+    tokio::spawn(worker.run())
 }
 
 struct LostCommitProxy {
@@ -317,6 +336,8 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
         .create_personal_sync_vault(vault.into_bytes(), account.into_bytes(), &[1])
         .await
         .expect("Personal vault");
+    let mut committed_hints =
+        direct.listen_sync_notifications().await.expect("independent committed-state listener");
     let proxy = LostCommitProxy::start().await;
     let proxied =
         Arc::new(PostgresStore::connect(&proxy.database_url).await.expect("proxied store"));
@@ -326,6 +347,7 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
             account: account.into_bytes(),
             device: device.into_bytes(),
             vault_access: true,
+            vault: None,
         },
         NotificationHub::default(),
     );
@@ -352,6 +374,20 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
         direct.sync_versions(vault.into_bytes(), object.into_bytes()).await.expect("readback");
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].sequence, 1, "the write committed despite its error response");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let scoplen_store::sync_notifications::SyncNotificationMessage::Event(
+                api::SyncNotification::VaultAdvanced { vault: seen, seq },
+            ) = committed_hints.recv().await.expect("committed hint")
+                && seen == vault
+            {
+                assert_eq!(seq, 1);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("committed hint despite lost HTTP acknowledgement");
 
     let suffix = Uuid::new_v4().simple().to_string();
     let function = format!("fail_sync_{suffix}");
@@ -392,6 +428,22 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
             .len(),
         1
     );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let scoplen_store::sync_notifications::SyncNotificationMessage::Event(
+                    api::SyncNotification::VaultAdvanced { vault: seen, .. },
+                ) = committed_hints.recv().await.expect("listen")
+                    && seen == vault
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "rolled back writes emit no hint"
+    );
 
     let ack_uri = format!("/sync/v1/vaults/{vault}/ack");
     for (cursor, changed) in [(1, true), (0, false)] {
@@ -430,6 +482,7 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
         1
     );
     proxied.pool().close().await;
+    drop(committed_hints);
     direct.pool().close().await;
 }
 
@@ -464,7 +517,9 @@ async fn postgres_router_personal_sync_and_keys_round_trip() {
         account: account.into_bytes(),
         device: device.into_bytes(),
         vault_access: true,
+        vault: None,
     };
+    let worker = fanout(store.clone(), owner.clone(), hub.clone(), vault).await;
     let app = router_with_notifications(store.clone(), owner.clone(), hub);
     let outsider = router_with_notifications(
         store.clone(),
@@ -472,6 +527,7 @@ async fn postgres_router_personal_sync_and_keys_round_trip() {
             account: outsider_account.into_bytes(),
             device: outsider_device.into_bytes(),
             vault_access: true,
+            vault: None,
         },
         NotificationHub::default(),
     );
@@ -583,7 +639,10 @@ async fn postgres_router_personal_sync_and_keys_round_trip() {
     assert_eq!(receipt.assignments[0].seq, 1);
     assert_eq!(
         api::SyncNotification::from_cbor(
-            &notifications.try_recv().expect("committed notification")
+            &tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+                .await
+                .expect("delivery bound")
+                .expect("committed notification")
         )
         .expect("notification CBOR"),
         api::SyncNotification::VaultAdvanced { vault, seq: 1 }
@@ -644,6 +703,8 @@ async fn postgres_router_personal_sync_and_keys_round_trip() {
         "sync.cursor_ahead",
     )
     .await;
+    worker.abort();
+    let _ = worker.await;
     store.pool().close().await;
 }
 
@@ -668,15 +729,14 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
         device_id: device.into_bytes(),
         account_id: account.into_bytes(),
     });
-    let app = router_with_notifications(
-        store.clone(),
-        TestAuthenticator {
-            account: account.into_bytes(),
-            device: device.into_bytes(),
-            vault_access: true,
-        },
-        hub,
-    );
+    let auth = TestAuthenticator {
+        account: account.into_bytes(),
+        device: device.into_bytes(),
+        vault_access: true,
+        vault: None,
+    };
+    let worker = fanout(store.clone(), auth.clone(), hub.clone(), vault).await;
+    let app = router_with_notifications(store.clone(), auth, hub);
     let create = api::SyncCreateVaultRequest { vault_id: vault, wrapped_vault_key: vec![1] };
     let response =
         send(&app, Method::POST, "/sync/v1/vaults", create.to_cbor().expect("create")).await;
@@ -731,6 +791,7 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
             account: member.into_bytes(),
             device: Uuid::now_v7().into_bytes(),
             vault_access: true,
+            vault: None,
         },
         NotificationHub::default(),
     );
@@ -745,8 +806,13 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
     let remove_uri = format!("/sync/v1/vaults/{vault}/members/{member}");
     assert_eq!(send(&app, Method::DELETE, &remove_uri, vec![]).await.status(), StatusCode::OK);
     assert_eq!(
-        api::SyncNotification::from_cbor(&notifications.try_recv().expect("rotation notification"))
-            .expect("notification CBOR"),
+        api::SyncNotification::from_cbor(
+            &tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+                .await
+                .expect("delivery bound")
+                .expect("rotation notification")
+        )
+        .expect("notification CBOR"),
         api::SyncNotification::RotationPending { vault }
     );
     assert_problem(
@@ -771,6 +837,7 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
                     account: account.into_bytes(),
                     device: device.into_bytes(),
                     vault_access: false,
+                    vault: None,
                 },
                 NotificationHub::default(),
             ),
@@ -783,6 +850,8 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
         "policy.denied",
     )
     .await;
+    worker.abort();
+    let _ = worker.await;
     store.pool().close().await;
 }
 
@@ -798,12 +867,25 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
         .await
         .expect("notification vault");
     let hub = NotificationHub::default();
+    let worker = fanout(
+        store.clone(),
+        TestAuthenticator {
+            account: account.into_bytes(),
+            device: device.into_bytes(),
+            vault_access: true,
+            vault: None,
+        },
+        hub.clone(),
+        vault,
+    )
+    .await;
     let app = router_with_notifications(
         store.clone(),
         TestAuthenticator {
             account: account.into_bytes(),
             device: device.into_bytes(),
             vault_access: true,
+            vault: None,
         },
         hub.clone(),
     );
@@ -901,5 +983,7 @@ async fn postgres_router_notification_socket_authenticates_and_receives_committe
     socket.close(None).await.expect("close notification socket");
     server.abort();
     assert!(server.await.expect_err("notification server must stop").is_cancelled());
+    worker.abort();
+    let _ = worker.await;
     store.pool().close().await;
 }

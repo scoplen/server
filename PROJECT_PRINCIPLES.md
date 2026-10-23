@@ -25,7 +25,9 @@ self-hosted server, host agent, administration CLI, and web console.
   authorization. Configured rate and body limits apply across connections. Personal notifications
   now use D-75 GET/H2 CONNECT context/authentication/ready, durable JWT/DPoP admission, bounded
   transport and current-state checks, expiry/revocation closure and the committed-write local hub.
-  PostgreSQL cross-instance fan-out, shared-vault mutations and account-key updates remain open.
+  PostgreSQL now publishes transactional content-free hints through schema-scoped LISTEN/NOTIFY,
+  with bounded local dispatch, current recipient authorization, supervised recovery and generation
+  fences closing sockets on gaps or overflow. Shared-vault mutations and account-key updates remain open.
   Durable first-operator
   setup and maintained WebAuthn verification exist on both stores, including discoverable login,
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and

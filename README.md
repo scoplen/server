@@ -36,7 +36,9 @@ authentication before any event. Both classic GET and HTTP/2 extended CONNECT ar
 It fans out deterministic CBOR events through a caller-owned local hub. Committed object writes
 publish a vault-advancement hint to connected devices that
 still pass notification and vault-read authorization; notification delivery cannot roll back a
-write, and clients can fall back to polling. This fan-out remains process-local. The router
+write, and clients can fall back to polling. SQLite delivers locally after commit; PostgreSQL
+queues the hint in the mutation transaction and uses one LISTEN connection per API instance
+for both local and remote delivery. Rolled-back transactions emit no hint. The router
 requires an injected authenticator that binds DPoP proofs to the request method and
 URI, authorizes vault, account-key, and notification operations, records the creator's initial
 shared-vault membership and opaque epoch-1 key wrap, adds and removes members with historical
@@ -51,9 +53,16 @@ key epoch; writes and ACKs recheck authorization inside the storage transaction.
 require `sync:read`, close at token expiry, and recheck current device/account authorization every
 second and before sending events. State checks and event sends have bounded deadlines so stalled
 storage or a non-reading peer cannot retain a subscription until token expiry. The listener and
-committed writes use the same local hub on SQLite or PostgreSQL. PostgreSQL cross-instance
-notification fan-out remains incomplete. Shared-vault mutations and account-key updates remain
-unmounted. The
+committed writes use the same local hub on SQLite or PostgreSQL. PostgreSQL receipt and a bounded
+64-hint dispatcher run as futures owned by the API listener; recipient authorization is bounded
+to five seconds. LISTEN must complete before readiness and socket admission. An observed listener
+gap, queue overflow, authorization outage or worker shutdown fences current connections with
+1011; new connections during an outage also fail with 1011. Reconnect attempts use five-second
+database deadlines and capped 100 ms to five-second backoff. Hints carry no object or key material,
+are validated before dispatch and remain best effort: reconnect and pull changes, or poll every
+60 seconds while unavailable. A lost COMMIT reply can still accompany a committed hint; the HTTP
+result remains uncertain and must never trigger automatic batch replay. Shared-vault mutations
+and account-key updates remain unmounted. The
 `scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
@@ -98,8 +107,9 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Console integration and remaining
 control-plane authorization remain roadmap work. All server proto dependencies
-are pinned to `proto@30f88360` for shared authentication, Operator token, scope,
-object-signature, complete account-device statement and D-114 pairing contracts.
+are pinned to `proto@cb4f2488` for shared authentication, Operator token, scope,
+object-signature, complete account-device statement, D-114 pairing and notification scope lookup
+contracts.
 The stores also provide independent durable pairing admission for each method/route:
 30 mutation attempts or 120 reads per actual source, 30 mutations or 60 reads per verified
 capability, and 30 mutations or 120 reads per current authenticated account per 60 seconds.
@@ -132,8 +142,7 @@ The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. Complete control-plane policy filtering,
-membership-aware purge orchestration, multi-instance
-notification fan-out, organization vault ownership in session listings, higher wire ceilings and
+membership-aware purge orchestration, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and remaining console administration are still
 roadmap work. The audit crate and SQLite/PostgreSQL stores provide bounded canonical-event SHA-256
 hashing, same-transaction append helpers, durable checkpoints, and chain verification for separate

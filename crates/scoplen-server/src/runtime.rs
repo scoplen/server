@@ -26,6 +26,7 @@ use scoplen_store::{
     sync::SyncStoreError,
 };
 use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
+use scoplen_sync::{notification_fanout::PostgresNotificationFanout, notify::NotificationHub};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
@@ -292,7 +293,7 @@ pub async fn run_roles(
                 .map_err(|error| ServerError::Task(error.to_string()))?;
         }
     }
-    let mut tasks = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
         let database = if postgres {
             ListenerDatabase::Postgres(
@@ -302,37 +303,42 @@ pub async fn run_roles(
             ListenerDatabase::Sqlite(store.as_ref().ok_or(ServerError::MissingStore)?.clone())
         };
         let object_storage = object_storage.as_ref().ok_or(ServerError::MissingStore)?.clone();
-        tasks.push(tokio::spawn(run_public_listener(
+        tasks.spawn(run_public_listener(
             config.clone(),
             roles.clone(),
             database,
             object_storage,
             key_management.as_ref().ok_or(ServerError::MissingKeyManagement)?.clone(),
-        )));
+        ));
     }
     if roles.contains(&Role::Worker) {
         let signer = audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?;
         if postgres {
             let store = postgres_store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-            tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
+            tasks.spawn(run_worker_role(store, Arc::new(signer.clone())));
         } else {
             let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-            tasks.push(tokio::spawn(run_worker_role(store, Arc::new(signer.clone()))));
+            tasks.spawn(run_worker_role(store, Arc::new(signer.clone())));
         }
     }
     if roles.contains(&Role::Ca) {
-        tasks.push(tokio::spawn(run_periodic_role("ca")));
+        tasks.spawn(run_periodic_role("ca"));
     }
     if roles.contains(&Role::Gateway) {
-        tasks.push(tokio::spawn(run_periodic_role("gateway")));
+        tasks.spawn(run_periodic_role("gateway"));
     }
     info!(roles = ?roles, "server roles started");
-    tokio::signal::ctrl_c().await.map_err(ServerError::Runtime)?;
-    for task in tasks {
-        task.abort();
-    }
+    let result = tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal.map_err(ServerError::Runtime),
+        completed = tasks.join_next() => match completed {
+            Some(Ok(Err(error))) => Err(error),
+            Some(Err(error)) => Err(ServerError::Task(error.to_string())),
+            _ => Err(ServerError::Task("server role stopped unexpectedly".into())),
+        },
+    };
+    tasks.shutdown().await;
     info!("server shutdown requested");
-    Ok(())
+    result
 }
 
 async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
@@ -825,6 +831,7 @@ pub(crate) fn api_router(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn api_router_with_limits(
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
@@ -833,6 +840,29 @@ pub(crate) fn api_router_with_limits(
     enrollment_enabled: bool,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+) -> Router {
+    api_router_with_notifications(
+        database,
+        object_storage,
+        key_management,
+        trusted_origin,
+        enrollment_enabled,
+        write_rate_limits,
+        write_body_limits,
+        NotificationHub::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn api_router_with_notifications(
+    database: ListenerDatabase,
+    object_storage: Arc<ObjectStorage>,
+    key_management: Arc<LocalKeyFile>,
+    trusted_origin: String,
+    enrollment_enabled: bool,
+    write_rate_limits: WriteRateLimits,
+    write_body_limits: WriteBodyLimits,
+    notifications: NotificationHub,
 ) -> Router {
     let enrollment_backend = match &database {
         ListenerDatabase::Sqlite(store) => {
@@ -852,6 +882,7 @@ pub(crate) fn api_router_with_limits(
             scoplen_sync::http::SyncBackend::Postgres(store.clone())
         }
     };
+    let readiness_notifications = notifications.clone();
     let router = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
@@ -859,7 +890,11 @@ pub(crate) fn api_router_with_limits(
             get(move || {
                 let database = database.clone();
                 let object_storage = object_storage.clone();
+                let notifications = readiness_notifications.clone();
                 async move {
+                    if !notifications.is_available() {
+                        return (StatusCode::SERVICE_UNAVAILABLE, "notifications unavailable");
+                    }
                     match (database.ping().await, object_storage.check().await) {
                         (Ok(()), Ok(())) => (StatusCode::OK, "ready"),
                         (Err(error), _) => {
@@ -903,13 +938,14 @@ pub(crate) fn api_router_with_limits(
                 auth_backend.clone(),
                 key_management.clone(),
             ))
-            .merge(scoplen_sync::http::personal_router_with_limits(
+            .merge(scoplen_sync::http::personal_router_with_notifications(
                 sync_backend,
                 personal_sync::PersonalSyncAuthenticator::new(
                     auth_backend,
                     key_management,
                     trusted_origin,
                 ),
+                notifications,
                 write_rate_limits,
                 write_body_limits,
             ))
@@ -930,7 +966,24 @@ async fn run_public_listener(
     let enrollment_enabled = roles.contains(&Role::Api);
     let write_rate_limits = config.sync.write_rate_limits()?;
     let write_body_limits = config.sync.write_body_limits()?;
-    let router = api_router_with_limits(
+    let notifications = NotificationHub::default();
+    let fanout = match &database {
+        ListenerDatabase::Postgres(store) if enrollment_enabled => Some(
+            PostgresNotificationFanout::connect(
+                store.clone(),
+                personal_sync::PersonalSyncAuthenticator::new(
+                    device_auth::AuthBackend::Postgres(store.clone()),
+                    key_management.clone(),
+                    trusted_origin.clone(),
+                ),
+                notifications.clone(),
+            )
+            .await
+            .map_err(|_| ServerError::Task("sync notification subscription unavailable".into()))?,
+        ),
+        _ => None,
+    };
+    let router = api_router_with_notifications(
         database,
         object_storage,
         key_management,
@@ -938,10 +991,28 @@ async fn run_public_listener(
         enrollment_enabled,
         write_rate_limits,
         write_body_limits,
+        notifications,
     )
     .merge(crate::console::router(&config.console.assets_dir, enrollment_enabled).await);
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
+    let serve = serve_public_listener(config, roles, listener, router);
+    if let Some(fanout) = fanout {
+        tokio::select! {
+            result = serve => result,
+            _ = fanout.run() => Err(ServerError::Task("sync notification worker stopped".into())),
+        }
+    } else {
+        serve.await
+    }
+}
+
+async fn serve_public_listener(
+    config: Config,
+    roles: Vec<Role>,
+    listener: TcpListener,
+    router: Router,
+) -> Result<(), ServerError> {
     match config.tls.mode {
         TlsMode::Plain => {
             if roles.contains(&Role::Edge) {
@@ -958,11 +1029,15 @@ async fn run_public_listener(
         }
         TlsMode::Files => {
             let acceptor = TlsAcceptor::from(Arc::new(tls_config(&config)?));
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (stream, peer) = listener.accept().await?;
+                let (stream, peer) = tokio::select! {
+                    accepted = listener.accept() => accepted?,
+                    Some(_) = connections.join_next() => continue,
+                };
                 let acceptor = acceptor.clone();
                 let router = router.clone().layer(Extension(ConnectInfo(peer)));
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
                             if let Err(error) = serve_tls_connection(tls, router).await {
@@ -1035,8 +1110,12 @@ async fn run_acme_listener(
         .cache(DirCache::new(cache_dir))
         .directory_lets_encrypt(config.tls.acme_production)
         .tokio_incoming(TcpListenerStream::new(listener), application_alpn_protocols());
-
-    while let Some(result) = tls_incoming.next().await {
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        let result = tokio::select! {
+            incoming = tls_incoming.next() => match incoming { Some(value) => value, None => break },
+            Some(_) = connections.join_next() => continue,
+        };
         let tls = result.map_err(ServerError::Runtime)?;
         let is_gateway = tls
             .get_ref()
@@ -1046,7 +1125,7 @@ async fn run_acme_listener(
             .is_some_and(|protocol| protocol == b"spl-gw/1");
         let peer = tls.get_ref().get_ref().0.get_ref().peer_addr().map_err(ServerError::Runtime)?;
         let router = router.clone().layer(Extension(ConnectInfo(peer)));
-        tokio::spawn(async move {
+        connections.spawn(async move {
             if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
                 error!(%error, "ACME TLS connection failed");
             }
@@ -1294,6 +1373,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn listener_failure_stops_supervised_roles_and_releases_resources() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-role-failure-{}", uuid::Uuid::new_v4()));
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("owned occupied listener");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.listen_addr = "127.0.0.1".into();
+        config.server.listen_port = occupied.local_addr().expect("occupied address").port();
+        config.tls.mode = TlsMode::Plain;
+        let prepared =
+            prepare_roles(&config, &[Role::Api, Role::Worker]).await.expect("prepared roles");
+        let store = prepared.store.as_ref().expect("SQLite").clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_roles(
+                config,
+                vec![Role::Api, Role::Worker],
+                prepared.store,
+                prepared.postgres_store,
+                prepared.object_storage,
+                prepared.key_management,
+                prepared.audit_signer,
+            ),
+        )
+        .await
+        .expect("failed role must propagate without waiting for Ctrl-C");
+        assert!(matches!(result, Err(ServerError::Runtime(_))));
+        store.pool().close().await;
+        drop((store, occupied));
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
     async fn readiness_follows_database_availability() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-ready-{}", uuid::Uuid::new_v4()));
         let store =
@@ -1312,21 +1424,32 @@ mod tests {
         let server_store = store.clone();
         let server_object_storage = object_storage.clone();
         let server_key_management = key_management.clone();
+        let notifications = NotificationHub::default();
+        let server_notifications = notifications.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                api_router(
+                api_router_with_notifications(
                     ListenerDatabase::Sqlite(Arc::new(server_store)),
                     Arc::new(server_object_storage),
                     server_key_management,
                     "https://example.com".to_owned(),
                     true,
+                    WriteRateLimits::default(),
+                    WriteBodyLimits::default(),
+                    server_notifications,
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await
             .expect("serve readiness endpoint");
         });
+        assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+        notifications.unavailable();
+        let unavailable = http_readiness(address).await;
+        assert!(unavailable.starts_with("HTTP/1.1 503 Service Unavailable"));
+        assert!(unavailable.contains("notifications unavailable"));
+        notifications.available();
         assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
         let enrollment = http_request(address, b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}").await;
         assert!(enrollment.starts_with("HTTP/1.1 415 Unsupported Media Type"), "{enrollment}");

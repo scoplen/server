@@ -648,10 +648,27 @@ pub fn personal_router_with_limits<A: SyncAuthenticator>(
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
 ) -> Router {
+    personal_router_with_notifications(
+        store,
+        authenticator,
+        NotificationHub::default(),
+        write_rate_limits,
+        write_body_limits,
+    )
+}
+
+/// Mount the Personal subset using the instance's supervised notification hub.
+pub fn personal_router_with_notifications<A: SyncAuthenticator>(
+    store: impl Into<SyncBackend>,
+    authenticator: A,
+    notifications: NotificationHub,
+    write_rate_limits: WriteRateLimits,
+    write_body_limits: WriteBodyLimits,
+) -> Router {
     let state = SyncHttpState {
         store: store.into(),
         authenticator,
-        notifications: NotificationHub::default(),
+        notifications,
         write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
         write_body_limits,
     };
@@ -672,8 +689,8 @@ pub fn personal_router_with_limits<A: SyncAuthenticator>(
 /// Build the sync router with a caller-owned local notification hub.
 ///
 /// A deployment publishes content-free events to this hub after committing a change. The hub is
-/// intentionally local to one process; PostgreSQL fan-out for multi-instance deployments remains
-/// a V5 operation-layer concern.
+/// intentionally local to one process; PostgreSQL deployments must also run the supervised
+/// [`crate::notification_fanout::PostgresNotificationFanout`] for this hub.
 pub fn router_with_notifications<A: SyncAuthenticator>(
     store: impl Into<SyncBackend>,
     authenticator: A,
@@ -1497,6 +1514,9 @@ async fn publish_vault_notification<A: SyncAuthenticator>(
     event: &api::SyncNotification,
     event_type: &'static str,
 ) {
+    if matches!(state.store, SyncBackend::Postgres(_)) {
+        return;
+    }
     for recipient in state.notifications.active_devices() {
         if state.authenticator.authorize_notifications(recipient).await.is_err()
             || state.authenticator.authorize(recipient, vault, SyncOperation::Read).await.is_err()

@@ -9,7 +9,7 @@ use std::{
 };
 
 use scoplen_api::sync::SyncNotification;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::http::AuthenticatedDevice;
 
@@ -19,14 +19,57 @@ const CHANNEL_CAPACITY: usize = 64;
 ///
 /// Publishing is deliberately separate from authentication and policy. The service publishes an
 /// event only after it has committed a change and selected the devices that may receive it. A
-/// future multi-instance implementation can keep this API and feed it from PostgreSQL
-/// `LISTEN`/`NOTIFY`.
-#[derive(Clone, Debug, Default)]
+/// multi-instance deployment feeds this API from PostgreSQL `LISTEN`/`NOTIFY`.
+#[derive(Clone, Debug)]
 pub struct NotificationHub {
     channels: Arc<Mutex<HashMap<AuthenticatedDevice, broadcast::Sender<Vec<u8>>>>>,
+    lifecycle: watch::Sender<NotificationLifecycle>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NotificationLifecycle {
+    pub available: bool,
+    pub generation: u64,
+}
+
+impl Default for NotificationHub {
+    fn default() -> Self {
+        Self {
+            channels: Arc::default(),
+            lifecycle: watch::channel(NotificationLifecycle { available: true, generation: 0 }).0,
+        }
+    }
 }
 
 impl NotificationHub {
+    /// Close current sockets after a listener gap, overflow, or worker shutdown.
+    pub fn unavailable(&self) {
+        self.lifecycle.send_modify(|state| {
+            state.available = false;
+            state.generation = state.generation.wrapping_add(1);
+        });
+    }
+
+    /// Fence current sockets without changing the listener's current availability.
+    pub(crate) fn interrupt(&self) {
+        self.lifecycle.send_modify(|state| state.generation = state.generation.wrapping_add(1));
+    }
+
+    /// Allow new sockets after LISTEN has completed successfully.
+    pub fn available(&self) {
+        self.lifecycle.send_modify(|state| state.available = true);
+    }
+
+    /// Whether a new socket can rely on this instance's notification source.
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.lifecycle.borrow().available
+    }
+
+    pub(crate) fn lifecycle(&self) -> watch::Receiver<NotificationLifecycle> {
+        self.lifecycle.subscribe()
+    }
+
     /// Subscribe one device to content-free event bytes.
     #[must_use]
     pub fn subscribe(&self, identity: AuthenticatedDevice) -> broadcast::Receiver<Vec<u8>> {
