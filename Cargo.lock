@@ -3567,7 +3567,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=0c06293e519e17c713123193d977c2b2d5ff6d57#0c06293e519e17c713123193d977c2b2d5ff6d57"
+source = "git+https://github.com/scoplen/proto.git?rev=e2dd140e06302d75d863c36e9dcba57a4b2562d1#e2dd140e06302d75d863c36e9dcba57a4b2562d1"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -3605,7 +3605,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=0c06293e519e17c713123193d977c2b2d5ff6d57#0c06293e519e17c713123193d977c2b2d5ff6d57"
+source = "git+https://github.com/scoplen/proto.git?rev=e2dd140e06302d75d863c36e9dcba57a4b2562d1#e2dd140e06302d75d863c36e9dcba57a4b2562d1"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3665,7 +3665,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=0c06293e519e17c713123193d977c2b2d5ff6d57#0c06293e519e17c713123193d977c2b2d5ff6d57"
+source = "git+https://github.com/scoplen/proto.git?rev=e2dd140e06302d75d863c36e9dcba57a4b2562d1#e2dd140e06302d75d863c36e9dcba57a4b2562d1"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -3678,6 +3678,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.22.1",
+ "ciborium",
  "clap",
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
@@ -3706,7 +3708,10 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
+ "webauthn-authenticator-rs",
+ "webauthn-rs-core",
 ]
 
 [[package]]

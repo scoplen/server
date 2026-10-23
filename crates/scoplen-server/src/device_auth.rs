@@ -204,6 +204,7 @@ pub(crate) fn router(
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
 ) -> Router {
+    let operator_router = crate::operator_auth::router(trusted_origin.clone(), backend.clone());
     let state = Arc::new(AuthState { trusted_origin, backend, kms });
     Router::new()
         .route("/api/v1/auth/challenge", post(challenge))
@@ -212,6 +213,7 @@ pub(crate) fn router(
         .route("/.well-known/jwks.json", get(jwks))
         .route("/.well-known/operator-jwks.json", get(operator_jwks))
         .with_state(state)
+        .merge(operator_router)
 }
 
 #[allow(clippy::too_many_lines, clippy::manual_let_else)]
@@ -893,7 +895,11 @@ fn device_headers(
     Ok(())
 }
 
-async fn json_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<String, StatusCode> {
+pub(crate) async fn json_body(
+    headers: &HeaderMap,
+    body: Body,
+    limit: usize,
+) -> Result<String, StatusCode> {
     if !is_json(headers) {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
@@ -925,7 +931,7 @@ fn is_json(headers: &HeaderMap) -> bool {
     })
 }
 
-fn refresh_cookie(headers: &HeaderMap) -> Result<Option<String>, ()> {
+pub(crate) fn refresh_cookie(headers: &HeaderMap) -> Result<Option<String>, ()> {
     let mut result = None;
     for value in &headers.get_all(header::COOKIE) {
         let value = value.to_str().map_err(|_| ())?;
@@ -951,11 +957,14 @@ fn refresh_cookie(headers: &HeaderMap) -> Result<Option<String>, ()> {
     Ok(result)
 }
 
-fn header_count(headers: &HeaderMap, name: impl axum::http::header::AsHeaderName) -> usize {
+pub(crate) fn header_count(
+    headers: &HeaderMap,
+    name: impl axum::http::header::AsHeaderName,
+) -> usize {
     headers.get_all(name).iter().count()
 }
 
-fn matching_origin(headers: &HeaderMap, trusted_origin: &str) -> bool {
+pub(crate) fn matching_origin(headers: &HeaderMap, trusted_origin: &str) -> bool {
     header_count(headers, header::ORIGIN) == 1
         && headers
             .get(header::ORIGIN)
@@ -1064,7 +1073,7 @@ fn business_problem(error: &DeviceAuthenticationError, request_id: &str) -> Resp
     }
 }
 
-fn problem(
+pub(crate) fn problem(
     status: StatusCode,
     code: &'static str,
     changed: bool,
@@ -1135,7 +1144,7 @@ fn problem(
     result
 }
 
-fn response(status: StatusCode, content_type: &'static str, body: Vec<u8>) -> Response {
+pub(crate) fn response(status: StatusCode, content_type: &'static str, body: Vec<u8>) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
