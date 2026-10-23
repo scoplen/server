@@ -1102,6 +1102,34 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres-integration")]
+    async fn postgres_fixture() -> (url::Url, sqlx::PgPool, String) {
+        let database = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let pool = sqlx::PgPool::connect(&database).await.expect("fixture admin pool");
+        let schema = format!("runtime_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&pool)
+            .await
+            .expect("owned runtime schema");
+        let mut url = url::Url::parse(&database).expect("fixture URL");
+        url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+        (url, pool, schema)
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    async fn cleanup_postgres_fixture(pool: sqlx::PgPool, schema: String) {
+        assert!(
+            schema.starts_with("runtime_")
+                && schema.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&pool)
+            .await
+            .expect("remove owned runtime schema");
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn files_tls_negotiates_trusted_https_and_h2() {
         use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
@@ -1343,16 +1371,16 @@ mod tests {
     #[cfg(feature = "postgres-integration")]
     #[tokio::test]
     async fn postgres_api_edge_readiness_follows_selected_database() {
-        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
         let data_dir =
             std::env::temp_dir().join(format!("scoplen-postgres-ready-{}", uuid::Uuid::new_v4()));
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
         config.storage.backend = " PoStGrEs ".into();
         config.sync.max_objects_per_vault = 2;
-        config.storage.database_url =
-            Some(toml::Value::String(database_url).try_into().expect("PostgreSQL URL setting"));
+        config.storage.database_url = Some(
+            toml::Value::String(database_url.into()).try_into().expect("PostgreSQL URL setting"),
+        );
         let prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
             .await
             .expect("prepare PostgreSQL API and edge roles");
@@ -1399,6 +1427,7 @@ mod tests {
         server.abort();
         let _ = server.await;
         drop(store);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
     }
 
@@ -1845,9 +1874,9 @@ mod tests {
     #[cfg(feature = "postgres-integration")]
     #[tokio::test]
     async fn postgres_worker_signs_advanced_deployment_prefix() {
-        let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
-            .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
-        let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL store");
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
+        let store =
+            PostgresStore::connect(database_url.as_str()).await.expect("open PostgreSQL store");
         let previous = store.latest_deployment_audit_checkpoint().await.expect("latest checkpoint");
         let first_at = previous.map_or(3_600_000, |checkpoint| {
             checkpoint.signed_at_ms.saturating_add(AUDIT_CHECKPOINT_INTERVAL_MS + 1)
@@ -1905,6 +1934,8 @@ mod tests {
             first.sequence + 1
         );
         store.pool().close().await;
+        drop(store);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&key_dir).await;
     }
 

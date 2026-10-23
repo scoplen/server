@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- PostgreSQL runtime readiness and audit-worker tests use private disposable schemas, keeping
+  concurrent setup audit events and earlier runs from changing checkpoint assertions. All
+  existing assertions remain intact; CI runs both PostgreSQL runtime fixtures together.
+
 - Mounted `GET /api/v1/accounts/me` for enrolled devices with exact `account:read` scope,
   JWT/DPoP/replay checks and transaction-local current account/device/proof-key/certificate
   authorization on SQLite and PostgreSQL. The bounded shared Resource codec preserves null or

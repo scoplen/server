@@ -88,8 +88,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
         run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact
-      - name: Check PostgreSQL deployment audit worker
-        run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_worker_signs_advanced_deployment_prefix -- --exact
+      - name: Check PostgreSQL runtime readiness and audit worker together
+        run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_
       - name: Check PostgreSQL deployment audit transactions and concurrency
         run: cargo test -p scoplen-store --test deployment_audit --features postgres-integration postgres_deployment_
       - name: Check account key admission and read consistency
@@ -124,8 +124,6 @@ jobs:
         run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_shared_vault_
       - name: Check PostgreSQL personal sync writes, reads, and acknowledgements
         run: cargo test -p scoplen-store --test sync --features postgres-integration postgres_personal_sync_
-      - name: Check PostgreSQL API and edge readiness
-        run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_api_edge_readiness_follows_selected_database -- --exact
       - name: Check PostgreSQL authenticated sync router
         run: cargo test -p scoplen-sync --test postgres_http --features postgres-integration
       - name: Create isolated device authentication database
