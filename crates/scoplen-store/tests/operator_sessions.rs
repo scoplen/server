@@ -771,6 +771,99 @@ async fn postgres_subsecond_refresh_lifetime_does_not_rotate() {
 
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
+async fn postgres_session_guard_holds_identity_rows_until_commit_or_rollback() {
+    use scoplen_store::operator_sessions::verify_operator_session_in_postgres_transaction;
+    use std::time::Duration;
+
+    let (store, pool, schema, _) = postgres_fixture().await;
+    let (verifier, mut auth, operator, binding) = setup!(store);
+    let keyring = store.ensure_operator_token_keyring(&TestKms).await.expect("keyring");
+    let handle = operator.into_bytes();
+    let (options, assertion) = assertion!(store, auth, &verifier, &binding);
+    let login = store
+        .finish_operator_login(&input!(options, assertion, &binding, &handle), &verifier, &keyring)
+        .await
+        .expect("login");
+    let mut trusted = TrustedOperatorAccessTokenKeys::new(ORIGIN).expect("issuer");
+    for key in keyring.verification_keys() {
+        trusted.insert(&key.kid, &key.public_key).expect("key");
+    }
+    let principal = OperatorAccessToken::parse(&login.browser().access_token)
+        .expect("token")
+        .verify(&trusted, u64::try_from(millis() / 1000).expect("time"))
+        .expect("verified");
+    for commit in [false, true] {
+        for (mutation, restore) in [
+            (
+                "UPDATE deployment_operators SET active=0",
+                "UPDATE deployment_operators SET active=1",
+            ),
+            (
+                "UPDATE operator_credentials SET active=0",
+                "UPDATE operator_credentials SET active=1",
+            ),
+            (
+                "UPDATE operator_refresh_families SET revoked_at_ms=created_at_ms",
+                "UPDATE operator_refresh_families SET revoked_at_ms=NULL",
+            ),
+        ] {
+            let mut caller = store.pool().begin().await.expect("caller transaction");
+            assert!(
+                verify_operator_session_in_postgres_transaction(&mut caller, &principal)
+                    .await
+                    .expect("authorized under row locks")
+                    .is_some()
+            );
+            let mut connection = store.pool().acquire().await.expect("independent updater");
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *connection)
+                .await
+                .expect("updater pid");
+            let updater = tokio::spawn(async move {
+                sqlx::query(mutation).execute(&mut *connection).await.expect("direct revocation")
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    assert!(!updater.is_finished(), "revocation escaped caller's row locks");
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')",
+                    )
+                    .bind(pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect independent lock wait");
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("direct update must block until caller ends");
+            if commit {
+                caller.commit().await.expect("caller commit");
+            } else {
+                caller.rollback().await.expect("caller rollback");
+            }
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), updater)
+                    .await
+                    .expect("revocation released after transaction end")
+                    .expect("updater task")
+                    .rows_affected(),
+                1
+            );
+            assert!(
+                store.current_operator_session(&principal).await.expect("fresh guard").is_none()
+            );
+            sqlx::query(restore).execute(store.pool()).await.expect("restore fixture identity");
+        }
+    }
+    cleanup(store, pool, schema).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
 async fn postgres_lost_finish_rotation_and_revocation_commit_acknowledgements() {
     use std::sync::atomic::Ordering;
     let (store, pool, schema, database) = postgres_fixture().await;
