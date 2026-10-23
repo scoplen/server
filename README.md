@@ -73,14 +73,21 @@ refresh accepts only the scoped `HttpOnly` cookie with the exact trusted Origin 
 rotated credential only in `Set-Cookie`. Independent Operator authentication storage also
 provides per-endpoint source, setup-digest, ceremony and verified-Operator admission, durable
 DPoP replay claims, and audit-atomic setup finish cooldown updates on both databases.
-Browser sign-in and control-plane authorization remain
-separate roadmap work. A dedicated Operator keyring uses independent Ed25519 seeds, `operator-`
-key identifiers, and purpose-bound encrypted envelopes, with the same audited 30-day rotation
+The stores also provide discoverable Operator login with current passkey counter and backup-state
+verification, atomic ceremony consumption and audited browser-session creation, independent
+30-day refresh families, single-use cookie rotation and matching-token reuse revocation. Refresh
+proofs are reverified and durably claimed within the rotation transaction. Current family,
+Operator and credential authorization can be rechecked inside an administration mutation
+transaction. Complete token JSON and the scoped secure cookie are validated before commit, and
+an uncertain commit returns no session secrets. Browser HTTP sign-in, console integration and
+control-plane authorization remain separate roadmap work. A dedicated Operator keyring uses
+independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encrypted envelopes,
+with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
-integrity, KMS validation, or a required audit write fails. Operator setup, sign-in, and
+integrity, KMS validation, or a required audit write fails. Operator sign-in and
 invitation-issuance authorization remain separate roadmap work. All server proto dependencies
-are pinned to `scoplen-proto@0c06293` for the shared authentication, Operator token, scope, and
+are pinned to `scoplen-proto@e2dd140` for the shared authentication, Operator token, scope, and
 object-signature contracts.
 
 The `scoplen-store` crate now provides a backend-neutral object
@@ -255,9 +262,16 @@ use the deliberate local reissue action only if setup remains pending.
 The storage service verifies real ES256 passkey registration and discoverable assertions with
 the maintained WebAuthn core under the configured exact origin/RP, required residency and UV,
 and `none` attestation policy. SQLite and PostgreSQL atomically persist the first operator,
-credential, permanent setup completion, ceremony consumption and deployment audit. HTTP setup,
-login/session and console integration are not mounted yet; the emitted link cannot yet complete
-registration through the browser. The Personal enrollment route
+credential, permanent setup completion, ceremony consumption and deployment audit. The API
+listener mounts `POST /api/v1/auth/operator/setup/options` and `/api/v1/auth/operator/setup/finish`.
+Both require the exact trusted Origin, a fresh browser DPoP proof and the setup secret, with
+durable source/private admission and replay claims. Invalid outer requests or wrong proof keys
+leave a ceremony usable; a failed embedded WebAuthn check consumes that ceremony with its audit
+but preserves the setup entitlement. Successful registration returns only the Operator id,
+without a token or cookie. An uncertain finish returns `auth.commit_outcome_unknown`; retain the
+passkey and attempt fresh login before explicitly returning to pending setup. Login/session and
+console integration remain incomplete, so the emitted link still requires that future browser
+surface. The Personal enrollment route
 requires an already issued invitation and no existing session or cookie. It rejects
 `Authorization`, `DPoP`, and `Idempotency-Key` headers. It
 admits at most 30 attempts per peer address and five attempts per decoded invitation digest in

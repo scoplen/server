@@ -11,9 +11,9 @@ workspace = true
 
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
@@ -26,10 +26,10 @@ uuid = { workspace = true, features = ["v7"] }
 zeroize.workspace = true
 serde_json.workspace = true
 base64 = "0.22.1"
+url = "2.5.8"
 
 [dev-dependencies]
 tokio.workspace = true
-url = "2.5.8"
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
 ciborium = "0.2.2"
 webauthn-rs-core = "=0.5.5"

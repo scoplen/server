@@ -235,7 +235,7 @@ fn source_key(source: IpAddr) -> Vec<u8> {
 }
 
 macro_rules! admission_store {
-    ($store:ty, $db:ty, $begin:ident, $lock:ident, $load:ident, $save:ident, $outcome:ident, $append:ident) => {
+    ($store:ty, $db:ty, $begin:ident, $lock:ident, $load:ident, $save:ident, $outcome:ident, $admit:ident, $claim:ident, $append:ident) => {
         impl $store {
             /// Admit the actual peer before allocating or parsing the body.
             /// # Errors
@@ -289,21 +289,36 @@ macro_rules! admission_store {
             /// Invalid, expired or replayed proofs fail before any business mutation.
             pub async fn claim_operator_dpop_proof(&self, proof: &DpopProof, target: &DpopTarget, token: DpopToken<'_>, expected_jkt: &str) -> Result<(), OperatorAdmissionError> {
                 let mut tx = $begin(self).await?;
-                $lock(&mut tx).await?;
+                $claim(&mut tx, proof, target, token, expected_jkt).await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+
+        pub(crate) async fn $admit(tx: &mut sqlx::Transaction<'_,$db>, endpoint: OperatorAuthEndpoint, bucket: OperatorPrivateBucket<'_>) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
+            $lock(tx).await?;
+            let now = now_ms()?;
+            let (kind,key)=bucket.parts(endpoint)?;
+            let mut bucket=$load(tx,endpoint,kind,&key,now).await?;
+            let decision=bucket.admit(now,if kind==4 {10} else {5});
+            $save(tx,endpoint,kind,&key,&bucket).await?;
+            Ok(decision)
+        }
+
+        pub(crate) async fn $claim(tx: &mut sqlx::Transaction<'_,$db>, proof: &DpopProof, target: &DpopTarget, token: DpopToken<'_>, expected_jkt: &str) -> Result<(), OperatorAdmissionError> {
+                $lock(tx).await?;
                 let now = now_ms()?;
                 let verified = proof.verify(target, token, expected_jkt, u64::try_from(now/1000).map_err(|_| OperatorAdmissionError::Clock)?, None).map_err(|_| OperatorAdmissionError::InvalidDpopProof)?;
                 let until = i64::try_from(verified.last_accepted_at).ok().and_then(|n| n.checked_add(1)).and_then(|n| n.checked_mul(1000)).ok_or(OperatorAdmissionError::Clock)?;
                 let digest: [u8;32] = Sha256::digest(verified.jti.as_bytes()).into();
-                sqlx::query::<$db>("DELETE FROM operator_dpop_replays WHERE (dpop_jkt, jti_digest) IN (SELECT dpop_jkt, jti_digest FROM operator_dpop_replays WHERE retain_until_ms <= $1 ORDER BY retain_until_ms LIMIT 16)").bind(now).execute(&mut *tx).await?;
-                let result = sqlx::query::<$db>("INSERT INTO operator_dpop_replays (dpop_jkt, jti_digest, retain_until_ms) VALUES ($1,$2,$3)").bind(verified.jkt).bind(digest.as_slice()).bind(until).execute(&mut *tx).await;
+                sqlx::query::<$db>("DELETE FROM operator_dpop_replays WHERE (dpop_jkt, jti_digest) IN (SELECT dpop_jkt, jti_digest FROM operator_dpop_replays WHERE retain_until_ms <= $1 ORDER BY retain_until_ms LIMIT 16)").bind(now).execute(&mut **tx).await?;
+                let result = sqlx::query::<$db>("INSERT INTO operator_dpop_replays (dpop_jkt, jti_digest, retain_until_ms) VALUES ($1,$2,$3)").bind(verified.jkt).bind(digest.as_slice()).bind(until).execute(&mut **tx).await;
                 match result {
                     Ok(_) => (),
                     Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Err(OperatorAdmissionError::InvalidDpopProof),
                     Err(_) => return Err(OperatorAdmissionError::Database),
                 }
-                tx.commit().await?;
                 Ok(())
-            }
         }
 
         async fn $load(tx: &mut sqlx::Transaction<'_,$db>, endpoint: OperatorAuthEndpoint, kind: i64, key: &[u8], now: i64) -> Result<Bucket,OperatorAdmissionError> {
@@ -363,6 +378,8 @@ admission_store!(
     sqlite_load,
     sqlite_save,
     sqlite_outcome,
+    sqlite_admit_private,
+    sqlite_claim_dpop,
     append_deployment_audit_event_in_transaction
 );
 admission_store!(
@@ -373,6 +390,8 @@ admission_store!(
     postgres_load,
     postgres_save,
     postgres_outcome,
+    postgres_admit_private,
+    postgres_claim_dpop,
     append_deployment_audit_event_in_postgres_transaction
 );
 

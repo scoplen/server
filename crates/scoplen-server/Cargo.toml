@@ -23,8 +23,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
 scoplen-identity = { path = "../scoplen-identity" }
 scoplen-store = { path = "../scoplen-store" }
 scoplen-sync = { path = "../scoplen-sync" }
@@ -47,6 +47,11 @@ workspace = true
 postgres-integration = []
 
 [dev-dependencies]
+base64 = "0.22.1"
+ciborium = "0.2.2"
 ed25519-dalek.workspace = true
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "0c06293e519e17c713123193d977c2b2d5ff6d57" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "e2dd140e06302d75d863c36e9dcba57a4b2562d1" }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+url = "2.5.8"
+webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
+webauthn-rs-core = "=0.5.5"
