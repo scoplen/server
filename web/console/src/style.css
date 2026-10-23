@@ -1,0 +1,350 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+:root {
+  font-family: "Inter Variable", sans-serif;
+  color: var(--foreground);
+  background: var(--background);
+  font-synthesis: none;
+  --background: #f5f3ef;
+  --foreground: #1c1917;
+  --muted-foreground: #57534e;
+  --border: #e2ded6;
+  --primary: #1f6f6b;
+  --primary-foreground: #f5f3ef;
+  --attention: #b0451f;
+  --surface: #fffdfa;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #1c1917;
+    --foreground: #f5f3ef;
+    --muted-foreground: #a8a29e;
+    --border: rgba(255, 255, 255, 0.12);
+    --primary: #7cc4bd;
+    --primary-foreground: #1c1917;
+    --attention: #e8875f;
+    --surface: #24211f;
+  }
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-width: 0;
+  font-size: 15px;
+  line-height: 1.65;
+}
+button,
+textarea {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 11px 18px;
+  min-height: 44px;
+  font-weight: 550;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+button:focus-visible,
+textarea:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+h1,
+.wordmark {
+  font-family: "Lora Variable", serif;
+  font-weight: 500;
+}
+h1 {
+  font-size: 36px;
+  line-height: 1.25;
+  max-width: 540px;
+  margin: 16px 0 20px;
+}
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+p {
+  color: var(--muted-foreground);
+}
+.console-shell {
+  max-width: 1280px;
+  margin: auto;
+  padding: 0 48px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.console-header {
+  height: 112px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.wordmark {
+  font-size: 28px;
+}
+.context {
+  border-left: 1px solid var(--border);
+  padding-left: 24px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.console-header button {
+  margin-left: auto;
+}
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr);
+  gap: 72px;
+  padding: 72px 0;
+  flex: 1;
+  align-content: center;
+}
+.primary {
+  min-width: 0;
+}
+.eyebrow {
+  font-size: 12px;
+  color: var(--primary);
+  font-weight: 650;
+}
+.intro {
+  font-size: 16px;
+  max-width: 530px;
+  line-height: 1.75;
+}
+.actions {
+  margin: 32px 0 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.primary-button {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+.primary-button:hover:enabled {
+  filter: brightness(1.08);
+}
+.quiet {
+  background: transparent;
+  color: var(--primary);
+  padding-left: 0;
+  padding-right: 0;
+}
+.quiet:hover:enabled {
+  text-decoration: underline;
+  text-underline-offset: 5px;
+}
+.caption {
+  font-size: 12px;
+  line-height: 1.7;
+  max-width: 510px;
+}
+.guide {
+  border-left: 1px solid var(--border);
+  padding-left: 40px;
+  padding-top: 8px;
+}
+.guide > h2 {
+  margin-bottom: 32px;
+}
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 24px;
+}
+.steps li {
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+}
+.step-number {
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 11px;
+  min-width: 20px;
+  color: var(--muted-foreground);
+}
+.steps p {
+  font-size: 13px;
+  margin-top: 4px;
+}
+.steps [aria-current="step"] h3,
+.steps [aria-current="step"] .step-number {
+  color: var(--primary);
+}
+.boundary {
+  padding-top: 24px;
+  margin-top: 40px;
+  border-top: 1px solid var(--border);
+}
+.boundary p {
+  font-size: 13px;
+  margin-top: 8px;
+}
+.notice {
+  border-left: 3px solid var(--primary);
+  padding: 12px 16px;
+  margin-top: 24px;
+  background: var(--surface);
+  font-size: 14px;
+}
+.notice[hidden] {
+  display: none;
+}
+.notice.error {
+  border-color: var(--attention);
+}
+.notice h2 {
+  margin-bottom: 4px;
+}
+.invitation {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+.invitation p {
+  font-size: 13px;
+  margin-top: 8px;
+}
+.invitation label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 20px 0 8px;
+}
+textarea {
+  width: 100%;
+  background: var(--surface);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 12px;
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 12px;
+  resize: vertical;
+  overflow-wrap: anywhere;
+  min-height: 96px;
+}
+.secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--foreground);
+  font-size: 13px;
+}
+.secondary:hover {
+  border-color: var(--primary);
+}
+.link-actions {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.link-actions span {
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--border);
+  padding: 24px 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.deployment {
+  font-family: "JetBrains Mono Variable", monospace;
+  overflow-wrap: anywhere;
+}
+.skip-link {
+  position: absolute;
+  left: 24px;
+  top: -100px;
+  padding: 12px;
+  background: var(--surface);
+  color: var(--foreground);
+}
+.skip-link:focus {
+  top: 12px;
+  z-index: 1;
+}
+@media (max-width: 760px) {
+  .console-shell {
+    padding: 0 24px;
+  }
+  .console-header {
+    min-height: 88px;
+    height: auto;
+    padding: 20px 0;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .context {
+    padding-left: 16px;
+    font-size: 12px;
+  }
+  .wordmark {
+    font-size: 24px;
+  }
+  .workspace {
+    grid-template-columns: 1fr;
+    gap: 48px;
+    padding: 48px 0;
+  }
+  h1 {
+    font-size: 30px;
+  }
+  .guide {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding: 32px 0 0;
+  }
+  .guide > h2 {
+    margin-bottom: 24px;
+  }
+  .boundary {
+    margin-top: 24px;
+  }
+  .console-header button {
+    font-size: 12px;
+  }
+  footer {
+    flex-direction: column;
+    gap: 4px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -879,8 +879,7 @@ pub(crate) fn api_router_with_limits(
                 "# HELP scoplen_server_info Server build information.\n# TYPE scoplen_server_info gauge\nscoplen_server_info{{version=\"{}\"}} 1\n",
                 crate::VERSION
             )
-        }))
-        .route("/", get(|| async { "Scoplen server" }));
+        }));
     if enrollment_enabled {
         router
             .merge(personal_enrollment::router(trusted_origin.clone(), enrollment_backend))
@@ -916,6 +915,16 @@ async fn run_public_listener(
     let enrollment_enabled = roles.contains(&Role::Api);
     let write_rate_limits = config.sync.write_rate_limits()?;
     let write_body_limits = config.sync.write_body_limits()?;
+    let router = api_router_with_limits(
+        database,
+        object_storage,
+        key_management,
+        trusted_origin,
+        enrollment_enabled,
+        write_rate_limits,
+        write_body_limits,
+    )
+    .merge(crate::console::router(&config.console.assets_dir, enrollment_enabled).await);
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
     match config.tls.mode {
@@ -927,31 +936,13 @@ async fn run_public_listener(
             }
             axum::serve(
                 listener,
-                api_router_with_limits(
-                    database,
-                    object_storage,
-                    key_management,
-                    trusted_origin,
-                    enrollment_enabled,
-                    write_rate_limits,
-                    write_body_limits,
-                )
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .await
             .map_err(|error| ServerError::Task(error.to_string()))?;
         }
         TlsMode::Files => {
             let acceptor = TlsAcceptor::from(Arc::new(tls_config(&config)?));
-            let router = api_router_with_limits(
-                database,
-                object_storage,
-                key_management,
-                trusted_origin,
-                enrollment_enabled,
-                write_rate_limits,
-                write_body_limits,
-            );
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
@@ -969,17 +960,7 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            run_acme_listener(
-                config,
-                listener,
-                database,
-                object_storage,
-                key_management,
-                enrollment_enabled,
-                write_rate_limits,
-                write_body_limits,
-            )
-            .await?;
+            run_acme_listener(config, listener, router).await?;
         }
     }
     Ok(())
@@ -1019,16 +1000,10 @@ fn tls_config(config: &Config) -> Result<ServerConfig, ServerError> {
     Ok(server)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_acme_listener(
     config: Config,
     listener: TcpListener,
-    database: ListenerDatabase,
-    object_storage: Arc<ObjectStorage>,
-    key_management: Arc<LocalKeyFile>,
-    enrollment_enabled: bool,
-    write_rate_limits: WriteRateLimits,
-    write_body_limits: WriteBodyLimits,
+    router: Router,
 ) -> Result<(), ServerError> {
     let email = config
         .tls
@@ -1041,15 +1016,6 @@ async fn run_acme_listener(
         .cache(DirCache::new(cache_dir))
         .directory_lets_encrypt(config.tls.acme_production)
         .tokio_incoming(TcpListenerStream::new(listener), application_alpn_protocols());
-    let router = api_router_with_limits(
-        database,
-        object_storage,
-        key_management,
-        config.public_origin()?,
-        enrollment_enabled,
-        write_rate_limits,
-        write_body_limits,
-    );
 
     while let Some(result) = tls_incoming.next().await {
         let tls = result.map_err(ServerError::Runtime)?;

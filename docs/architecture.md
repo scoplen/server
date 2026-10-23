@@ -22,6 +22,22 @@ The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracin
 material is written only under the configured data directory and is never included in request
 responses or logs.
 
+The API role loads the React Personal console from `console.assets_dir`, defaulting to
+`web/console/dist` relative to the working directory, with `SPL_CONSOLE_ASSETS_DIR` as an override.
+The production build records explicit paths, byte lengths and SHA-256 hashes. Startup reads only
+bounded manifest files inside the canonical directory, validates all bytes, and holds them in
+memory. Fixed entry paths `/` and `/setup` and listed `/assets/*` files have a strict same-origin
+CSP, Trusted Types, no-store, no-referrer and nosniff headers. There is no arbitrary filesystem
+fallback. A missing or invalid build disables only the console with an actionable 503; the
+API and readiness checks continue independently. Edge-only listeners have no console routes.
+
+The entry flow uses public generated OpenAPI types for setup, fresh passkey login, browser
+refresh and Personal invitation requests. It scrubs the setup fragment before making requests,
+keeps its non-extractable proof key and access token in memory, and never resumes an old cookie
+after reload with a newly generated key. Web Locks serialize refresh. Unknown business outcomes
+require explicit recovery without automatic replay; locking a tab clears local session material.
+The UI uses local Inter, Lora and JetBrains Mono fonts without third-party requests.
+
 `scoplen-identity` consumes the bounded D-101 Personal enrollment request from `scoplen-api`.
 It validates the trusted canonical origin and three existing signatures, then exposes the token
 digest, bound origin and ids, and exact canonical K-4/K-2 artifacts through a read-only verified
@@ -62,9 +78,10 @@ writes. PostgreSQL member addition also takes the account quota lock used by vau
 locking the vault, so concurrent joins across vaults cannot exceed the account limit. Historical
 wraps cascade when a member is removed, and retired epochs stay unavailable to new writes.
 A migration error
-prevents startup. `/readyz` queries the database and returns 503 when the query fails. Public
-HTTP/auth endpoints are still unmounted by the baseline listener; the injected sync router selects
-one SQLite or PostgreSQL backend for its account-key, object-sync, and shared-vault operations.
+prevents startup. `/readyz` queries the database and returns 503 when the query fails. The API
+listener mounts Personal enrollment, device authentication, Operator setup/login/refresh and
+the authenticated Personal sync subset. The injected sync router selects one SQLite or PostgreSQL
+backend for its account-key, object-sync, and shared-vault operations.
 It covers local notifications but still delegates authentication, signature verification,
 membership, and policy decisions to the service. Notification events are
 encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
@@ -78,7 +95,7 @@ bounded opaque payloads, claims jobs with owner-checked leases, records retries,
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
 retention job scheduling and membership-aware tombstone purge orchestration run through the same
 bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
-are available; production sync-router mounting, application-level
+are available; remaining shared-sync router mounting, application-level
 column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
 The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;
 cloud adapters, column encryption, and external KMS readiness remain open. Database-backed role

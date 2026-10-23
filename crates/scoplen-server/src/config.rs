@@ -29,6 +29,8 @@ pub struct Config {
     pub storage: StorageSettings,
     /// Sync cardinality and per-device write-rate limits.
     pub sync: SyncSettings,
+    /// API-role browser console assets.
+    pub console: ConsoleSettings,
 }
 
 impl Config {
@@ -77,6 +79,9 @@ impl Config {
         }
         if let Some(value) = env_value("SPL_SERVER_DATA_DIR") {
             self.server.data_dir = PathBuf::from(value);
+        }
+        if let Some(value) = env_value("SPL_CONSOLE_ASSETS_DIR") {
+            self.console.assets_dir = PathBuf::from(value);
         }
         if let Some(value) = env_value("SPL_TLS_MODE") {
             self.tls.mode = value.parse().map_err(|()| {
@@ -167,6 +172,9 @@ impl Config {
         self.public_origin()?;
         if self.server.data_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invalid("server.data_dir must not be empty".into()));
+        }
+        if self.console.assets_dir.as_os_str().is_empty() {
+            return Err(ConfigError::Invalid("console.assets_dir must not be empty".into()));
         }
         resolve_roles(&self.roles.names)
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
@@ -372,6 +380,20 @@ impl std::str::FromStr for TlsMode {
             "acme" => Ok(Self::Acme),
             _ => Err(()),
         }
+    }
+}
+
+/// Built browser assets served by the API role.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ConsoleSettings {
+    /// Manifest directory, relative to the process working directory when not absolute.
+    pub assets_dir: PathBuf,
+}
+
+impl Default for ConsoleSettings {
+    fn default() -> Self {
+        Self { assets_dir: PathBuf::from("web/console/dist") }
     }
 }
 
@@ -752,6 +774,19 @@ mod tests {
         config.validate().expect("defaults are valid");
         assert_eq!(config.listen_address(), "127.0.0.1:8443");
         assert_eq!(config.public_origin().expect("public origin"), "https://localhost");
+        assert_eq!(config.console.assets_dir, PathBuf::from("web/console/dist"));
+    }
+
+    #[test]
+    fn console_directory_can_be_configured_without_requiring_a_frontend_build() {
+        let mut config: Config = toml::from_str("[console]\nassets_dir = 'not-built-yet'\n")
+            .expect("parse console settings");
+        config.validate().expect("assets are checked independently of API startup");
+        assert_eq!(config.console.assets_dir, PathBuf::from("not-built-yet"));
+        config.console.assets_dir = PathBuf::new();
+        assert!(
+            config.validate().expect_err("empty path").to_string().contains("console.assets_dir")
+        );
     }
 
     #[test]

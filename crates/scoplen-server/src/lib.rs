@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod config;
+mod console;
 mod device_auth;
 mod error;
 mod operator_auth;
@@ -25,7 +26,8 @@ mod test_passkey;
 mod test_support;
 
 pub use config::{
-    Config, ConfigError, KmsSettings, ObjectStorageSettings, SecretValue, StorageSettings, TlsMode,
+    Config, ConfigError, ConsoleSettings, KmsSettings, ObjectStorageSettings, SecretValue,
+    StorageSettings, TlsMode,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};
