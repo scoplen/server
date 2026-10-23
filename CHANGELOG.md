@@ -4,6 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added the real React Personal console for first-passkey setup, fresh discoverable Operator
+  login, serialized cookie-only refresh and explicit Personal invitation creation. The setup
+  fragment is scrubbed immediately and the non-extractable browser proof key and access token
+  remain in memory. Unknown outcomes never trigger automatic business replay. Public generated
+  API types are pinned and checked, and actual WebCrypto proofs interoperate with the shared
+  Rust verifier. API-role static assets use a bounded SHA-256 whitelist, strict CSP and Trusted
+  Types; missing builds return an actionable console-only 503. Added asset configuration,
+  production build, bundled fonts/licenses, failure-path tests and CI checks. Physical passkey
+  and release-package verification remain open.
+
 - PostgreSQL HTTP lost-commit fixtures wait for the exact held business advisory lock before
   withholding its acknowledgement. Parallel admission/keyring waits cannot redirect the fault
   into a preceding transaction.

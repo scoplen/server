@@ -28,7 +28,11 @@ self-hosted server, host agent, administration CLI, and web console.
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only
   Operator refresh enforce exact Origin, durable DPoP/admission and non-disclosure after unknown
-  commits. Console surfaces, invitation
+  commits. The Personal React console connects setup, fresh passkey sign-in and invitation
+  requests through the generated public API contract. Its proof key and access token stay in
+  memory; reloads require a new login. Manifest-validated static assets fail independently of
+  API readiness. Physical passkey/browser interoperability and remaining console administration,
+  invitation
   issuance, complete identity and policy workflows, membership-aware purge scheduling,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
   can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.

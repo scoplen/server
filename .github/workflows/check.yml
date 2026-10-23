@@ -57,6 +57,11 @@ jobs:
         working-directory: .
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: Check pinned public console API types
+        run: node scripts/sync-console-contract.mjs --check
+        working-directory: .
 
   postgres-schema:
     name: PostgreSQL migration schema

@@ -20,6 +20,11 @@ trusted_proxies = []
 [roles]
 names = ["all"]
 
+[console]
+# Build with pnpm --dir web/console build. Relative to the process working directory.
+# Installed packages must ship this directory and configure its installed path.
+assets_dir = "web/console/dist"
+
 [sync]
 # Write bounds can be lowered, but cannot exceed these codec and storage ceilings.
 max_envelope_bytes = 266240
@@ -35,7 +40,7 @@ write_requests_per_second = 50
 write_burst = 200
 
 [storage]
-# Database-backed roles can use PostgreSQL with database_url; sync routes are not mounted yet.
+# Database-backed roles can use PostgreSQL with database_url.
 backend = "sqlite"
 # database_url = "postgres://scoplen:change-me@db.example.com/scoplen"
 
