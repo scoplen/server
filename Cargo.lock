@@ -4270,6 +4270,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
  "http-body-util",
+ "hyper",
  "hyper-util",
  "rcgen",
  "rustls",
@@ -4299,6 +4300,7 @@ dependencies = [
  "uuid",
  "webauthn-authenticator-rs",
  "webauthn-rs-core",
+ "zeroize",
 ]
 
 [[package]]

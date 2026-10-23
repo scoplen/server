@@ -228,6 +228,12 @@ separate verification.
 
 ## Development
 
+For independent Personal integration tests, build the registered
+`personal_live_bootstrap` example and follow [the disposable HTTPS fixture procedure](docs/live-personal-fixture.md).
+It prepares a private localhost TLS configuration, then performs real public Operator
+setup/login/invitation against the production server. SQLite is the default; PostgreSQL takes
+a private disposable-database configuration. The caller owns the server process and database.
+
 The maintained WebAuthn verifier builds vendored OpenSSL. Install Perl and a native C toolchain
 before running Cargo: MSVC Build Tools and Strawberry Perl on Windows, Xcode Command Line Tools
 on macOS, or the usual C compiler, Make and Perl packages on Linux. Put `perl` on `PATH` (the
