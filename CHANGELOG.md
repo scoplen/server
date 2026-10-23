@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- PostgreSQL administration transaction guards hold shared row locks on the current Operator,
+  credential and refresh family through commit or rollback. Direct concurrent revocations cannot
+  interleave between authorization and the protected mutation; expiry is rechecked after locks.
+
 - Added durable discoverable Operator passkey login and independent browser sessions on SQLite
   and PostgreSQL. Login compares against the current credential, then atomically updates its
   counter/backup state, consumes the ceremony, creates a 30-day refresh family and appends the
