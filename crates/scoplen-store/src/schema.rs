@@ -2002,8 +2002,8 @@ mod tests {
             SQLITE_DEVICE_TOKEN_KEYS,
             SQLITE_DEVICE_AUTHENTICATION,
             SQLITE_OPERATOR_SETUP,
-            SQLITE_OPERATOR_ADMISSION,
             SQLITE_OPERATOR_TOKEN_KEYS,
+            SQLITE_OPERATOR_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2020,8 +2020,8 @@ mod tests {
             POSTGRES_DEVICE_TOKEN_KEYS,
             POSTGRES_DEVICE_AUTHENTICATION,
             POSTGRES_OPERATOR_SETUP,
-            POSTGRES_OPERATOR_ADMISSION,
             POSTGRES_OPERATOR_TOKEN_KEYS,
+            POSTGRES_OPERATOR_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
