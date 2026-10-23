@@ -12,6 +12,9 @@ terminator. In `files` mode it terminates TLS itself and advertises `h2`, `http/
 TLS-ALPN-01, persists the ACME account and certificate cache below the data directory, and uses
 the same ALPN set for application connections. The gateway protocol is reserved for the managed
 data-path gate and is not accepted by the baseline listener yet.
+The file-certificate listener explicitly selects Rustls's AWS-LC provider and supported default
+TLS versions, so dependencies enabling a second provider cannot make startup panic or change its
+provider through process-global state.
 
 The trusted public HTTPS origin comes from canonical `server.public_host` and external
 `server.public_port`, independently of the local `server.listen_port`. The shared K-3 origin
