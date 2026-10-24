@@ -164,7 +164,21 @@ checks image/data-volume permissions, non-root writes, TLS trust and hostname re
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs
 one public setup, fresh resident software-passkey login and invitation issuance with the
 registered driver, rejects repeated bootstrap, then restarts the service and verifies the
-same public keyrings and completed setup state. It does not seed identity tables. Independent
+same public keyrings and completed setup state. It also archives the pinned server revision
+`37af5126585254612e734f542cfd4e36670915d9` from local Git history and builds its original
+server binaries into a disposable image with the current check's runtime files. That revision
+precedes the `20261024040000` SQLite migration. The old image starts a real Personal volume;
+the check seeds committed organization and sync-object rows and an object file, then starts the
+current image against that volume while the seeding SQLite connection keeps its committed WAL
+open. It checks that the WAL holds data absent from the main database file alone, then verifies
+the migrated rows, the independently readable old schema snapshot, and both SQLite integrity and
+foreign-key integrity. After stopping the current
+server, the check copies only the completed snapshot, original keys, and object files into a
+separate empty recovery volume. The matching old server must reach `/readyz` and preserve those
+rows and files; newer WAL/SHM files are excluded from the copy. CI fetches the repository's full
+history so this fixed old revision is available. This is one Linux amd64 upgrade and offline
+recovery acceptance case, not a complete encrypted deployment backup or general restore tool.
+It does not seed identity tables. Independent
 desktop enrollment/SSH, physical authenticators, arm64 and full deployment/release gates need
 their own evidence.
 

@@ -276,6 +276,9 @@ configured DNS name and public port. The runtime is distroless and non-root; ord
 the existing one-time link, fresh Passkey sign-in, and Personal invitation flow. Deployment and
 release gates remain Incomplete; this entry does not establish signed release artifacts,
 backup/restore, physical Passkey interoperability, or every `all`-role workflow.
+The disposable container check also runs a populated pre-migration SQLite database through the
+current image, then starts a matching old server against an explicit offline snapshot recovery.
+It covers that upgrade path without implementing complete deployment backup/restore.
 
 ## Personal console assets
 

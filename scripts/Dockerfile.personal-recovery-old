@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Build the pinned pre-migration server from its archived source, then run it
+# with the current check's already verified runtime files and console assets.
+ARG CHECK_RUNTIME_IMAGE
+
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS historical-build
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+       build-essential ca-certificates cmake git perl pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
+WORKDIR /src
+COPY rust-toolchain.toml ./
+RUN rustup show active-toolchain
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+ARG TARGETARCH
+RUN --mount=type=cache,id=scoplen-server-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=scoplen-server-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=scoplen-server-target-linux-${TARGETARCH},target=/src/target,sharing=locked \
+    touch Cargo.toml Cargo.lock rust-toolchain.toml \
+    && find crates -type f -exec touch {} + \
+    && cargo build --locked --release \
+       -p scoplen-server --bin spl-server -p scoplen-ctl --bin splctl \
+    && install -D -m 0755 target/release/spl-server /out/spl-server \
+    && install -D -m 0755 target/release/splctl /out/splctl
+
+FROM ${CHECK_RUNTIME_IMAGE} AS runtime
+COPY --from=historical-build /out/spl-server /out/splctl /app/

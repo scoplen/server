@@ -56,6 +56,11 @@ test("build failures expose only fixed categories, stage names and bounded exit 
     describe("", { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }).category,
     "output-limit",
   );
+  assert.equal(
+    describe("#4 [historical-build 8/8] error[E0308]: could not compile")
+      .lastObservedStage,
+    "historical-build",
+  );
   assert.deepEqual(
     describe(secret, { code: secret, signal: secret, message: secret }),
     {
@@ -77,6 +82,12 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
     "image data-directory validation",
     "probe image pull",
     "TLS fixture preparation",
+    "historical source extraction",
+    "matching old image build",
+    "old schema seed",
+    "SQLite migration snapshot",
+    "offline snapshot restore",
+    "matching old image recovery",
   ]) {
     const description = describeCheckFailure({ phase, error });
     assert.equal(description.phase, phase);
