@@ -115,6 +115,38 @@ impl Fixture {
         self.execute("DELETE FROM operator_auth_admission").await;
     }
 
+    async fn exhaust_admission(&self, kind: i64, attempts: i64) {
+        let now =
+            i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_millis())
+                .expect("fixture milliseconds");
+        // Own a full window so a minute boundary cannot reset the injected quota.
+        let sql = "UPDATE operator_auth_admission
+                   SET attempts = $1, window_start_ms = $2, retain_until_ms = $3,
+                       failure_streak = 0, last_failure_ms = NULL, cooldown_until_ms = NULL
+                   WHERE kind = $4";
+        let affected = match &self.backend {
+            AuthBackend::Sqlite(store) => sqlx::query(sql)
+                .bind(attempts)
+                .bind(now)
+                .bind(now + 60_000)
+                .bind(kind)
+                .execute(store.pool())
+                .await
+                .expect("SQLite quota fixture")
+                .rows_affected(),
+            AuthBackend::Postgres(store) => sqlx::query(sql)
+                .bind(attempts)
+                .bind(now)
+                .bind(now + 60_000)
+                .bind(kind)
+                .execute(store.pool())
+                .await
+                .expect("PostgreSQL quota fixture")
+                .rows_affected(),
+        };
+        assert_eq!(affected, 1, "exactly one existing quota bucket");
+    }
+
     async fn options(&self, token: [u8; 32], key: &P256SigningKey) -> serde_json::Value {
         let body = OperatorSetupOptionsRequest { setup_token: token }.to_json().expect("request");
         let reply = self.post(OPTIONS_PATH, &body, key).await;
@@ -594,7 +626,7 @@ async fn quota_and_race(fixture: Fixture) {
     let client_key = key(1);
     let options = fixture.options(token, &client_key).await;
     let body = OperatorSetupOptionsRequest { setup_token: token }.to_json().expect("options");
-    fixture.execute("UPDATE operator_auth_admission SET attempts = 5 WHERE kind = 2").await;
+    fixture.exhaust_admission(2, 5).await;
     fixture.post(OPTIONS_PATH, &body, &client_key).await.problem(
         429,
         "auth.rate_limited",
@@ -609,7 +641,7 @@ async fn quota_and_race(fixture: Fixture) {
         false,
         false,
     );
-    fixture.execute("UPDATE operator_auth_admission SET attempts = 30 WHERE kind = 1").await;
+    fixture.exhaust_admission(1, 30).await;
     http(fixture.address, OPTIONS_PATH, b"not JSON", &[]).await.problem(
         429,
         "auth.rate_limited",

@@ -439,6 +439,8 @@ PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The d
 keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.
 Run Personal sync authentication and certified-signature limit tests in a separate database,
 as CI does; both Personal suites use the same test deployment key and may share that database.
+Operator HTTP quota fixtures set both the exhausted count and a fresh full window, clearing
+failure cooldowns so quota-before-parsing assertions remain valid across minute boundaries.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
