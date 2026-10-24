@@ -4,6 +4,15 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a source-built Personal container entry with bundled console assets, direct HTTPS from
+  operator-provisioned certificate files, a non-root distroless runtime and persistent private
+  SQLite/key storage. Compose requires the public DNS name and certificate directory explicitly.
+  The guide covers first-Operator Passkey setup/login, one-use invitation creation, local pending
+  setup recovery, verified readiness and restart behavior. A repeatable container check and CI
+  job exercise trusted HTTPS, bundled assets, public software-passkey bootstrap and persistent
+  restart state, with strictly owned cleanup and private failure evidence. Complete release
+  artifacts and backup/restore remain roadmap work.
+
 - Prevented an acknowledged SQLite custom-BEGIN cancellation from returning an open transaction
   to the pool. Connections with remaining tracked transactions are rolled back before reuse;
   failed cleanup discards them. Deterministic worker/acknowledgement barriers cover the exact

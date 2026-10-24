@@ -100,13 +100,13 @@ Operator and credential authorization can be rechecked inside an administration 
 transaction. Complete token JSON and the scoped secure cookie are validated before commit, and
 an uncertain commit returns no session secrets. The API listener mounts the strict Operator
 setup and login options/finish routes, and dispatches Operator browser refresh cookies to their
-independent verifier and family store. Console integration and
-control-plane authorization remain separate roadmap work. A dedicated Operator keyring uses
+independent verifier and family store. The Personal console connects setup, fresh Passkey login
+and Personal invitation issuance. A dedicated Operator keyring uses
 independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encrypted envelopes,
 with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
-integrity, KMS validation, or a required audit write fails. Console integration and remaining
+integrity, KMS validation, or a required audit write fails. Remaining console administration and
 control-plane authorization remain roadmap work. All server Rust proto dependencies and
 the console's generated public API types are pinned to `proto@e2b8817` for shared
 authentication, Operator token, scope,
@@ -265,6 +265,16 @@ ARK rotation or device revocation workflows.
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.
 `web/console` is the React and strict TypeScript Personal console. `deploy/` and `docs/`
 hold deployment and operational material as those roadmap gates become implementable.
+
+## Personal container trial
+
+Follow [the Personal container procedure](docs/personal-container.md) for the source-built
+single-node Compose entry. It builds and carries the Personal console, persists SQLite and keys
+in a private Docker volume, and serves direct HTTPS using an external certificate matching the
+configured DNS name and public port. The runtime is distroless and non-root; ordinary setup uses
+the existing one-time link, fresh Passkey sign-in, and Personal invitation flow. Deployment and
+release gates remain Incomplete; this entry does not establish signed release artifacts,
+backup/restore, physical Passkey interoperability, or every `all`-role workflow.
 
 ## Personal console assets
 
@@ -437,8 +447,8 @@ The read transaction rechecks caller admission and verifies every stored signatu
 binding and device-id uniqueness; inactive peer enrollment rows do not remove signed statements.
 Missing key state, corrupt collections and capacity failures return a non-cacheable 503 without
 partial data. The read accepts no body, query, `Idempotency-Key` or `If-Match`, and returns no ETag
-or pagination fields. Names and platforms remain signed account claims. Device admission,
-revocation mutations and additional-device enrollment remain separate work. The protected Personal
+or pagination fields. Names and platforms remain signed account claims. Remaining device
+lifecycle mutations remain separate work. The protected Personal
 sync subset above also uses these credentials; other control-plane APIs remain unmounted.
 
 Server integration tests exercise the complete public Personal path on SQLite and PostgreSQL:
@@ -446,7 +456,7 @@ passkey setup, fresh Operator login, invitation issuance, signed first-device en
 device challenge/token exchange, authenticated account-profile and device-statement reads,
 Personal session/key reads, encrypted signed host write, download verification/decryption, and
 durable ACK. They use the production API router and verify its deployment audit chain. Native
-desktop and two-device acceptance remain separate roadmap work.
+desktop two-device acceptance remains separate roadmap work.
 
 PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The device-token
 keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.

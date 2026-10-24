@@ -1,0 +1,41 @@
+name: scoplen-personal
+
+services:
+  server:
+    image: scoplen-server:local
+    pull_policy: never
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      SPL_SERVER_PUBLIC_HOST: ${SCOPLEN_SERVER_HOST:?Set SCOPLEN_SERVER_HOST to the certificate DNS name}
+      SPL_SERVER_PUBLIC_PORT: ${SCOPLEN_HTTPS_PORT:-8443}
+    ports:
+      - "${SCOPLEN_BIND_ADDRESS:-0.0.0.0}:${SCOPLEN_HTTPS_PORT:-8443}:8443"
+    volumes:
+      - type: volume
+        source: data
+        target: /var/lib/spl
+      - type: bind
+        source: ${SCOPLEN_TLS_DIRECTORY:?Set SCOPLEN_TLS_DIRECTORY to the existing private certificate directory}
+        target: /run/scoplen/tls
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data:

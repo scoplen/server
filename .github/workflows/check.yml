@@ -63,6 +63,26 @@ jobs:
         run: node scripts/sync-console-contract.mjs --check
         working-directory: .
 
+  personal-container:
+    name: Personal container (Linux amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 1
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
+      - name: Test container-check cleanup boundaries
+        run: node --test scripts/check-personal-container.test.mjs
+      - name: Build native public HTTPS bootstrap driver
+        run: cargo build --locked -p scoplen-server --example personal_live_bootstrap
+      - name: Build and verify the Personal container through public HTTPS
+        run: node scripts/check-personal-container.mjs --bootstrap-driver target/debug/examples/personal_live_bootstrap
+
   postgres-schema:
     name: PostgreSQL migration schema
     runs-on: ubuntu-latest
