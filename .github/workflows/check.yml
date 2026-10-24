@@ -83,9 +83,12 @@ jobs:
       - name: Test container-check cleanup boundaries
         run: node --test scripts/check-personal-container.test.mjs
       - name: Build native public HTTPS bootstrap driver
-        run: cargo build --locked -p scoplen-server --example personal_live_bootstrap
+        run: |
+          cargo build --locked -p scoplen-server --example personal_live_bootstrap
+          install -m 0700 target/debug/examples/personal_live_bootstrap "$RUNNER_TEMP/personal_live_bootstrap"
+          cargo clean
       - name: Build and verify the Personal container through public HTTPS
-        run: node scripts/check-personal-container.mjs --bootstrap-driver target/debug/examples/personal_live_bootstrap
+        run: node scripts/check-personal-container.mjs --bootstrap-driver "$RUNNER_TEMP/personal_live_bootstrap"
 
   postgres-schema:
     name: PostgreSQL migration schema
