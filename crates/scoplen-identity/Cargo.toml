@@ -9,8 +9,8 @@ description = "Scoplen identity and device lifecycle primitives."
 [dependencies]
 ciborium = "0.2.2"
 openssl = { version = "0.10.75", features = ["vendored"] }
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "22a83ad3d68557f2e19be570af0facbd5c0b8265" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "22a83ad3d68557f2e19be570af0facbd5c0b8265" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e2b881771e23923b602ceace1f15870cd7ec2144" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "e2b881771e23923b602ceace1f15870cd7ec2144" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

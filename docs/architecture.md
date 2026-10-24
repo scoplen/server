@@ -21,6 +21,12 @@ The trusted public HTTPS origin comes from canonical `server.public_host` and ex
 validator rejects ambiguous hosts before startup. Bootstrap uses this origin for setup links;
 incoming Host and forwarding headers do not determine it.
 
+The Rust protocol consumers and generated console API types use the published
+`proto@e2b8817` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
+`scoplen-model`; their source and public API artifact are unchanged from the prior pin.
+The revision's D-116 asynchronous agent signing belongs to `scoplen-ssh`. Server SSH
+execution and host-agent integration remain separate roadmap work.
+
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request
 responses or logs.

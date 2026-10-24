@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Upgraded every Rust protocol dependency and the generated console contract source to
+  `proto@e2b8817`, containing D-116 asynchronous agent signing. The server's API, crypto and
+  model consumers and the public API artifact retain their existing behavior; server SSH
+  execution and host-agent integration remain separate work.
+
 - Added content-free authentication storage diagnostics with request-id correlation, static
   phases/error categories and elapsed time. SQLite busy/locked failures and connection-pool
   failures remain distinguishable without retaining database text. Real HTTP writer-timeout
