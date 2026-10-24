@@ -107,10 +107,15 @@ with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Console integration and remaining
-control-plane authorization remain roadmap work. All server proto dependencies
-are pinned to `proto@22a83ad3` for shared authentication, Operator token, scope,
+control-plane authorization remain roadmap work. All server Rust proto dependencies and
+the console's generated public API types are pinned to `proto@e2b8817` for shared
+authentication, Operator token, scope,
 object-signature, complete account-device statement, D-114 pairing and notification scope lookup
 contracts, D-115 account-key problem vectors and RUSTSEC-2026-0387 dependency fixes.
+The pinned source also includes D-116 asynchronous agent signing in `scoplen-ssh`.
+The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`; those crates and
+the OpenAPI artifact are unchanged by this revision. Server-hosted SSH and agent execution
+remain separate roadmap work.
 The server lock also resolves patched `crypto-bigint` 0.7.6 and `ctutils` 0.4.5;
 published K-2 formats and shared public APIs remain unchanged.
 The stores also provide independent durable pairing admission for each method/route:
