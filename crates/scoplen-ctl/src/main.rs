@@ -2,7 +2,9 @@
 //! Explicit local administration operations; no remote setup recovery endpoint exists.
 
 use clap::{Parser, Subcommand};
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, sync::OnceLock};
+
+static PROCESS_LEASE: OnceLock<scoplen_server::deployment_lease::DeploymentLease> = OnceLock::new();
 
 #[derive(Parser)]
 #[command(name = "splctl", about = "Scoplen local deployment administration")]
@@ -41,6 +43,8 @@ async fn main() -> ExitCode {
 
 async fn run(path: &std::path::Path) -> Result<(), scoplen_server::ServerError> {
     let config = scoplen_server::Config::load(path)?;
+    let lease = scoplen_server::admit_local_deployment(&config)?;
+    PROCESS_LEASE.get_or_init(|| lease);
     let disclosure = scoplen_server::reissue_operator_setup(&config).await?;
     println!("one-time operator setup link (keep private): {}", disclosure.expose_link().as_str());
     Ok(())

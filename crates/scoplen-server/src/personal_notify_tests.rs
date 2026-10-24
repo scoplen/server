@@ -511,6 +511,87 @@ async fn expiry(mut f: Fixture) {
 }
 
 #[tokio::test]
+async fn supervised_shutdown_fences_ready_h2_connect_before_listener_exit() {
+    let mut f = Fixture::sqlite().await;
+    let identity = bootstrap_personal(&mut f).await;
+    let rcgen::CertifiedKey { cert, key_pair } =
+        rcgen::generate_simple_self_signed(vec!["setup.example.com".into()])
+            .expect("owned TLS certificate");
+    let certificate = f.directory.join("shutdown.pem");
+    let private_key = f.directory.join("shutdown-key.pem");
+    std::fs::write(&certificate, cert.pem()).expect("TLS certificate");
+    std::fs::write(&private_key, key_pair.serialize_pem()).expect("TLS private key");
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).expect("test-only TLS root");
+
+    let reserved = TcpListener::bind("127.0.0.1:0").await.expect("reserve TLS port");
+    let address = reserved.local_addr().expect("reserved address");
+    drop(reserved);
+    let mut config = crate::Config::default();
+    config.server.data_dir = f.directory.join("lease-data");
+    config.server.public_host = "setup.example.com".into();
+    config.server.public_port = 9443;
+    config.server.listen_addr = "127.0.0.1".into();
+    config.server.listen_port = address.port();
+    config.tls.mode = crate::TlsMode::Files;
+    config.tls.cert_file = Some(certificate);
+    config.tls.key_file = Some(private_key);
+    let lease = crate::admit_local_deployment(&config).expect("private listener admission");
+    let database = match &f.backend {
+        AuthBackend::Sqlite(store) => ListenerDatabase::Sqlite(store.clone()),
+        AuthBackend::Postgres(_) => unreachable!("SQLite shutdown fixture"),
+    };
+    let object_storage = ObjectStorage::from_config(&ObjectStorageConfig::Filesystem {
+        root: f.directory.join("objects"),
+    })
+    .expect("object storage");
+    let kms = LocalKeyFile::load(f.directory.join("deployment.key")).expect("KMS");
+    let hub = scoplen_sync::notify::NotificationHub::default();
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let listener_hub = hub.clone();
+    let task = tokio::spawn(async move {
+        crate::runtime::run_public_listener(
+            config,
+            vec![crate::Role::Api],
+            database,
+            Arc::new(object_storage),
+            Arc::new(kms),
+            crate::runtime::ListenerLifecycle { lease, notifications: listener_hub, shutdown },
+        )
+        .await
+        .expect("supervised TLS listener");
+    });
+    let mut listener = Listener { address, roots, task, fanout: None, hub };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if TcpStream::connect(address).await.is_ok() {
+                break;
+            }
+            assert!(!listener.task.is_finished(), "listener stopped before CONNECT");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("listener started");
+    let (mut socket, h2_task) = listener.h2().await;
+    ready(
+        &mut socket,
+        &credentials(&identity.client, &identity.token, "CONNECT", PATH, &identity.token),
+    )
+    .await;
+    stop.send(true).expect("request shutdown");
+    closed(&mut socket, 1011).await;
+    assert!(!listener.hub.is_available(), "new notification sessions must be fenced");
+    tokio::time::timeout(Duration::from_secs(5), &mut listener.task)
+        .await
+        .expect("listener drained")
+        .expect("listener task");
+    h2_task.abort();
+    drop((socket, listener));
+    f.cleanup().await;
+}
+
+#[tokio::test]
 async fn sqlite_real_tls_notifications_get_connect_delivery_and_revocation() {
     delivery(Fixture::sqlite().await).await;
 }

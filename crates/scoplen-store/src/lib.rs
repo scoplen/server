@@ -50,7 +50,7 @@ pub use personal_enrollment::{
     PersonalInvitationStoreError,
 };
 
-use std::{path::Path, time::Duration};
+use std::{fs::File, path::Path, sync::Arc, time::Duration};
 
 use sqlx::{
     Connection, PgPool, Pool, Postgres, Sqlite, SqlitePool, TransactionManager,
@@ -82,6 +82,7 @@ pub struct SqliteStore {
     pool: SqlitePool,
     sync_cardinality_limits: sync::SyncCardinalityLimits,
     sync_write_limits: scoplen_api::sync::SyncWriteLimits,
+    _deployment_lease: Option<Arc<File>>,
 }
 
 impl SqliteStore {
@@ -110,6 +111,38 @@ impl SqliteStore {
         sync_cardinality_limits: sync::SyncCardinalityLimits,
         sync_write_limits: scoplen_api::sync::SyncWriteLimits,
     ) -> Result<Self, StoreError> {
+        Self::open_with_sync_limits_inner(path, sync_cardinality_limits, sync_write_limits, None)
+            .await
+    }
+
+    /// Open SQLite while retaining an already locked deployment file through migrations and
+    /// every clone of this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same validation, database, and migration errors as
+    /// [`Self::open_with_sync_limits`]. The caller must acquire the file lock before calling.
+    pub async fn open_with_sync_limits_and_lease(
+        path: &Path,
+        sync_cardinality_limits: sync::SyncCardinalityLimits,
+        sync_write_limits: scoplen_api::sync::SyncWriteLimits,
+        deployment_lease: Arc<File>,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_sync_limits_inner(
+            path,
+            sync_cardinality_limits,
+            sync_write_limits,
+            Some(deployment_lease),
+        )
+        .await
+    }
+
+    async fn open_with_sync_limits_inner(
+        path: &Path,
+        sync_cardinality_limits: sync::SyncCardinalityLimits,
+        sync_write_limits: scoplen_api::sync::SyncWriteLimits,
+        deployment_lease: Option<Arc<File>>,
+    ) -> Result<Self, StoreError> {
         sync_cardinality_limits.validate().map_err(StoreError::InvalidSyncLimits)?;
         sync_write_limits
             .validate()
@@ -127,10 +160,13 @@ impl SqliteStore {
             .journal_mode(SqliteJournalMode::Wal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
+        let pool_lease = deployment_lease.clone();
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .after_release(|connection, _| {
+            .after_release(move |connection, _| {
+                let lease = pool_lease.clone();
                 Box::pin(async move {
+                    let _deployment_lease = lease;
                     // SQLx custom BEGIN validates the handle after acknowledgement. Cancellation
                     // there has no Transaction guard, so clean before another request can acquire it.
                     if connection.is_in_transaction()
@@ -143,8 +179,16 @@ impl SqliteStore {
             })
             .connect_with(options)
             .await?;
-        pre_migration::migrate(&pool, path).await?;
-        Ok(Self { pool, sync_cardinality_limits, sync_write_limits })
+        if let Err(error) = pre_migration::migrate(&pool, path, deployment_lease.clone()).await {
+            pool.close().await;
+            return Err(error);
+        }
+        Ok(Self {
+            pool,
+            sync_cardinality_limits,
+            sync_write_limits,
+            _deployment_lease: deployment_lease,
+        })
     }
 
     /// Return the limits enforced by this SQLite store.

@@ -8,7 +8,9 @@ use std::{
     process::Command,
 };
 
-use scoplen_server::{Config, Role, bootstrap, prepare_roles};
+use scoplen_server::{
+    Config, Role, ServerError, bootstrap, deployment_lease::DeploymentLease, prepare_roles,
+};
 
 struct Fixture(PathBuf);
 
@@ -49,6 +51,23 @@ fn add_public_read(path: &Path, directory: bool) {
         .output()
         .expect("owned fixture permissions");
     assert!(output.status.success(), "fixture ACL update failed");
+}
+
+fn mark_hidden(path: &Path) {
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let output = Command::new(executable)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$path = $env:SCOPLEN_ACL_TEST_PATH; [System.IO.File]::SetAttributes($path, ([System.IO.File]::GetAttributes($path) -bor [System.IO.FileAttributes]::Hidden))",
+        ])
+        .env("SCOPLEN_ACL_TEST_PATH", path)
+        .creation_flags(0x0800_0000)
+        .output()
+        .expect("mark owned fixture hidden");
+    assert!(output.status.success(), "fixture Hidden attribute update failed");
 }
 
 #[test]
@@ -117,6 +136,78 @@ fn unsafe_existing_key_is_rejected_without_replacement() {
 }
 
 #[test]
+fn deployment_lease_rejects_a_broad_file_acl() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    bootstrap(&config).expect("private deployment");
+    let lease = config.server.data_dir.join("deployment.lease");
+    add_public_read(&lease, false);
+    let error = bootstrap(&config).expect_err("unsafe lease ACL must reject");
+    assert!(error.to_string().contains("permissions are unsafe or unsupported"));
+    assert!(lease.is_file(), "rejected lease file is retained for inspection");
+}
+
+#[test]
+fn deployment_lease_rejects_a_hard_link() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    bootstrap(&config).expect("private deployment");
+    let lease = config.server.data_dir.join("deployment.lease");
+    let alias = config.server.data_dir.join("lease-hard-link");
+    fs::hard_link(&lease, &alias).expect("owned hard link fixture");
+    let error = bootstrap(&config).expect_err("linked lease must reject");
+    assert!(error.to_string().contains("permissions are unsafe or unsupported"));
+    assert!(lease.is_file() && alias.is_file(), "rejected links remain unchanged");
+}
+
+#[test]
+fn hidden_private_lease_is_admitted_but_hidden_hard_link_is_rejected() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    bootstrap(&config).expect("private deployment");
+    let lease = config.server.data_dir.join("deployment.lease");
+    let key = config.server.data_dir.join("deployment.key");
+    mark_hidden(&lease);
+    mark_hidden(&key);
+    bootstrap(&config).expect("ordinary Hidden lease and key retain private admission");
+
+    let alias = config.server.data_dir.join("hidden-lease-hard-link");
+    fs::hard_link(&lease, &alias).expect("owned hard link fixture");
+    let error = bootstrap(&config).expect_err("Hidden hard link must reject");
+    assert!(error.to_string().contains("permissions are unsafe or unsupported"));
+    assert!(lease.is_file() && alias.is_file(), "rejected hidden links remain unchanged");
+}
+
+#[test]
+fn deployment_lease_rejects_junction_data_directory() {
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    bootstrap(&config).expect("private deployment");
+    let junction = fixture.0.join("junction-data");
+    let executable = PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let output = Command::new(executable)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Junction -Path $env:SCOPLEN_ACL_TEST_PATH -Target $env:SCOPLEN_ACL_TEST_TARGET -ErrorAction Stop | Out-Null",
+        ])
+        .env("SCOPLEN_ACL_TEST_PATH", &junction)
+        .env("SCOPLEN_ACL_TEST_TARGET", &config.server.data_dir)
+        .creation_flags(0x0800_0000)
+        .output()
+        .expect("create owned directory junction");
+    assert!(output.status.success(), "junction fixture creation failed");
+    assert!(matches!(
+        DeploymentLease::try_shared(&junction),
+        Err(ServerError::DeploymentLeaseUnavailable(_))
+    ));
+    assert!(config.server.data_dir.join("deployment.lease").is_file());
+    fs::remove_dir(&junction).expect("remove owned junction without traversing its target");
+}
+
+#[test]
 fn public_process_refuses_a_missing_acl_runtime_without_disclosing_a_path_or_creating_storage() {
     let fixture = Fixture::new();
     let config = fixture.config();
@@ -145,8 +236,8 @@ async fn migration_snapshots_inherit_private_permissions_and_unsafe_existing_acl
     use scoplen_store::RelationalStore;
     let fixture = Fixture::new();
     let config = fixture.config();
-    let prepared = prepare_roles(&config, &[Role::Api]).await.expect("private initial startup");
-    let store = prepared.store.expect("SQLite store");
+    let mut prepared = prepare_roles(&config, &[Role::Api]).await.expect("private initial startup");
+    let store = prepared.store.take().expect("SQLite store");
     sqlx::query(
         "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
     )
@@ -155,10 +246,13 @@ async fn migration_snapshots_inherit_private_permissions_and_unsafe_existing_acl
     .expect("owned fixture pending migration");
     store.pool().close().await;
     drop(store);
-    let prepared = prepare_roles(&config, &[Role::Api]).await.expect("private protected upgrade");
-    let store = prepared.store.expect("upgraded SQLite store");
+    drop(prepared);
+    let mut prepared =
+        prepare_roles(&config, &[Role::Api]).await.expect("private protected upgrade");
+    let store = prepared.store.take().expect("upgraded SQLite store");
     store.pool().close().await;
     drop(store);
+    drop(prepared);
     let directory = config.server.data_dir.join("scoplen.sqlite.migration-snapshots");
     let snapshots: Vec<_> = fs::read_dir(&directory)
         .expect("snapshot directory")

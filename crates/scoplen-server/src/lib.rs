@@ -7,6 +7,7 @@ mod account_devices;
 mod account_profile;
 mod config;
 mod console;
+pub mod deployment_lease;
 mod device_auth;
 mod error;
 mod operator_auth;
@@ -17,6 +18,9 @@ mod personal_sync;
 mod private_material;
 mod roles;
 mod runtime;
+#[cfg(windows)]
+#[path = "private_material/windows.rs"]
+mod windows_private_directory;
 
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "../../scoplen-store/tests/support/lost_commit.rs"]
@@ -34,7 +38,10 @@ pub use config::{
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};
-pub use runtime::{PreparedRoles, bootstrap, prepare_roles, reissue_operator_setup, run_roles};
+pub use runtime::{
+    PreparedRoles, admit_local_deployment, bootstrap, prepare_roles, reissue_operator_setup,
+    run_roles,
+};
 
 /// The server's current package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

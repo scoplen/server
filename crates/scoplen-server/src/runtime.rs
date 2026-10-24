@@ -4,7 +4,7 @@
 use std::{
     future::Future,
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,21 +22,40 @@ use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
 use scoplen_store::sync::MAX_PAGE_SIZE;
 use scoplen_store::{
     AuditChainHead, AuditCheckpoint, AuditStoreError, DeploymentAuditChainHead,
-    DeploymentAuditCheckpoint, JobQueueError, ObjectStorage, PostgresStore, SqliteStore,
-    sync::SyncStoreError,
+    DeploymentAuditCheckpoint, JobQueueError, ObjectStorage, PostgresStore, RelationalStore,
+    SqliteStore, sync::SyncStoreError,
 };
 use scoplen_sync::http::{ReadBodyLimits, WriteBodyLimits, WriteRateLimits};
 use scoplen_sync::{notification_fanout::PostgresNotificationFanout, notify::NotificationHub};
-use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpListener,
+    sync::{oneshot, watch},
+    time::sleep,
+};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
+use crate::deployment_lease::{DeploymentLease, FILE_NAME as DEPLOYMENT_LEASE_FILE};
 use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment, personal_sync};
 
 #[cfg(windows)]
-#[path = "private_material/windows.rs"]
-mod windows_private_directory;
+use crate::windows_private_directory;
+
+const GRACEFUL_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
+const FORCED_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
+static TIMED_OUT_LEASES: OnceLock<Mutex<Vec<DeploymentLease>>> = OnceLock::new();
+
+fn retain_lease_until_process_exit(lease: Option<DeploymentLease>) {
+    if let Some(lease) = lease {
+        TIMED_OUT_LEASES
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(lease);
+    }
+}
 
 /// Role-specific startup resources prepared before role tasks begin.
 pub struct PreparedRoles {
@@ -52,6 +71,7 @@ pub struct PreparedRoles {
     pub audit_signer: Option<LocalAuditSigner>,
     /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<scoplen_store::operator_setup::SetupDisclosure>,
+    deployment_lease: Option<DeploymentLease>,
 }
 
 #[derive(Clone)]
@@ -70,6 +90,12 @@ impl ListenerDatabase {
     }
 }
 
+pub(crate) struct ListenerLifecycle {
+    pub(crate) lease: DeploymentLease,
+    pub(crate) notifications: NotificationHub,
+    pub(crate) shutdown: watch::Receiver<bool>,
+}
+
 /// Create the data directory, deployment key and internal CA as needed.
 ///
 /// # Errors
@@ -77,8 +103,25 @@ impl ListenerDatabase {
 /// Returns an error when the data directory or generated key material cannot be created.
 /// Operator setup entitlements are initialized separately, in the API role's database.
 pub fn bootstrap(config: &Config) -> Result<(), ServerError> {
-    prepare_data_directory(config)?;
+    let _lease = admit_local_deployment(config)?;
+    bootstrap_material(config)
+}
 
+/// Admit a local process before it accesses persistent deployment state.
+///
+/// Binaries retain this lease until process exit, including error paths where SQLite may still
+/// be finishing an asynchronous close after its caller has returned.
+///
+/// # Errors
+///
+/// Fails if the data directory cannot be admitted or another local operation holds an
+/// exclusive lease.
+pub fn admit_local_deployment(config: &Config) -> Result<DeploymentLease, ServerError> {
+    prepare_data_directory(config)?;
+    DeploymentLease::try_shared(&config.server.data_dir)
+}
+
+fn bootstrap_material(config: &Config) -> Result<(), ServerError> {
     let deployment_key = config.server.data_dir.join("deployment.key");
     if !deployment_key.exists() {
         let mut bytes = [0_u8; 32];
@@ -139,6 +182,7 @@ fn prepare_data_directory(config: &Config) -> Result<(), ServerError> {
         config.storage.kms_audit_key_file(directory)?,
         directory.join("internal-ca-key.pem"),
         directory.join("scoplen.sqlite.migration.lock"),
+        directory.join(DEPLOYMENT_LEASE_FILE),
     ];
     #[cfg(windows)]
     let result = (|| {
@@ -209,10 +253,17 @@ pub async fn reissue_operator_setup(
     config: &Config,
 ) -> Result<scoplen_store::operator_setup::SetupDisclosure, ServerError> {
     let mut prepared = prepare_roles_with_setup(config, &[Role::Api], true).await?;
-    prepared
+    let disclosure = prepared
         .setup_link
         .take()
-        .ok_or_else(|| ServerError::Task("operator setup is already completed".into()))
+        .ok_or_else(|| ServerError::Task("operator setup is already completed".into()));
+    if let Some(store) = &prepared.store {
+        store.pool().close().await;
+    }
+    if let Some(store) = &prepared.postgres_store {
+        store.pool().close().await;
+    }
+    disclosure
 }
 
 async fn prepare_roles_with_setup(
@@ -229,10 +280,51 @@ async fn prepare_roles_with_setup(
             key_management: None,
             audit_signer: None,
             setup_link: None,
+            deployment_lease: None,
         });
     }
-    prepare_data_directory(config)?;
-    let (store, postgres_store) = if uses_postgres(config) {
+    let deployment_lease = admit_local_deployment(config)?;
+    let config = config.clone();
+    let roles = roles.to_vec();
+    let (result_sender, result_receiver) = oneshot::channel();
+    let (acknowledged_sender, acknowledged_receiver) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = prepare_roles_guarded(config, roles, reissue, deployment_lease).await;
+        let cleanup = result.as_ref().ok().map(|prepared| {
+            (
+                prepared.store.clone(),
+                prepared.postgres_store.clone(),
+                prepared.deployment_lease.clone(),
+            )
+        });
+        let unclaimed = if result_sender.send(result).is_ok() {
+            acknowledged_receiver.await.is_err()
+        } else {
+            true
+        };
+        if unclaimed && let Some((store, postgres_store, _lease)) = cleanup {
+            if let Some(store) = store {
+                store.pool().close().await;
+            }
+            if let Some(store) = postgres_store {
+                store.pool().close().await;
+            }
+        }
+    });
+    let result = result_receiver
+        .await
+        .map_err(|_| ServerError::Task("role preparation stopped before delivery".into()))?;
+    let _ = acknowledged_sender.send(());
+    result
+}
+
+async fn prepare_roles_guarded(
+    config: Config,
+    roles: Vec<Role>,
+    reissue: bool,
+    deployment_lease: DeploymentLease,
+) -> Result<PreparedRoles, ServerError> {
+    let (store, postgres_store) = if uses_postgres(&config) {
         let database_url = config
             .storage
             .database_url
@@ -257,50 +349,67 @@ async fn prepare_roles_with_setup(
     } else {
         (
             Some(
-                SqliteStore::open_with_sync_limits(
+                SqliteStore::open_with_sync_limits_and_lease(
                     &config.server.data_dir.join("scoplen.sqlite"),
                     config.sync.cardinality_limits(),
                     config.sync.write_body_limits()?.codec_limits(),
+                    deployment_lease.file(),
                 )
                 .await?,
             ),
             None,
         )
     };
-    let origin = config.public_origin()?;
-    if let Some(store) = &store {
-        store.check_operator_setup_startup(&origin, reissue).await?;
-    } else if let Some(store) = &postgres_store {
-        store.check_operator_setup_startup(&origin, reissue).await?;
-    } else {
-        return Err(ServerError::MissingStore);
-    }
-    let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
-    let object_storage = ObjectStorage::from_config(&object_config)?;
-    bootstrap(config)?;
-    let key_management =
-        Some(LocalKeyFile::load(config.storage.kms_key_file(&config.server.data_dir)?)?);
-    let audit_signer =
-        Some(LocalAuditSigner::load(config.storage.kms_audit_key_file(&config.server.data_dir)?)?);
-    let setup_link = if roles.contains(&Role::Api) {
+    let sqlite_cleanup = store.clone();
+    let postgres_cleanup = postgres_store.clone();
+    let prepared = async {
+        let origin = config.public_origin()?;
         if let Some(store) = &store {
-            store.initialize_operator_setup(&origin, reissue).await?
+            store.check_operator_setup_startup(&origin, reissue).await?;
         } else if let Some(store) = &postgres_store {
-            store.initialize_operator_setup(&origin, reissue).await?
+            store.check_operator_setup_startup(&origin, reissue).await?;
         } else {
             return Err(ServerError::MissingStore);
         }
-    } else {
-        None
-    };
-    Ok(PreparedRoles {
-        store,
-        postgres_store,
-        object_storage: Some(object_storage),
-        key_management,
-        audit_signer,
-        setup_link,
-    })
+        let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
+        let object_storage = ObjectStorage::from_config(&object_config)?;
+        bootstrap_material(&config)?;
+        let key_management =
+            Some(LocalKeyFile::load(config.storage.kms_key_file(&config.server.data_dir)?)?);
+        let audit_signer = Some(LocalAuditSigner::load(
+            config.storage.kms_audit_key_file(&config.server.data_dir)?,
+        )?);
+        let setup_link = if roles.contains(&Role::Api) {
+            if let Some(store) = &store {
+                store.initialize_operator_setup(&origin, reissue).await?
+            } else if let Some(store) = &postgres_store {
+                store.initialize_operator_setup(&origin, reissue).await?
+            } else {
+                return Err(ServerError::MissingStore);
+            }
+        } else {
+            None
+        };
+        Ok(PreparedRoles {
+            store,
+            postgres_store,
+            object_storage: Some(object_storage),
+            key_management,
+            audit_signer,
+            setup_link,
+            deployment_lease: Some(deployment_lease),
+        })
+    }
+    .await;
+    if prepared.is_err() {
+        if let Some(store) = &sqlite_cleanup {
+            store.pool().close().await;
+        }
+        if let Some(store) = &postgres_cleanup {
+            store.pool().close().await;
+        }
+    }
+    prepared
 }
 
 /// Run the requested roles until Ctrl-C using role-specific startup resources.
@@ -311,42 +420,87 @@ async fn prepare_roles_with_setup(
 pub async fn run_roles(
     config: Config,
     roles: Vec<Role>,
-    store: Option<SqliteStore>,
-    postgres_store: Option<PostgresStore>,
-    object_storage: Option<ObjectStorage>,
-    key_management: Option<LocalKeyFile>,
-    audit_signer: Option<LocalAuditSigner>,
+    prepared: PreparedRoles,
 ) -> Result<(), ServerError> {
-    if roles.iter().any(|role| role.requires_store())
-        && (store.is_none() && postgres_store.is_none() || object_storage.is_none())
+    // The supervisor survives cancellation of its caller so it can drain state writers before
+    // releasing the lease. Dropping this sender requests that same orderly shutdown.
+    let (_caller_alive, caller_gone) = oneshot::channel();
+    tokio::spawn(run_roles_inner(config, roles, prepared, caller_gone))
+        .await
+        .map_err(|error| ServerError::Task(format!("role supervisor stopped: {error}")))?
+}
+
+fn validate_prepared_roles(roles: &[Role], prepared: &PreparedRoles) -> Result<(), ServerError> {
+    if !roles.iter().any(|role| role.requires_store()) {
+        return Ok(());
+    }
+    if prepared.store.is_none() && prepared.postgres_store.is_none()
+        || prepared.object_storage.is_none()
     {
         return Err(ServerError::MissingStore);
     }
-    if roles.iter().any(|role| role.requires_store()) && key_management.is_none() {
+    if prepared.key_management.is_none() || prepared.audit_signer.is_none() {
         return Err(ServerError::MissingKeyManagement);
     }
-    if roles.iter().any(|role| role.requires_store()) && audit_signer.is_none() {
-        return Err(ServerError::MissingKeyManagement);
+    if prepared.deployment_lease.is_none() {
+        return Err(ServerError::MissingDeploymentLease);
     }
-    let key_management = key_management.map(Arc::new);
-    let store = store.map(Arc::new);
-    let postgres_store = postgres_store.map(Arc::new);
-    let object_storage = object_storage.map(Arc::new);
-    let postgres = uses_postgres(&config);
-    if let Some(kms) = key_management.as_ref() {
+    Ok(())
+}
+
+async fn ensure_device_token_keyring(
+    key_management: Option<&Arc<LocalKeyFile>>,
+    store: Option<&Arc<SqliteStore>>,
+    postgres_store: Option<&Arc<PostgresStore>>,
+    postgres: bool,
+) -> Result<(), ServerError> {
+    if let Some(kms) = key_management {
         if postgres {
-            let store = postgres_store.as_ref().ok_or(ServerError::MissingStore)?;
+            let store = postgres_store.ok_or(ServerError::MissingStore)?;
             store
                 .ensure_device_token_keyring(kms.as_ref())
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?;
-        } else if let Some(store) = store.as_ref() {
+        } else if let Some(store) = store {
             store
                 .ensure_device_token_keyring(kms.as_ref())
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?;
         }
     }
+    Ok(())
+}
+
+async fn run_roles_inner(
+    config: Config,
+    roles: Vec<Role>,
+    prepared: PreparedRoles,
+    mut caller_gone: oneshot::Receiver<()>,
+) -> Result<(), ServerError> {
+    validate_prepared_roles(&roles, &prepared)?;
+    let PreparedRoles {
+        store,
+        postgres_store,
+        object_storage,
+        key_management,
+        audit_signer,
+        setup_link: _,
+        deployment_lease,
+    } = prepared;
+    let key_management = key_management.map(Arc::new);
+    let store = store.map(Arc::new);
+    let postgres_store = postgres_store.map(Arc::new);
+    let object_storage = object_storage.map(Arc::new);
+    let postgres = uses_postgres(&config);
+    ensure_device_token_keyring(
+        key_management.as_ref(),
+        store.as_ref(),
+        postgres_store.as_ref(),
+        postgres,
+    )
+    .await?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let notifications = NotificationHub::default();
     let mut tasks = tokio::task::JoinSet::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
         let database = if postgres {
@@ -357,48 +511,136 @@ pub async fn run_roles(
             ListenerDatabase::Sqlite(store.as_ref().ok_or(ServerError::MissingStore)?.clone())
         };
         let object_storage = object_storage.as_ref().ok_or(ServerError::MissingStore)?.clone();
-        tasks.spawn(run_public_listener(
-            config.clone(),
-            roles.clone(),
-            database,
-            object_storage,
-            key_management.as_ref().ok_or(ServerError::MissingKeyManagement)?.clone(),
-        ));
+        let lease = deployment_lease.clone().ok_or(ServerError::MissingDeploymentLease)?;
+        let listener_config = config.clone();
+        let listener_roles = roles.clone();
+        let listener_key_management =
+            key_management.as_ref().ok_or(ServerError::MissingKeyManagement)?.clone();
+        let lifecycle = ListenerLifecycle {
+            lease: lease.clone(),
+            notifications: notifications.clone(),
+            shutdown: shutdown_receiver.clone(),
+        };
+        tasks.spawn(async move {
+            let _lease = lease;
+            run_public_listener(
+                listener_config,
+                listener_roles,
+                database,
+                object_storage,
+                listener_key_management,
+                lifecycle,
+            )
+            .await
+        });
     }
     if roles.contains(&Role::Worker) {
-        let signer = audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?;
+        let signer =
+            Arc::new(audit_signer.as_ref().ok_or(ServerError::MissingKeyManagement)?.clone());
         if postgres {
             let store = postgres_store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-            tasks.spawn(run_worker_role(store, Arc::new(signer.clone())));
+            let lease = deployment_lease.clone();
+            let shutdown = shutdown_receiver.clone();
+            tasks.spawn(async move {
+                let _lease = lease;
+                run_worker_role(store, signer, shutdown).await
+            });
         } else {
             let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-            tasks.spawn(run_worker_role(store, Arc::new(signer.clone())));
+            let lease = deployment_lease.clone();
+            let shutdown = shutdown_receiver.clone();
+            tasks.spawn(async move {
+                let _lease = lease;
+                run_worker_role(store, signer, shutdown).await
+            });
         }
     }
     if roles.contains(&Role::Ca) {
-        tasks.spawn(run_periodic_role("ca"));
+        tasks.spawn(run_periodic_role("ca", shutdown_receiver.clone()));
     }
     if roles.contains(&Role::Gateway) {
-        tasks.spawn(run_periodic_role("gateway"));
+        tasks.spawn(run_periodic_role("gateway", shutdown_receiver.clone()));
     }
     info!(roles = ?roles, "server roles started");
     let result = tokio::select! {
         signal = tokio::signal::ctrl_c() => signal.map_err(ServerError::Runtime),
+        _ = &mut caller_gone => Ok(()),
         completed = tasks.join_next() => match completed {
             Some(Ok(Err(error))) => Err(error),
             Some(Err(error)) => Err(ServerError::Task(error.to_string())),
             _ => Err(ServerError::Task("server role stopped unexpectedly".into())),
         },
     };
-    tasks.shutdown().await;
+    notifications.unavailable();
+    let _ = shutdown_sender.send(true);
+    drain_roles(tasks, store, postgres_store, deployment_lease, result).await
+}
+
+async fn drain_roles(
+    mut tasks: tokio::task::JoinSet<Result<(), ServerError>>,
+    store: Option<Arc<SqliteStore>>,
+    postgres_store: Option<Arc<PostgresStore>>,
+    deployment_lease: Option<DeploymentLease>,
+    mut result: Result<(), ServerError>,
+) -> Result<(), ServerError> {
+    let drained = tokio::time::timeout(GRACEFUL_SHUTDOWN_DEADLINE, async {
+        while let Some(completed) = tasks.join_next().await {
+            if result.is_ok() {
+                match completed {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => result = Err(error),
+                    Err(error) => result = Err(ServerError::Task(error.to_string())),
+                }
+            }
+        }
+        if let Some(store) = &store {
+            store.pool().close().await;
+        }
+        if let Some(store) = &postgres_store {
+            store.pool().close().await;
+        }
+    })
+    .await;
+    if drained.is_err() {
+        // A cancelled SQLite operation or ACME cache write may outlive its Rust task. Keep the
+        // offline admission barrier until the host process exits, even after forced cleanup.
+        retain_lease_until_process_exit(deployment_lease);
+        tasks.abort_all();
+        let _ = tokio::time::timeout(FORCED_SHUTDOWN_DEADLINE, async {
+            while tasks.join_next().await.is_some() {}
+        })
+        .await;
+        let _ = tokio::time::timeout(FORCED_SHUTDOWN_DEADLINE, async {
+            if let Some(store) = &store {
+                store.pool().close().await;
+            }
+            if let Some(store) = &postgres_store {
+                store.pool().close().await;
+            }
+        })
+        .await;
+        return Err(ServerError::ShutdownTimedOut);
+    }
     info!("server shutdown requested");
     result
 }
 
-async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
+async fn run_periodic_role(
+    name: &'static str,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ServerError> {
     loop {
         info!(role = name, "role heartbeat");
-        sleep(Duration::from_secs(30)).await;
+        tokio::select! {
+            () = sleep(Duration::from_secs(30)) => {},
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+        }
+    }
+}
+
+async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
+    if !*shutdown.borrow() {
+        let _ = shutdown.changed().await;
     }
 }
 
@@ -605,10 +847,14 @@ impl_worker_store_backend!(PostgresStore);
 async fn run_worker_role<S: WorkerStoreBackend + 'static>(
     store: Arc<S>,
     signer: Arc<LocalAuditSigner>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
     let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {},
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+        }
         match worker_heartbeat(store.as_ref()).await {
             Ok(requeued) => {
                 info!(role = "worker", requeued_expired_jobs = requeued, "worker heartbeat");
@@ -1014,20 +1260,21 @@ pub(crate) fn api_router_with_notifications(
     }
 }
 
-async fn run_public_listener(
+pub(crate) async fn run_public_listener(
     config: Config,
     roles: Vec<Role>,
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
     key_management: Arc<LocalKeyFile>,
+    lifecycle: ListenerLifecycle,
 ) -> Result<(), ServerError> {
+    let ListenerLifecycle { lease: deployment_lease, notifications, mut shutdown } = lifecycle;
     let address = config.listen_address();
     let trusted_origin = config.public_origin()?;
     let enrollment_enabled = roles.contains(&Role::Api);
     let write_rate_limits = config.sync.write_rate_limits()?;
     let write_body_limits = config.sync.write_body_limits()?;
     let read_body_limits = config.sync.read_body_limits()?;
-    let notifications = NotificationHub::default();
     let fanout = match &database {
         ListenerDatabase::Postgres(store) if enrollment_enabled => Some(
             PostgresNotificationFanout::connect(
@@ -1053,19 +1300,45 @@ async fn run_public_listener(
         write_rate_limits,
         write_body_limits,
         read_body_limits,
-        notifications,
+        notifications.clone(),
     )
-    .merge(crate::console::router(&config.console.assets_dir, enrollment_enabled).await);
+    .merge(crate::console::router(&config.console.assets_dir, enrollment_enabled).await)
+    .layer(Extension(deployment_lease));
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
-    let serve = serve_public_listener(config, roles, listener, router);
+    let (local_stop, local_shutdown) = watch::channel(false);
+    let serve = serve_public_listener(config, roles, listener, router, local_shutdown);
+    tokio::pin!(serve);
     if let Some(fanout) = fanout {
         tokio::select! {
-            result = serve => result,
-            _ = fanout.run() => Err(ServerError::Task("sync notification worker stopped".into())),
+            result = &mut serve => {
+                notifications.unavailable();
+                result
+            },
+            () = shutdown_requested(&mut shutdown) => {
+                notifications.unavailable();
+                let _ = local_stop.send(true);
+                serve.await
+            },
+            _ = fanout.run() => {
+                notifications.unavailable();
+                let _ = local_stop.send(true);
+                let _ = serve.await;
+                Err(ServerError::Task("sync notification worker stopped".into()))
+            },
         }
     } else {
-        serve.await
+        tokio::select! {
+            result = &mut serve => {
+                notifications.unavailable();
+                result
+            },
+            () = shutdown_requested(&mut shutdown) => {
+                notifications.unavailable();
+                let _ = local_stop.send(true);
+                serve.await
+            },
+        }
     }
 }
 
@@ -1074,6 +1347,7 @@ async fn serve_public_listener(
     roles: Vec<Role>,
     listener: TcpListener,
     router: Router,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
     match config.tls.mode {
         TlsMode::Plain => {
@@ -1086,6 +1360,9 @@ async fn serve_public_listener(
                 listener,
                 router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
+            .with_graceful_shutdown(async move {
+                shutdown_requested(&mut shutdown).await;
+            })
             .await
             .map_err(|error| ServerError::Task(error.to_string()))?;
         }
@@ -1096,13 +1373,22 @@ async fn serve_public_listener(
                 let (stream, peer) = tokio::select! {
                     accepted = listener.accept() => accepted?,
                     Some(_) = connections.join_next() => continue,
+                    () = shutdown_requested(&mut shutdown) => break,
                 };
                 let acceptor = acceptor.clone();
                 let router = router.clone().layer(Extension(ConnectInfo(peer)));
+                let mut connection_shutdown = shutdown.clone();
                 connections.spawn(async move {
-                    match acceptor.accept(stream).await {
+                    let accepted = tokio::select! {
+                        result = acceptor.accept(stream) => result,
+                        () = shutdown_requested(&mut connection_shutdown) => return,
+                    };
+                    match accepted {
                         Ok(tls) => {
-                            if let Err(error) = serve_tls_connection(tls, router).await {
+                            if let Err(error) =
+                                serve_tls_connection_with_shutdown(tls, router, connection_shutdown)
+                                    .await
+                            {
                                 error!(%peer, %error, "TLS connection failed");
                             }
                         }
@@ -1110,9 +1396,10 @@ async fn serve_public_listener(
                     }
                 });
             }
+            while connections.join_next().await.is_some() {}
         }
         TlsMode::Acme => {
-            run_acme_listener(config, listener, router).await?;
+            run_acme_listener(config, listener, router, shutdown).await?;
         }
     }
     Ok(())
@@ -1160,6 +1447,7 @@ async fn run_acme_listener(
     config: Config,
     listener: TcpListener,
     router: Router,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
     let email = config
         .tls
@@ -1177,6 +1465,7 @@ async fn run_acme_listener(
         let result = tokio::select! {
             incoming = tls_incoming.next() => match incoming { Some(value) => value, None => break },
             Some(_) = connections.join_next() => continue,
+            () = shutdown_requested(&mut shutdown) => break,
         };
         let tls = result.map_err(ServerError::Runtime)?;
         let is_gateway = tls
@@ -1187,12 +1476,16 @@ async fn run_acme_listener(
             .is_some_and(|protocol| protocol == b"spl-gw/1");
         let peer = tls.get_ref().get_ref().0.get_ref().peer_addr().map_err(ServerError::Runtime)?;
         let router = router.clone().layer(Extension(ConnectInfo(peer)));
+        let connection_shutdown = shutdown.clone();
         connections.spawn(async move {
-            if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
+            if let Err(error) =
+                serve_tls_io_with_shutdown(tls, router, is_gateway, Some(connection_shutdown)).await
+            {
                 error!(%error, "ACME TLS connection failed");
             }
         });
     }
+    while connections.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -1205,6 +1498,7 @@ fn application_alpn_protocols() -> Vec<Vec<u8>> {
     vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"spl-gw/1".to_vec()]
 }
 
+#[cfg(test)]
 async fn serve_tls_connection(
     stream: TlsStream<tokio::net::TcpStream>,
     router: Router,
@@ -1214,28 +1508,63 @@ async fn serve_tls_connection(
     serve_tls_io(stream, router, is_gateway).await
 }
 
+async fn serve_tls_connection_with_shutdown(
+    stream: TlsStream<tokio::net::TcpStream>,
+    router: Router,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), ServerError> {
+    let is_gateway =
+        stream.get_ref().1.alpn_protocol().is_some_and(|protocol| protocol == b"spl-gw/1");
+    serve_tls_io_with_shutdown(stream, router, is_gateway, Some(shutdown)).await
+}
+
+#[cfg(test)]
 pub(crate) async fn serve_tls_io<S>(
-    mut stream: S,
+    stream: S,
     router: Router,
     is_gateway: bool,
 ) -> Result<(), ServerError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    serve_tls_io_with_shutdown(stream, router, is_gateway, None).await
+}
+
+async fn serve_tls_io_with_shutdown<S>(
+    mut stream: S,
+    router: Router,
+    is_gateway: bool,
+    mut shutdown: Option<watch::Receiver<bool>>,
+) -> Result<(), ServerError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     if is_gateway {
-        stream
-            .write_all(b"SPL gateway protocol is reserved for the managed data-path gate.\n")
-            .await?;
+        if let Some(shutdown) = shutdown.as_mut() {
+            tokio::select! {
+                result = stream.write_all(b"SPL gateway protocol is reserved for the managed data-path gate.\n") => result?,
+                () = shutdown_requested(shutdown) => return Ok(()),
+            }
+        } else {
+            stream
+                .write_all(b"SPL gateway protocol is reserved for the managed data-path gate.\n")
+                .await?;
+        }
         return Ok(());
     }
     let io = TokioIo::new(stream);
     let service = TowerToHyperService::new(router);
     let mut builder = Builder::new(TokioExecutor::new());
     builder.http2().enable_connect_protocol();
-    builder
-        .serve_connection_with_upgrades(io, service)
-        .await
-        .map_err(|error| ServerError::Task(error.to_string()))
+    let connection = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(connection);
+    if let Some(shutdown) = shutdown.as_mut() {
+        tokio::select! {
+            result = &mut connection => return result.map_err(|error| ServerError::Task(error.to_string())),
+            () = shutdown_requested(shutdown) => connection.as_mut().graceful_shutdown(),
+        }
+    }
+    connection.await.map_err(|error| ServerError::Task(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1258,6 +1587,47 @@ mod tests {
                 Err(error) => panic!("remove test directory {}: {error}", path.display()),
             }
         }
+    }
+
+    fn run_isolated_shutdown_test(test_name: &str, child_directory_variable: &str) {
+        let root =
+            std::env::temp_dir().join(format!("scoplen-timeout-child-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).expect("owned child fixture root");
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child.args(["--exact", test_name, "--nocapture"]).env(child_directory_variable, &root);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            child.creation_flags(0x0800_0000);
+        }
+        child.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = child.spawn().expect("run isolated shutdown regression");
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait().expect("child status") {
+                Some(_) => break,
+                None if started.elapsed() < Duration::from_secs(30) => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                None => {
+                    child.kill().expect("stop stalled owned child");
+                    let output = child.wait_with_output().expect("reap stalled child");
+                    panic!(
+                        "shutdown regression child exceeded 30 seconds: {} {}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+            }
+        }
+        let output = child.wait_with_output().expect("collect child result");
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "shutdown regression child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(root).expect("child exit releases retained lease");
     }
 
     #[cfg(feature = "postgres-integration")]
@@ -1380,6 +1750,76 @@ mod tests {
         remove_test_directory(&data_dir).await;
     }
 
+    #[tokio::test]
+    async fn plain_listener_drains_an_idle_connection() {
+        let mut config = Config::default();
+        config.tls.mode = TlsMode::Plain;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");
+        let address = listener.local_addr().expect("HTTP address");
+        let (stop, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_public_listener(
+            config,
+            vec![Role::Api],
+            listener,
+            Router::new().route("/healthz", get(|| async { "ok" })),
+            shutdown,
+        ));
+        let mut idle = tokio::net::TcpStream::connect(address).await.expect("idle connection");
+        sleep(Duration::from_millis(50)).await;
+        stop.send(true).expect("request shutdown");
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("idle connection drained")
+            .expect("listener task")
+            .expect("plain listener");
+        let mut byte = [0_u8; 1];
+        let _ = tokio::time::timeout(Duration::from_secs(3), idle.read(&mut byte))
+            .await
+            .expect("idle socket closed");
+    }
+
+    #[tokio::test]
+    async fn files_tls_shutdown_cancels_incomplete_handshake() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-partial-tls-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data_dir).expect("owned TLS directory");
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("test certificate");
+        let mut config = Config::default();
+        config.tls.mode = TlsMode::Files;
+        config.tls.cert_file = Some(data_dir.join("localhost.pem"));
+        config.tls.key_file = Some(data_dir.join("localhost-key.pem"));
+        fs::write(config.tls.cert_file.as_ref().expect("certificate path"), cert.pem())
+            .expect("certificate file");
+        fs::write(config.tls.key_file.as_ref().expect("key path"), key_pair.serialize_pem())
+            .expect("private key file");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("TLS listener");
+        let address = listener.local_addr().expect("TLS address");
+        let (stop, shutdown) = watch::channel(false);
+        let server = tokio::spawn(serve_public_listener(
+            config,
+            vec![Role::Api],
+            listener,
+            Router::new().route("/healthz", get(|| async { "ok" })),
+            shutdown,
+        ));
+        let mut partial = tokio::net::TcpStream::connect(address).await.expect("TLS connection");
+        partial.write_all(&[22, 3, 3]).await.expect("partial TLS record");
+        sleep(Duration::from_millis(50)).await;
+        stop.send(true).expect("request shutdown");
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("incomplete handshake drained")
+            .expect("listener task")
+            .expect("TLS listener");
+        let mut byte = [0_u8; 1];
+        let _ = tokio::time::timeout(Duration::from_secs(3), partial.read(&mut byte))
+            .await
+            .expect("incomplete handshake closed");
+        drop(partial);
+        remove_test_directory(&data_dir).await;
+    }
+
     #[test]
     fn bootstrap_creates_private_material_once() {
         let data_dir =
@@ -1450,21 +1890,346 @@ mod tests {
         let store = prepared.store.as_ref().expect("SQLite").clone();
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_roles(
-                config,
-                vec![Role::Api, Role::Worker],
-                prepared.store,
-                prepared.postgres_store,
-                prepared.object_storage,
-                prepared.key_management,
-                prepared.audit_signer,
-            ),
+            run_roles(config, vec![Role::Api, Role::Worker], prepared),
         )
         .await
         .expect("failed role must propagate without waiting for Ctrl-C");
         assert!(matches!(result, Err(ServerError::Runtime(_))));
         store.pool().close().await;
         drop((store, occupied));
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[test]
+    fn timed_out_drain_keeps_offline_admission_blocked_until_process_exit() {
+        const CHILD_DIRECTORY: &str = "SCOPLEN_SHUTDOWN_TIMEOUT_CHILD_DIRECTORY";
+        if let Some(root) = std::env::var_os(CHILD_DIRECTORY) {
+            let root = std::path::PathBuf::from(root);
+            let mut config = Config::default();
+            config.server.data_dir = root.join("data");
+            bootstrap(&config).expect("private child deployment");
+            let lease = DeploymentLease::try_shared(&config.server.data_dir)
+                .expect("child deployment admission");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child runtime");
+            let mut tasks = tokio::task::JoinSet::new();
+            let started = std::time::Instant::now();
+            let result = runtime.block_on(async {
+                tasks.spawn(std::future::pending::<Result<(), ServerError>>());
+                drain_roles(tasks, None, None, Some(lease), Ok(())).await
+            });
+            assert!(matches!(result, Err(ServerError::ShutdownTimedOut)));
+            assert!(started.elapsed() < Duration::from_secs(16), "bounded forced cleanup");
+            assert!(matches!(
+                DeploymentLease::try_exclusive(&config.server.data_dir),
+                Err(ServerError::DeploymentLeaseOccupied)
+            ));
+            return;
+        }
+
+        run_isolated_shutdown_test(
+            "runtime::tests::timed_out_drain_keeps_offline_admission_blocked_until_process_exit",
+            CHILD_DIRECTORY,
+        );
+    }
+
+    #[test]
+    fn incomplete_http_body_times_out_shutdown_without_releasing_lease() {
+        const CHILD_DIRECTORY: &str = "SCOPLEN_INCOMPLETE_BODY_CHILD_DIRECTORY";
+        if let Some(root) = std::env::var_os(CHILD_DIRECTORY) {
+            let root = std::path::PathBuf::from(root);
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve listener");
+            let port = reserved.local_addr().expect("reserved address").port();
+            drop(reserved);
+            let mut config = Config::default();
+            config.server.data_dir = root.join("data");
+            config.server.listen_addr = "127.0.0.1".into();
+            config.server.listen_port = port;
+            config.server.public_host = "localhost".into();
+            config.tls.mode = TlsMode::Plain;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("child runtime");
+            runtime.block_on(async {
+                let prepared = prepare_roles(&config, &[Role::Api]).await.expect("prepared API");
+                let (caller_alive, caller_gone) = oneshot::channel();
+                let running = tokio::spawn(run_roles_inner(
+                    config.clone(),
+                    vec![Role::Api],
+                    prepared,
+                    caller_gone,
+                ));
+                let probe = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await
+                        {
+                            break stream;
+                        }
+                        assert!(!running.is_finished(), "listener stopped before request");
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("listener started");
+                drop(probe);
+                let mut request = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .expect("enrollment connection");
+                request
+                    .write_all(b"POST /api/v1/auth/personal-enroll HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+                    .await
+                    .expect("incomplete enrollment body");
+                let mut reply = [0_u8; 1];
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(150), request.read(&mut reply))
+                        .await
+                        .is_err(),
+                    "incomplete request must still be awaiting its body"
+                );
+                let started = tokio::time::Instant::now();
+                drop(caller_alive);
+                let result = tokio::time::timeout(Duration::from_secs(20), running)
+                    .await
+                    .expect("bounded shutdown")
+                    .expect("supervisor result");
+                assert!(matches!(result, Err(ServerError::ShutdownTimedOut)));
+                assert!(started.elapsed() < Duration::from_secs(16), "bounded forced cleanup");
+                assert!(matches!(
+                    DeploymentLease::try_exclusive(&config.server.data_dir),
+                    Err(ServerError::DeploymentLeaseOccupied)
+                ));
+            });
+            return;
+        }
+        run_isolated_shutdown_test(
+            "runtime::tests::incomplete_http_body_times_out_shutdown_without_releasing_lease",
+            CHILD_DIRECTORY,
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_role_preparation_retains_lease_until_blocked_write_settles() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-prepare-cancel-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        bootstrap(&config).expect("private deployment material");
+        let raw = SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("test database");
+        let blocker = raw.pool().begin_with("BEGIN IMMEDIATE").await.expect("hold SQLite writer");
+        let starting_config = config.clone();
+        let startup =
+            tokio::spawn(async move { prepare_roles(&starting_config, &[Role::Api]).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    DeploymentLease::try_exclusive(&data_dir),
+                    Err(ServerError::DeploymentLeaseOccupied)
+                ) {
+                    break;
+                }
+                assert!(!startup.is_finished(), "preparation stopped before admission");
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("preparation acquired lease");
+        sleep(Duration::from_millis(100)).await;
+        assert!(!startup.is_finished(), "SQLite writer must block operator setup");
+        startup.abort();
+        assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+        assert!(matches!(
+            DeploymentLease::try_exclusive(&data_dir),
+            Err(ServerError::DeploymentLeaseOccupied)
+        ));
+        blocker.commit().await.expect("release SQLite writer");
+        raw.pool().close().await;
+        drop(raw);
+        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match DeploymentLease::try_exclusive(&data_dir) {
+                    Ok(lease) => break lease,
+                    Err(ServerError::DeploymentLeaseOccupied) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("unexpected lease error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("detached startup drains and releases lease");
+        drop(exclusive);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_migration_keeps_lease_until_upgrade_finishes() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-migrate-cancel-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        bootstrap(&config).expect("private deployment material");
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("current database");
+        sqlx::query(
+            "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
+        )
+        .execute(store.pool())
+        .await
+        .expect("owned pending migration fixture");
+        let blocker = store.pool().begin_with("BEGIN IMMEDIATE").await.expect("hold SQLite writer");
+        let starting_config = config.clone();
+        let startup =
+            tokio::spawn(async move { prepare_roles(&starting_config, &[Role::Api]).await });
+        let snapshots = data_dir.join("scoplen.sqlite.migration-snapshots");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if snapshots.is_dir()
+                    && fs::read_dir(&snapshots).expect("snapshot directory").any(|entry| {
+                        let name = entry.expect("snapshot entry").file_name();
+                        let name = name.to_string_lossy();
+                        name.starts_with("pre-migration-") && name.ends_with(".sqlite")
+                    })
+                {
+                    break;
+                }
+                assert!(!startup.is_finished(), "upgrade stopped before snapshot");
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("standalone snapshot completed before blocked migration");
+        startup.abort();
+        assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+        assert!(matches!(
+            DeploymentLease::try_exclusive(&data_dir),
+            Err(ServerError::DeploymentLeaseOccupied)
+        ));
+        blocker.commit().await.expect("release SQLite writer");
+        store.pool().close().await;
+        drop(store);
+        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match DeploymentLease::try_exclusive(&data_dir) {
+                    Ok(lease) => break lease,
+                    Err(ServerError::DeploymentLeaseOccupied) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("unexpected lease error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("detached migration and startup cleanup release lease");
+        drop(exclusive);
+        let reopened = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("migration completed after caller cancellation");
+        reopened.pool().close().await;
+        drop(reopened);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn graceful_drain_waits_for_an_inflight_sqlite_write_transaction() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-write-drain-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        let mut prepared = prepare_roles(&config, &[Role::Api]).await.expect("prepared API");
+        let store = Arc::new(prepared.store.take().expect("SQLite store"));
+        let lease = prepared.deployment_lease.take().expect("deployment lease");
+        drop(prepared);
+        sqlx::query("CREATE TABLE lease_drain_probe (value INTEGER NOT NULL)")
+            .execute(store.pool())
+            .await
+            .expect("owned probe table");
+        let (write_started, started) = oneshot::channel();
+        let (commit, commit_requested) = oneshot::channel();
+        let writer_store = store.clone();
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async move {
+            let mut transaction = writer_store
+                .pool()
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+            sqlx::query("INSERT INTO lease_drain_probe (value) VALUES (1)")
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?;
+            let _ = write_started.send(());
+            let _ = commit_requested.await;
+            transaction.commit().await.map_err(|error| ServerError::Task(error.to_string()))?;
+            Ok(())
+        });
+        started.await.expect("write transaction started");
+        let drain_store = store.clone();
+        let draining =
+            tokio::spawn(drain_roles(tasks, Some(drain_store), None, Some(lease), Ok(())));
+        sleep(Duration::from_millis(100)).await;
+        assert!(!draining.is_finished(), "drain must await an in-flight write");
+        assert!(matches!(
+            DeploymentLease::try_exclusive(&data_dir),
+            Err(ServerError::DeploymentLeaseOccupied)
+        ));
+        commit.send(()).expect("finish owned transaction");
+        tokio::time::timeout(Duration::from_secs(5), draining)
+            .await
+            .expect("normal write drain")
+            .expect("drain task")
+            .expect("normal shutdown");
+        drop(store);
+        let exclusive = DeploymentLease::try_exclusive(&data_dir)
+            .expect("completed write and closed pool release admission");
+        drop(exclusive);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_public_role_runner_drains_before_releasing_lease() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-run-cancel-{}", uuid::Uuid::new_v4()));
+        let reserved = TcpListener::bind("127.0.0.1:0").await.expect("reserve listener");
+        let port = reserved.local_addr().expect("reserved address").port();
+        drop(reserved);
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.listen_addr = "127.0.0.1".into();
+        config.server.listen_port = port;
+        config.tls.mode = TlsMode::Plain;
+        let prepared = prepare_roles(&config, &[Role::Api]).await.expect("prepared API");
+        let runner = tokio::spawn(run_roles(config, vec![Role::Api], prepared));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(connection) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    drop(connection);
+                    break;
+                }
+                assert!(!runner.is_finished(), "role runner stopped before listener");
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("public listener started");
+        runner.abort();
+        assert!(runner.await.expect_err("cancel public caller").is_cancelled());
+        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match DeploymentLease::try_exclusive(&data_dir) {
+                    Ok(lease) => break lease,
+                    Err(ServerError::DeploymentLeaseOccupied) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("unexpected lease error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("supervisor drains and releases lease");
+        drop(exclusive);
         remove_test_directory(&data_dir).await;
     }
 
@@ -1584,14 +2349,14 @@ mod tests {
         config.storage.database_url = Some(
             toml::Value::String(database_url.into()).try_into().expect("PostgreSQL URL setting"),
         );
-        let prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
+        let mut prepared = prepare_roles(&config, &[Role::Api, Role::Edge])
             .await
             .expect("prepare PostgreSQL API and edge roles");
         assert!(prepared.store.is_none(), "PostgreSQL roles must not open SQLite");
-        let store = prepared.postgres_store.expect("PostgreSQL pool");
+        let store = prepared.postgres_store.take().expect("PostgreSQL pool");
         assert_eq!(store.sync_cardinality_limits().max_objects_per_vault, 2);
-        let object_storage = prepared.object_storage.expect("object storage");
-        let key_management = Arc::new(prepared.key_management.expect("test KMS"));
+        let object_storage = prepared.object_storage.take().expect("object storage");
+        let key_management = Arc::new(prepared.key_management.take().expect("test KMS"));
         let object_root = data_dir.join("objects");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
         let address = listener.local_addr().expect("read listener address");
@@ -1630,6 +2395,62 @@ mod tests {
         server.abort();
         let _ = server.await;
         drop(store);
+        drop(prepared);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_public_runner_cancellation_drains_listener_and_worker() {
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-postgres-drain-{}", uuid::Uuid::new_v4()));
+        let reserved = TcpListener::bind("127.0.0.1:0").await.expect("reserve listener");
+        let port = reserved.local_addr().expect("reserved address").port();
+        drop(reserved);
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.listen_addr = "127.0.0.1".into();
+        config.server.listen_port = port;
+        config.tls.mode = TlsMode::Plain;
+        config.storage.backend = "postgres".into();
+        config.storage.database_url = Some(
+            toml::Value::String(database_url.to_string())
+                .try_into()
+                .expect("PostgreSQL URL setting"),
+        );
+        let roles = vec![Role::Api, Role::Worker];
+        let prepared = prepare_roles(&config, &roles).await.expect("prepared PostgreSQL roles");
+        let runner = tokio::spawn(run_roles(config, roles, prepared));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(connection) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    drop(connection);
+                    break;
+                }
+                assert!(!runner.is_finished(), "PostgreSQL roles stopped before listener");
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("PostgreSQL listener started");
+        runner.abort();
+        assert!(runner.await.expect_err("cancel public caller").is_cancelled());
+        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match DeploymentLease::try_exclusive(&data_dir) {
+                    Ok(lease) => break lease,
+                    Err(ServerError::DeploymentLeaseOccupied) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("unexpected lease error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("PostgreSQL roles drain before offline admission");
+        drop(exclusive);
         cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
     }
@@ -2359,7 +3180,20 @@ mod tests {
             let result = prepare_roles(&config, &[role]).await;
             assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
         }
-        let result = run_roles(config, vec![Role::Api], None, None, None, None, None).await;
+        let result = run_roles(
+            config,
+            vec![Role::Api],
+            PreparedRoles {
+                store: None,
+                postgres_store: None,
+                object_storage: None,
+                key_management: None,
+                audit_signer: None,
+                setup_link: None,
+                deployment_lease: None,
+            },
+        )
+        .await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_dir_all(data_dir).expect("owned test directory is removable");
     }

@@ -96,13 +96,13 @@ async fn missing_console_keeps_real_api_health_and_readiness_independent() {
     let root = directory();
     let mut config = crate::Config::default();
     config.server.data_dir = root.clone();
-    let prepared =
+    let mut prepared =
         crate::prepare_roles(&config, &[crate::Role::Api]).await.expect("prepare real API");
-    let store = prepared.store.expect("SQLite store");
+    let store = prepared.store.take().expect("SQLite store");
     let router = crate::runtime::api_router(
         crate::runtime::ListenerDatabase::Sqlite(Arc::new(store.clone())),
-        Arc::new(prepared.object_storage.expect("object storage")),
-        Arc::new(prepared.key_management.expect("KMS")),
+        Arc::new(prepared.object_storage.take().expect("object storage")),
+        Arc::new(prepared.key_management.take().expect("KMS")),
         config.public_origin().expect("origin"),
         true,
     )
@@ -124,6 +124,7 @@ async fn missing_console_keeps_real_api_health_and_readiness_independent() {
     );
     store.pool().close().await;
     drop(store);
+    drop(prepared);
     tokio::fs::remove_dir_all(root).await.expect("remove owned API directory");
 }
 
