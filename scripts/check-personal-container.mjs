@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -20,6 +21,7 @@ import { fileURLToPath } from "node:url";
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const ownerLabel = "com.scoplen.personal-container-check";
 const fixturePrefix = "scoplen-personal-container-";
+const preMigrationRevision = "37af5126585254612e734f542cfd4e36670915d9";
 const failurePhases = new Set([
   "preflight",
   "production image build",
@@ -27,10 +29,16 @@ const failurePhases = new Set([
   "image data-directory validation",
   "probe image pull",
   "TLS fixture preparation",
+  "historical source extraction",
+  "matching old image build",
+  "old schema seed",
+  "SQLite migration snapshot",
   "non-root Compose startup and trusted HTTPS",
   "bundled console assets",
   "single public setup, fresh Passkey login and invitation",
   "restart and persistent setup/key verification",
+  "offline snapshot restore",
+  "matching old image recovery",
   "owned-resource cleanup",
   "failed-check cleanup",
 ]);
@@ -134,7 +142,7 @@ export function describeImageBuildFailure({ error, stdout, stderr }) {
     category = "compiler";
   let lastObservedStage = "unknown";
   for (const stage of output.matchAll(
-    /#\d+\s+\[(console-build|server-build|runtime)(?:\s[^\]]*)?\]/g,
+    /#\d+\s+\[(console-build|server-build|historical-build|runtime)(?:\s[^\]]*)?\]/g,
   ))
     lastObservedStage = stage[1];
   return {
@@ -288,14 +296,21 @@ export async function checkPersonalContainer(driverPath) {
     await mkdtemp(join(parent, `${fixturePrefix}${run}-`)),
   );
   const fixture = join(directory, "fixture");
+  const serverLog = join(fixture, "server.log");
   const project = `scoplen-personal-${run}`;
   const image = `scoplen-server:personal-check-${run}`;
+  const historicalImage = `scoplen-server:pre-migration-check-${run}`;
   const inspector = `${project}-image`;
+  const walHolder = `${project}-wal-holder`;
+  const recoveryContainer = `${project}-recovery`;
+  const recoveryVolume = `${project}_recovery`;
   let sequence = 0;
   let phase = "preflight";
   let succeeded = false;
   let imageId;
+  let historicalImageId;
   let probeImage;
+  let probeImageId;
   let container;
   let certificatePrepared = false;
   await writeFile(join(directory, ".container-check-owner"), run, {
@@ -368,6 +383,33 @@ export async function checkPersonalContainer(driverPath) {
       run,
     ]);
   }
+  async function sqliteProbe(operation, mounts, user = "65532:65532") {
+    return await docker([
+      "run",
+      "--rm",
+      "--pull",
+      "never",
+      "--network",
+      "none",
+      "--read-only",
+      "--tmpfs",
+      "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777",
+      "--user",
+      user,
+      "--label",
+      `${ownerLabel}=${run}`,
+      "--mount",
+      `type=bind,source=${join(repository, "scripts/personal-sqlite-recovery-probe.mjs")},target=/sqlite-probe.mjs,readonly`,
+      "--mount",
+      `type=bind,source=${directory},target=/check`,
+      ...mounts,
+      probeImage,
+      "node",
+      "/sqlite-probe.mjs",
+      operation,
+      run,
+    ]);
+  }
   function progress(next) {
     phase = next;
     console.log(`Personal container check: ${phase}`);
@@ -406,15 +448,18 @@ export async function checkPersonalContainer(driverPath) {
     const emptyEnv = join(directory, "compose.env");
     const override = join(directory, "compose.override.json");
     await writeFile(emptyEnv, "", { flag: "wx", mode: 0o600 });
-    await writeFile(
-      override,
+    const overrideContent = (selectedImage) =>
       JSON.stringify({
-        services: { server: { image, labels: { [ownerLabel]: run } } },
+        services: {
+          server: { image: selectedImage, labels: { [ownerLabel]: run } },
+        },
         volumes: { data: { labels: { [ownerLabel]: run } } },
         networks: { default: { labels: { [ownerLabel]: run } } },
-      }),
-      { flag: "wx", mode: 0o600 },
-    );
+      });
+    await writeFile(override, overrideContent(image), {
+      flag: "wx",
+      mode: 0o600,
+    });
     const composeArgs = [
       "compose",
       "--project-name",
@@ -492,6 +537,7 @@ export async function checkPersonalContainer(driverPath) {
     );
     progress("probe image pull");
     await docker(["pull", probeImage], { timeout: 300_000 });
+    probeImageId = (await inspect("image", probeImage)).Id;
     const fixtureMount = [
       "--mount",
       `type=bind,source=${directory},target=/check`,
@@ -500,8 +546,143 @@ export async function checkPersonalContainer(driverPath) {
     await nodeProbe("prepare-tls", fixtureMount);
     certificatePrepared = true;
 
-    progress("non-root Compose startup and trusted HTTPS");
+    progress("historical source extraction");
+    const historicalSource = join(directory, "historical-source");
+    const historicalArchive = join(directory, "historical-source.tar");
+    await mkdir(historicalSource, { mode: 0o700 });
+    assert.equal(
+      (
+        await command("git", [
+          "rev-parse",
+          "--verify",
+          `${preMigrationRevision}^{commit}`,
+        ])
+      ).stdout.trim(),
+      preMigrationRevision,
+      "pinned pre-migration source is unavailable",
+    );
+    await command("git", [
+      "archive",
+      "--format=tar",
+      `--output=${historicalArchive}`,
+      preMigrationRevision,
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "crates",
+    ]);
+    await command("tar", ["-xf", historicalArchive, "-C", historicalSource]);
+
+    progress("matching old image build");
+    const oldBuild = await docker(
+      [
+        "build",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--tag",
+        historicalImage,
+        "--file",
+        join(repository, "scripts/Dockerfile.personal-recovery-old"),
+        "--build-arg",
+        `CHECK_RUNTIME_IMAGE=${image}`,
+        "--progress",
+        "plain",
+        historicalSource,
+      ],
+      { timeout: 3_600_000, allowFailure: true },
+    );
+    if (oldBuild.error) {
+      console.error(
+        `Personal image build failure: ${JSON.stringify(describeImageBuildFailure(oldBuild))}`,
+      );
+      throw new Error(
+        "matching old image build failed; inspect private build output",
+      );
+    }
+    const oldBuilt = await inspect("image", historicalImage);
+    assertOwnedResource(oldBuilt.Config.Labels, run);
+    historicalImageId = oldBuilt.Id;
+    assert.equal(oldBuilt.Config.User, "65532:65532");
+    await writeFile(override, overrideContent(historicalImage));
+
+    progress("old schema seed");
     await compose(["up", "--detach", "--no-build"]);
+    const oldContainer = (
+      await compose(["ps", "--quiet", "server"])
+    ).stdout.trim();
+    assert(
+      /^[a-f0-9]{12,64}$/.test(oldContainer),
+      "expected one owned old server container",
+    );
+    const oldService = await inspect("container", oldContainer);
+    assertOwnedResource(oldService.Config.Labels, run, project);
+    assert.equal(oldService.Image, historicalImageId);
+    const oldDeadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        if ((await request(origin, "/readyz", ca)).status === 200) break;
+      } catch {}
+      assert(
+        Date.now() < oldDeadline,
+        "old production HTTPS readiness timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 500));
+    }
+    const oldLogs = await docker(["logs", oldContainer]);
+    await writePrivateDiagnostic(serverLog, oldLogs.stdout, phase);
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", oldContainer)).State.ExitCode, 0);
+    const walHolderId = (
+      await docker([
+        "run",
+        "--detach",
+        "--name",
+        walHolder,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777",
+        "--stop-signal",
+        "SIGTERM",
+        "--user",
+        "65532:65532",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--mount",
+        `type=bind,source=${join(repository, "scripts/personal-sqlite-recovery-probe.mjs")},target=/sqlite-probe.mjs,readonly`,
+        "--mount",
+        `type=bind,source=${directory},target=/check`,
+        "--mount",
+        `type=volume,source=${project}_data,target=/var/lib/spl`,
+        probeImage,
+        "node",
+        "/sqlite-probe.mjs",
+        "seed-and-hold",
+        run,
+      ])
+    ).stdout.trim();
+    assert(/^[a-f0-9]{12,64}$/.test(walHolderId));
+    const holderService = await inspect("container", walHolderId);
+    assertOwnedResource(holderService.Config.Labels, run);
+    assert.equal(holderService.Image, probeImageId);
+    const walDeadline = Date.now() + 30_000;
+    for (;;) {
+      const holderLogs = (await docker(["logs", walHolderId])).stdout;
+      if (holderLogs.trim() === "ready") break;
+      assert(Date.now() < walDeadline, "committed WAL fixture timed out");
+      await new Promise((accept) => setTimeout(accept, 250));
+    }
+    await sqliteProbe("check-live-wal", [
+      "--mount",
+      `type=volume,source=${project}_data,target=/var/lib/spl,readonly`,
+    ]);
+    await writeFile(override, overrideContent(image));
+
+    progress("non-root Compose startup and trusted HTTPS");
+    await compose(["up", "--detach", "--no-build", "--force-recreate"]);
     container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
     assert(
       /^[a-f0-9]{12,64}$/.test(container),
@@ -540,6 +721,10 @@ export async function checkPersonalContainer(driverPath) {
       { code: "ERR_TLS_CERT_ALTNAME_INVALID" },
     );
     await nodeProbe("check-data", ["--volumes-from", container], "65532:65532");
+    progress("SQLite migration snapshot");
+    await sqliteProbe("check-upgrade", ["--volumes-from", `${container}:ro`]);
+    await docker(["stop", "--time", "30", walHolderId]);
+    assert.equal((await inspect("container", walHolderId)).State.ExitCode, 0);
 
     progress("bundled console assets");
     await docker([
@@ -600,8 +785,11 @@ export async function checkPersonalContainer(driverPath) {
 
     progress("single public setup, fresh Passkey login and invitation");
     const logs = await docker(["logs", container]);
-    const serverLog = join(fixture, "server.log");
-    await writePrivateDiagnostic(serverLog, logs.stdout, phase);
+    await writePrivateDiagnostic(
+      join(fixture, "current-server.log"),
+      logs.stdout,
+      phase,
+    );
     await command(driver, ["bootstrap", fixture, "--server-log", serverLog]);
     const descriptorPath = join(fixture, "descriptor.json");
     const descriptorBytes = await readFile(descriptorPath);
@@ -672,6 +860,83 @@ export async function checkPersonalContainer(driverPath) {
       0,
       "service restarted unexpectedly",
     );
+
+    progress("offline snapshot restore");
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    await docker([
+      "volume",
+      "create",
+      "--label",
+      `${ownerLabel}=${run}`,
+      recoveryVolume,
+    ]);
+    assertOwnedResource((await inspect("volume", recoveryVolume)).Labels, run);
+    await sqliteProbe(
+      "restore-offline",
+      [
+        "--mount",
+        `type=volume,source=${project}_data,target=/source,readonly`,
+        "--mount",
+        `type=volume,source=${recoveryVolume},target=/recovery`,
+      ],
+      "0:0",
+    );
+
+    progress("matching old image recovery");
+    const recoveredContainerId = (
+      await docker([
+        "run",
+        "--detach",
+        "--name",
+        recoveryContainer,
+        "--pull",
+        "never",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777",
+        "--publish",
+        `127.0.0.1:${port}:8443`,
+        "--env",
+        "SPL_SERVER_PUBLIC_HOST=localhost",
+        "--env",
+        `SPL_SERVER_PUBLIC_PORT=${port}`,
+        "--mount",
+        `type=volume,source=${recoveryVolume},target=/var/lib/spl`,
+        "--mount",
+        `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
+        historicalImage,
+      ])
+    ).stdout.trim();
+    assert(/^[a-f0-9]{12,64}$/.test(recoveredContainerId));
+    const recoveredService = await inspect("container", recoveredContainerId);
+    assertOwnedResource(recoveredService.Config.Labels, run);
+    assert.equal(recoveredService.Image, historicalImageId);
+    assert.equal(recoveredService.HostConfig.ReadonlyRootfs, true);
+    const recoveryDeadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        if ((await request(origin, "/readyz", ca)).status === 200) break;
+      } catch {}
+      assert(
+        Date.now() < recoveryDeadline,
+        "matching old image recovery timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 500));
+    }
+    assert.equal((await request(origin, "/healthz", ca)).status, 200);
+    await sqliteProbe("check-recovery", [
+      "--mount",
+      `type=volume,source=${project}_data,target=/source,readonly`,
+      "--mount",
+      `type=volume,source=${recoveryVolume},target=/recovery,readonly`,
+    ]);
     succeeded = true;
   } catch (error) {
     console.error(
@@ -705,13 +970,25 @@ export async function checkPersonalContainer(driverPath) {
         assertOwnedResource(
           item.Config.Labels,
           run,
-          item.Name === `/${inspector}` ? undefined : project,
+          [`/${inspector}`, `/${walHolder}`, `/${recoveryContainer}`].includes(
+            item.Name,
+          )
+            ? undefined
+            : project,
         );
         assert(
-          item.Name === `/${inspector}` || item.Name === `/${project}-server-1`,
+          [
+            `/${inspector}`,
+            `/${project}-server-1`,
+            `/${walHolder}`,
+            `/${recoveryContainer}`,
+          ].includes(item.Name),
           "unexpected owned container",
         );
-        assert.equal(item.Image, imageId, "owned container changed images");
+        assert(
+          [imageId, historicalImageId, probeImageId].includes(item.Image),
+          "owned container changed images",
+        );
         if (item.State.Running) await docker(["stop", "--time", "30", id]);
         if (succeeded) await docker(["container", "rm", id]);
       }
@@ -724,10 +1001,20 @@ export async function checkPersonalContainer(driverPath) {
           assertOwnedResource(item.Labels, run, project);
           await docker([kind, "rm", name]);
         }
-        const item = await inspect("image", image);
-        assertOwnedResource(item.Config.Labels, run);
-        assert.equal(item.Id, imageId);
-        await docker(["image", "rm", image]);
+        assertOwnedResource(
+          (await inspect("volume", recoveryVolume)).Labels,
+          run,
+        );
+        await docker(["volume", "rm", recoveryVolume]);
+        for (const [tag, expectedId] of [
+          [image, imageId],
+          [historicalImage, historicalImageId],
+        ]) {
+          const item = await inspect("image", tag);
+          assertOwnedResource(item.Config.Labels, run);
+          assert.equal(item.Id, expectedId);
+          await docker(["image", "rm", tag]);
+        }
         if (certificatePrepared) {
           await nodeProbe("release-tls", [
             "--mount",
@@ -757,7 +1044,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public bootstrap and persistent restart.",
+    "Personal container check passed: production build, trusted HTTPS, console, public bootstrap, restart, SQLite upgrade and matching old image recovery.",
   );
 }
 
