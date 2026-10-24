@@ -37,6 +37,10 @@ pub enum ServerError {
         /// Underlying filesystem error.
         source: std::io::Error,
     },
+    /// Windows permission admission failed without changing existing access controls.
+    #[cfg(windows)]
+    #[error("private deployment storage is unavailable: {0}")]
+    PrivateMaterialAccess(#[source] std::io::Error),
     /// A generated deployment material file could not be written.
     #[error("could not write deployment material {path}: {source}")]
     Material {

@@ -32,6 +32,10 @@ jobs:
         run: rustup show active-toolchain
       - name: Check vendored OpenSSL build prerequisite
         run: perl --version
+      - name: Check Windows private-directory ACL boundaries
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" -NoProfile -NonInteractive -File scripts/test-windows-data-acl.ps1'
       - name: Format
         run: cargo fmt --all -- --check
       - name: Test

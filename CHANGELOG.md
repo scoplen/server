@@ -4,6 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added Windows data-directory admission before database/object-storage initialization and
+  standalone bootstrap. New directories receive a private inheritable DACL at creation;
+  existing directories, custom key parents and private key files with unsafe or unsupported
+  access controls are refused without permission repair. A fixed, hidden Windows PowerShell
+  5.1/.NET check has a 15-second deadline, handles paths only as data and emits no raw diagnostics.
+  Drive admission rejects mapped network drives and roots that cannot be confirmed ready and local.
+  Windows-native boundaries and public bootstrap/startup regressions cover creation,
+  inherited file protection, broad/NULL ACLs, reparse points and unavailable checking support.
+  Operators still control parent-directory safety and existing-material recovery.
+
 - Added a source-built Personal container entry with bundled console assets, direct HTTPS from
   operator-provisioned certificate files, a non-root distroless runtime and persistent private
   SQLite/key storage. Compose requires the public DNS name and certificate directory explicitly.

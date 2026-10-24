@@ -79,9 +79,16 @@ require operator authentication and one durable identity transaction.
 First-run material is created exclusively and flushed before success. On Unix, new files have
 owner read/write permissions from creation, before any secret is written. Existing files,
 including symlink destinations, are never overwritten. An incomplete CA pair requires operator
-recovery; bootstrap does not replace its surviving file. Windows uses the data directory's
-inherited access controls; protect the directory before first startup. Windows ACL restriction
-and validation are not implemented. Existing deployment file permissions are not changed.
+recovery; bootstrap does not replace its surviving file. Windows permission admission runs
+before database/object-storage initialization and at the public bootstrap entry. New data
+directories receive a protected DACL at creation; existing directories, custom key parents and
+private key files are inspected without repair. Only ordinary server-account/System/Administrators
+allow entries and matching trusted ownership are accepted, with inheritable server full control
+for directories. Reparse points, NULL DACLs and unsupported ACLs fail closed. A fixed hidden,
+noninteractive OS Windows PowerShell 5.1 process uses .NET access-control APIs and a 15-second
+deadline; paths are data and child output is discarded. See
+[Windows data-directory permissions](windows-data-directory.md). Parent-directory write and
+replacement safety remains the operator's responsibility.
 
 The relational storage boundary supports SQLite or PostgreSQL for `api`, `worker`, and `edge`.
 SQLite roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys on pooled
