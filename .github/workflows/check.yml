@@ -140,6 +140,8 @@ jobs:
         run: cargo test --locked -p scoplen-server --lib --features postgres-integration personal_sync::tests::limits::postgres_listener_configurable_sync_limits_verify_real_device_signatures -- --exact
       - name: Check PostgreSQL populated sync-limit forward migration
         run: cargo test --locked -p scoplen-store --test sync_limits_migrations --features postgres-integration postgres_sync_limit_forward_migration_preserves_populated_tables_and_constraints -- --exact
+      - name: Check PostgreSQL metadata admission before blob materialization
+        run: cargo test --locked -p scoplen-store --lib --features postgres-integration sync::read::tests::postgres_metadata_admission_precedes_blob_materialization -- --exact
       - name: Create isolated device authentication database
         run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_device_auth_ci'
       - name: Check PostgreSQL device authentication and refresh transactions

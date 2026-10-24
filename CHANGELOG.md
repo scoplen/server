@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Moved D-93 read admission into SQLite/PostgreSQL metadata queries before envelope loading.
+  The production changes, snapshot and history paths validate full source metadata, select exact
+  encoded budgets and load only approved payloads in the same snapshot. First-entry and complete
+  history budget failures issue no payload query; short pages load only their selected entries.
+
 - Aligned PostgreSQL sync test vault ids with the UUIDv7 notification contract, restoring
   shared-vault and Personal mutation coverage after transactional notification publication.
   The PostgreSQL CI job now runs the complete 38-test sync storage suite instead of three

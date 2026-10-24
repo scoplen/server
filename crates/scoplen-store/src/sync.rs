@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Durable primitives for the append-ordered sync store.
 //!
-//! This module deliberately stops at storage. Authentication, envelope validation, policy
-//! filtering, and HTTP/CBOR representations belong to the sync service and its protocol crates.
+//! Authentication, envelope validation, policy filtering, and HTTP representations belong to
+//! the sync service and its protocol crates. Bounded reads use shared structural validation
+//! and exact CBOR sizing before loading payloads; raw reads retain storage-only semantics.
 
 #![forbid(unsafe_code)]
+
+mod read;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -358,6 +361,12 @@ pub enum SyncStoreError {
     /// A change page size was outside the protocol range.
     #[error("sync page size must be between 1 and {MAX_PAGE_SIZE}")]
     InvalidPageSize,
+    /// Selected read budgets are invalid or cannot safely represent a page.
+    #[error("sync read limits are invalid")]
+    InvalidReadLimits,
+    /// A first page entry or the complete history cannot fit the selected read budgets.
+    #[error("sync stored response exceeds the selected read budgets")]
+    ReadBudgetExceeded,
     /// The requested object has no current or retained version.
     #[error("sync object does not exist")]
     ObjectNotFound,
@@ -1260,13 +1269,23 @@ impl SqliteStore {
         after: u64,
         limit: u16,
     ) -> Result<ChangePage, SyncStoreError> {
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(SyncStoreError::InvalidPageSize);
-        }
-        let mut transaction = self.pool().begin().await?;
-        let page = read_current_page(&mut transaction, vault_id, after, limit, true).await?;
-        transaction.commit().await?;
-        Ok(page)
+        read::sqlite_page(self, vault_id, after, limit, true, None).await
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_changes_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<ChangePage, SyncStoreError> {
+        read::sqlite_page(self, vault_id, after, limit, true, Some(limits)).await
     }
 
     /// Read a full-reconciliation page of current object versions.
@@ -1286,13 +1305,27 @@ impl SqliteStore {
         after: u64,
         limit: u16,
     ) -> Result<SnapshotPage, SyncStoreError> {
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(SyncStoreError::InvalidPageSize);
-        }
-        let mut transaction = self.pool().begin().await?;
-        let page = read_current_page(&mut transaction, vault_id, after, limit, false).await?;
-        transaction.commit().await?;
-        Ok(SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more })
+        read::sqlite_page(self, vault_id, after, limit, false, None).await.map(|page| {
+            SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more }
+        })
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_snapshot_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<SnapshotPage, SyncStoreError> {
+        read::sqlite_page(self, vault_id, after, limit, false, Some(limits)).await.map(|page| {
+            SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more }
+        })
     }
 
     /// Read the current version and retained history for one object in ascending sequence order.
@@ -1308,27 +1341,22 @@ impl SqliteStore {
         vault_id: VaultId,
         object_id: ObjectId,
     ) -> Result<Vec<SyncChange>, SyncStoreError> {
-        let mut transaction = self.pool().begin().await?;
-        vault_state(&mut transaction, vault_id).await?;
-        let rows = sqlx::query(
-            "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch \
-             FROM sync_object_versions WHERE vault_id = ? AND object_id = ? \
-             ORDER BY sequence DESC LIMIT 21",
-        )
-        .bind(vault_id.as_slice())
-        .bind(object_id.as_slice())
-        .fetch_all(&mut *transaction)
-        .await?;
-        if rows.is_empty() {
-            return Err(SyncStoreError::ObjectNotFound);
-        }
-        let mut versions = rows
-            .iter()
-            .map(|row| change_from_row(object_id, row))
-            .collect::<Result<Vec<_>, SyncStoreError>>()?;
-        versions.reverse();
-        transaction.commit().await?;
-        Ok(versions)
+        read::sqlite_versions(self, vault_id, object_id, None).await
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_versions_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        object_id: ObjectId,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<Vec<SyncChange>, SyncStoreError> {
+        read::sqlite_versions(self, vault_id, object_id, Some(limits)).await
     }
 
     /// Record a device cursor after the client has applied changes.
@@ -1740,17 +1768,23 @@ impl PostgresStore {
         after: u64,
         limit: u16,
     ) -> Result<ChangePage, SyncStoreError> {
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(SyncStoreError::InvalidPageSize);
-        }
-        let mut transaction = self.pool().begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *transaction)
-            .await?;
-        let page =
-            read_current_page_postgres(&mut transaction, vault_id, after, limit, true).await?;
-        transaction.commit().await?;
-        Ok(page)
+        read::postgres_page(self, vault_id, after, limit, true, None).await
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_changes_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<ChangePage, SyncStoreError> {
+        read::postgres_page(self, vault_id, after, limit, true, Some(limits)).await
     }
 
     /// Read a full-reconciliation page of current object versions.
@@ -1767,17 +1801,27 @@ impl PostgresStore {
         after: u64,
         limit: u16,
     ) -> Result<SnapshotPage, SyncStoreError> {
-        if !(1..=MAX_PAGE_SIZE).contains(&limit) {
-            return Err(SyncStoreError::InvalidPageSize);
-        }
-        let mut transaction = self.pool().begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *transaction)
-            .await?;
-        let page =
-            read_current_page_postgres(&mut transaction, vault_id, after, limit, false).await?;
-        transaction.commit().await?;
-        Ok(SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more })
+        read::postgres_page(self, vault_id, after, limit, false, None).await.map(|page| {
+            SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more }
+        })
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_snapshot_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        after: u64,
+        limit: u16,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<SnapshotPage, SyncStoreError> {
+        read::postgres_page(self, vault_id, after, limit, false, Some(limits)).await.map(|page| {
+            SnapshotPage { objects: page.changes, next_cursor: page.next_cursor, more: page.more }
+        })
     }
 
     /// Read the latest current and retained object versions in ascending sequence order.
@@ -1793,38 +1837,22 @@ impl PostgresStore {
         vault_id: VaultId,
         object_id: ObjectId,
     ) -> Result<Vec<SyncChange>, SyncStoreError> {
-        let mut transaction = self.pool().begin().await?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            .execute(&mut *transaction)
-            .await?;
-        let exists =
-            sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM sync_vaults WHERE vault_id = $1")
-                .bind(vault_id.as_slice())
-                .fetch_optional(&mut *transaction)
-                .await?
-                .is_some();
-        if !exists {
-            return Err(SyncStoreError::VaultNotFound);
-        }
-        let rows = sqlx::query(
-            "SELECT sequence, envelope, tombstone, signer_device_id, key_epoch
-             FROM sync_object_versions WHERE vault_id = $1 AND object_id = $2
-             ORDER BY sequence DESC LIMIT 21",
-        )
-        .bind(vault_id.as_slice())
-        .bind(object_id.as_slice())
-        .fetch_all(&mut *transaction)
-        .await?;
-        if rows.is_empty() {
-            return Err(SyncStoreError::ObjectNotFound);
-        }
-        let mut versions = rows
-            .iter()
-            .map(|row| change_from_postgres_row(object_id, row))
-            .collect::<Result<Vec<_>, SyncStoreError>>()?;
-        versions.reverse();
-        transaction.commit().await?;
-        Ok(versions)
+        read::postgres_versions(self, vault_id, object_id, None).await
+    }
+
+    /// Read canonical sync data with metadata admission before loading opaque payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns a vault, cursor, page-size, invalid-limit, corrupt-row, read-budget, or database
+    /// error. A budget rejection never skips an entry or returns partial version history.
+    pub async fn sync_versions_with_read_limits(
+        &self,
+        vault_id: VaultId,
+        object_id: ObjectId,
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<Vec<SyncChange>, SyncStoreError> {
+        read::postgres_versions(self, vault_id, object_id, Some(limits)).await
     }
 
     /// Record a device cursor after the client has applied changes.
@@ -2703,94 +2731,6 @@ async fn check_postgres_personal_mutation(
         .ok()
         .filter(|epoch| *epoch > 0)
         .ok_or(SyncStoreError::AuthorizationUnavailable)
-}
-
-async fn read_current_page(
-    transaction: &mut Transaction<'_, Sqlite>,
-    vault_id: VaultId,
-    after: u64,
-    limit: u16,
-    enforce_purge_horizon: bool,
-) -> Result<ChangePage, SyncStoreError> {
-    let (current_seq, purge_horizon) = vault_state(transaction, vault_id).await?;
-    if enforce_purge_horizon && after < purge_horizon {
-        return Err(SyncStoreError::CursorExpired { purge_horizon });
-    }
-    if after > current_seq {
-        return Err(SyncStoreError::CursorAhead { cursor: after, current: current_seq });
-    }
-
-    let rows = sqlx::query(
-        "SELECT object_id, sequence, envelope, tombstone, signer_device_id, key_epoch \
-         FROM sync_objects WHERE vault_id = ? AND sequence > ? \
-         ORDER BY sequence ASC LIMIT ?",
-    )
-    .bind(vault_id.as_slice())
-    .bind(sequence_to_sql(after)?)
-    .bind(i64::from(limit) + 1)
-    .fetch_all(&mut **transaction)
-    .await?;
-    let more = rows.len() > usize::from(limit);
-    let changes = rows
-        .into_iter()
-        .take(usize::from(limit))
-        .map(|row| {
-            let object_id_bytes: Vec<u8> = row.try_get("object_id")?;
-            let object_id = id_from_bytes(&object_id_bytes, "object_id")?;
-            change_from_row(object_id, &row)
-        })
-        .collect::<Result<Vec<_>, SyncStoreError>>()?;
-    let next_cursor = changes
-        .last()
-        .map_or(current_seq, |change| if more { change.sequence } else { current_seq });
-    Ok(ChangePage { changes, next_cursor, more })
-}
-
-async fn read_current_page_postgres(
-    transaction: &mut Transaction<'_, Postgres>,
-    vault_id: VaultId,
-    after: u64,
-    limit: u16,
-    enforce_purge_horizon: bool,
-) -> Result<ChangePage, SyncStoreError> {
-    let row = sqlx::query("SELECT current_seq, purge_horizon FROM sync_vaults WHERE vault_id = $1")
-        .bind(vault_id.as_slice())
-        .fetch_optional(&mut **transaction)
-        .await?
-        .ok_or(SyncStoreError::VaultNotFound)?;
-    let current_seq = sequence_from_sql(row.try_get("current_seq")?)?;
-    let purge_horizon = sequence_from_sql(row.try_get("purge_horizon")?)?;
-    if enforce_purge_horizon && after < purge_horizon {
-        return Err(SyncStoreError::CursorExpired { purge_horizon });
-    }
-    if after > current_seq {
-        return Err(SyncStoreError::CursorAhead { cursor: after, current: current_seq });
-    }
-
-    let rows = sqlx::query(
-        "SELECT object_id, sequence, envelope, tombstone, signer_device_id, key_epoch
-         FROM sync_objects WHERE vault_id = $1 AND sequence > $2
-         ORDER BY sequence ASC LIMIT $3",
-    )
-    .bind(vault_id.as_slice())
-    .bind(sequence_to_sql(after)?)
-    .bind(i64::from(limit) + 1)
-    .fetch_all(&mut **transaction)
-    .await?;
-    let more = rows.len() > usize::from(limit);
-    let changes = rows
-        .into_iter()
-        .take(usize::from(limit))
-        .map(|row| {
-            let object_id_bytes: Vec<u8> = row.try_get("object_id")?;
-            let object_id = id_from_bytes(&object_id_bytes, "object_id")?;
-            change_from_postgres_row(object_id, &row)
-        })
-        .collect::<Result<Vec<_>, SyncStoreError>>()?;
-    let next_cursor = changes
-        .last()
-        .map_or(current_seq, |change| if more { change.sequence } else { current_seq });
-    Ok(ChangePage { changes, next_cursor, more })
 }
 
 async fn lock_vault(

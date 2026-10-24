@@ -470,9 +470,14 @@ and history remain readable. Changes and snapshots return the longest eligible p
 the budgets, with `more = true` and the last returned sequence as the cursor when shortened. If
 the first entry cannot fit, or complete unpaged history cannot fit, the read returns
 `503 sync.storage_unavailable`; it does not expire a cursor or advance stored state. Exact size
-checks precede response encoding and payload copies; storage still loads up to the requested
-1,000-row page before this response selection. Complete version history remains at most 21
-entries. Key and notification limits remain independent.
+checks precede response encoding and payload copies. The production reader first loads at most
+1,001 metadata rows, including the pagination lookahead, validates the entire requested source
+page and selects its prefix using exact CBOR sizes. Only approved payload rows then enter Rust,
+through a sequence- and length-guarded query in the same database snapshot. Version history first
+checks all retained metadata and its complete encoded size, then loads all approved payloads or
+fails before a payload query. Complete history remains at most 21 entries. The internal raw
+storage primitives retain their storage-only semantics; HTTP exclusively uses explicit bounded
+reads. Key and notification limits remain independent.
 
 The configurable-limit forward migration preserves current objects, retained versions, epochs,
 signers, timestamps, foreign keys, uniqueness and indexes while moving the envelope upper bound
