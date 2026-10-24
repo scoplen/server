@@ -156,3 +156,9 @@ removed. Successful runs remove their own containers, network, volume, image and
 temporary files. Failed runs stop their own service and retain their private diagnostics and
 test state at the printed local path; do not upload that material to CI artifacts or issues.
 The check never prunes Docker caches or touches earlier failed fixtures.
+
+Image-build failures report a fixed failure category, the last observed build stage, and bounded
+exit metadata; detailed command output remains in the private check directory. The CI job retains
+the native bootstrap executable separately and removes its intermediate Cargo outputs before
+building the independent production image. Use the fixed summary to select the next investigation;
+the retained detailed output is required to establish a cause.
