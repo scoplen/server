@@ -72,6 +72,12 @@ pub enum DeviceAuthenticationError {
     RateLimited(u64),
     #[error("device authentication storage failed")]
     Database,
+    #[error("device authentication database is busy")]
+    DatabaseBusy,
+    #[error("device authentication connection pool timed out")]
+    PoolTimedOut,
+    #[error("device authentication connection pool is closed")]
+    PoolClosed,
     #[error("device authentication audit failed")]
     Audit,
     #[error("device authentication clock failed")]
@@ -83,8 +89,22 @@ pub enum DeviceAuthenticationError {
 }
 
 impl From<sqlx::Error> for DeviceAuthenticationError {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Database
+    fn from(error: sqlx::Error) -> Self {
+        match error {
+            sqlx::Error::PoolTimedOut => Self::PoolTimedOut,
+            sqlx::Error::PoolClosed => Self::PoolClosed,
+            // Extended SQLite result codes retain the primary result in their low byte.
+            sqlx::Error::Database(error)
+                if error.try_downcast_ref::<sqlx::sqlite::SqliteError>().is_some()
+                    && error
+                        .code()
+                        .and_then(|code| code.parse::<i32>().ok())
+                        .is_some_and(|code| matches!(code & 0xff, 5 | 6)) =>
+            {
+                Self::DatabaseBusy
+            }
+            _ => Self::Database,
+        }
     }
 }
 
