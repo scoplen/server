@@ -165,6 +165,8 @@ metadata, directory validation, probe-image retrieval and TLS fixture preparatio
 only fixed categories/reasons and bounded I/O or exit metadata; private diagnostic-write failures
 report that stage before attempting to retain further output. Unknown messages, paths, command
 arguments and captured output never enter these summaries.
+Only a fixed `directory-mode` failure can add `actualMode` and `expectedMode`, both integer image
+permission bits bounded to `0..0o7777`.
 
 Use the fixed summary to select the next investigation. A missing image-build failure summary
 alone does not prove that building succeeded: retaining its private output can fail first.

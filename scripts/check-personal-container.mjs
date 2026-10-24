@@ -55,6 +55,17 @@ export function describeCheckFailure({
     ["image data directory has the wrong group", "directory-group"],
     ["image data directory missing", "directory-missing"],
   ];
+  const reason =
+    (assertion && typeof error.message === "string"
+      ? reasons.find(([message]) => error.message.startsWith(message))?.[1]
+      : null) ?? null;
+  const modeMetadata =
+    reason === "directory-mode" &&
+    [error.actual, error.expected].every(
+      (value) => Number.isInteger(value) && value >= 0 && value <= 0o7777,
+    )
+      ? { actualMode: error.actual, expectedMode: error.expected }
+      : {};
   return {
     phase: failurePhases.has(phase) ? phase : "unknown",
     category: diagnosticWrite
@@ -64,10 +75,7 @@ export function describeCheckFailure({
         : exitCode !== null || signal !== null
           ? "command"
           : "operation",
-    reason:
-      (assertion && typeof error.message === "string"
-        ? reasons.find(([message]) => error.message.startsWith(message))?.[1]
-        : null) ?? null,
+    reason,
     ioCode: [
       "ENOSPC",
       "EDQUOT",
@@ -81,6 +89,7 @@ export function describeCheckFailure({
       : null,
     exitCode,
     signal,
+    ...modeMetadata,
   };
 }
 
