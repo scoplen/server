@@ -1,0 +1,26 @@
+# Single-node Personal deployment. Supply the public DNS name through SPL_SERVER_PUBLIC_HOST.
+[server]
+listen_addr = "0.0.0.0"
+listen_port = 8443
+public_port = 8443
+data_dir = "/var/lib/spl"
+
+[tls]
+mode = "files"
+cert_file = "/run/scoplen/tls/fullchain.pem"
+key_file = "/run/scoplen/tls/private-key.pem"
+
+[roles]
+names = ["all"]
+
+[console]
+assets_dir = "/app/console"
+
+[storage]
+backend = "sqlite"
+
+[storage.kms]
+backend = "local"
+
+[storage.object]
+backend = "filesystem"
