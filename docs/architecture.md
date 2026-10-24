@@ -80,6 +80,19 @@ acquisition/current identity loading and immediately before COMMIT.
 The SQLite sync store allocates a contiguous sequence range inside a write transaction, checks
 every compare-and-swap base before changing state, and exposes current change and
 full-reconciliation snapshot pages without interpreting envelope bytes. Both relational stores
+validate deployment-selected envelope/count/complete CBOR request-byte limits before mutation;
+the HTTP adapter uses the same D-91 limits for requests, ordered assignments and complete
+request-bound conflicts. The conflict cap stays at 128 MiB; encoding failure returns 503 without
+truncation. D-93 read payload/body budgets are configured independently, preserving access to
+retained larger data after write limits decrease. Changes and snapshots select the longest
+encodable prefix of the fetched page with exact shared-codec checks before payload copies,
+preserving progress and cursor ordering. An unencodable first entry or complete history returns
+503; history is never truncated. The store still fetches the requested page of at most 1,000 rows
+before response selection. History counts and key and notification resource bounds remain fixed
+and independent. An additive forward migration
+replaces the old envelope ceiling with a nonempty check, preserving all data and relational
+constraints; SQLite rebuilds both leaf tables transactionally and PostgreSQL replaces the checks.
+Both relational stores
 atomically provision one personal vault and its opaque wrapped key per account, scope key reads to
 the owner, and list the account's personal vault and current shared memberships. Both stores
 atomically create a shared vault with its admin membership and epoch-one wrap, enforce the

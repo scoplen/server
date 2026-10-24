@@ -9,7 +9,7 @@ use std::{
 
 use scoplen_crypto::validate_server_origin;
 use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig, sync::SyncCardinalityLimits};
-use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
+use scoplen_sync::http::{ReadBodyLimits, WriteBodyLimits, WriteRateLimits};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -213,6 +213,7 @@ impl Config {
         self.sync.cardinality_limits().validate().map_err(ConfigError::Invalid)?;
         self.sync.write_rate_limits()?;
         self.sync.write_body_limits()?;
+        self.sync.read_body_limits()?;
         Ok(())
     }
 
@@ -432,6 +433,10 @@ pub struct SyncSettings {
     pub max_batch_objects: u64,
     /// Maximum encoded CBOR bytes in one write batch.
     pub max_batch_bytes: u64,
+    /// Maximum stored payload bytes accepted by change, snapshot and history reads.
+    pub max_read_envelope_bytes: u64,
+    /// Maximum complete encoded read-response bytes, independent of current write limits.
+    pub max_read_body_bytes: u64,
 }
 
 impl Default for SyncSettings {
@@ -439,6 +444,7 @@ impl Default for SyncSettings {
         let limits = SyncCardinalityLimits::default();
         let write_rate = WriteRateLimits::default();
         let write_body = WriteBodyLimits::default();
+        let read_body = ReadBodyLimits::default();
         Self {
             max_objects_per_vault: limits.max_objects_per_vault,
             max_shared_vaults_per_account: limits.max_shared_vaults_per_account,
@@ -448,6 +454,8 @@ impl Default for SyncSettings {
             max_envelope_bytes: write_body.max_envelope_bytes(),
             max_batch_objects: write_body.max_batch_objects(),
             max_batch_bytes: write_body.max_batch_bytes(),
+            max_read_envelope_bytes: read_body.max_envelope_bytes(),
+            max_read_body_bytes: read_body.max_body_bytes(),
         }
     }
 }
@@ -506,6 +514,20 @@ impl SyncSettings {
                 ConfigError::Invalid("SPL_SYNC_MAX_BATCH_BYTES must be an unsigned integer".into())
             })?;
         }
+        if let Some(value) = env_value("SPL_SYNC_MAX_READ_ENVELOPE_BYTES") {
+            self.max_read_envelope_bytes = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_READ_ENVELOPE_BYTES must be an unsigned integer".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_SYNC_MAX_READ_BODY_BYTES") {
+            self.max_read_body_bytes = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_SYNC_MAX_READ_BODY_BYTES must be an unsigned integer".into(),
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -526,6 +548,12 @@ impl SyncSettings {
     /// Return validated write bounds for the authenticated K-4 router.
     pub(crate) fn write_body_limits(&self) -> Result<WriteBodyLimits, ConfigError> {
         WriteBodyLimits::new(self.max_envelope_bytes, self.max_batch_objects, self.max_batch_bytes)
+            .map_err(ConfigError::Invalid)
+    }
+
+    /// Return independent validated budgets for retained sync data.
+    pub(crate) fn read_body_limits(&self) -> Result<ReadBodyLimits, ConfigError> {
+        ReadBodyLimits::new(self.max_read_envelope_bytes, self.max_read_body_bytes)
             .map_err(ConfigError::Invalid)
     }
 }
@@ -935,16 +963,37 @@ mod tests {
             ("max_envelope_bytes", [0, 1, 100]),
             ("max_batch_objects", [2, 0, 100]),
             ("max_batch_bytes", [2, 1, 0]),
-            ("max_envelope_bytes", [scoplen_sync::MAX_ENVELOPE_BYTES as u64 + 1, 1, 100]),
-            ("max_batch_objects", [2, scoplen_sync::MAX_BATCH_OBJECTS as u64 + 1, 100]),
-            ("max_batch_bytes", [2, 1, scoplen_sync::MAX_BATCH_BYTES as u64 + 1]),
+            ("max_batch_objects", [2, u64::MAX, 100]),
         ] {
             config.sync.max_envelope_bytes = invalid[0];
             config.sync.max_batch_objects = invalid[1];
             config.sync.max_batch_bytes = invalid[2];
             assert!(config.validate().expect_err("invalid write bound").to_string().contains(name));
         }
+        config.sync.max_envelope_bytes = scoplen_sync::MAX_ENVELOPE_BYTES as u64 + 1;
+        config.sync.max_batch_objects = scoplen_sync::MAX_BATCH_OBJECTS as u64 + 1;
+        config.sync.max_batch_bytes = scoplen_sync::MAX_BATCH_BYTES as u64 + 1;
+        config.validate().expect("raised deployment write bounds");
         Config::default().validate().expect("default write bounds");
+    }
+
+    #[test]
+    fn sync_read_budgets_are_independent_of_write_limits() {
+        let mut config: Config = toml::from_str(
+            "[sync]\nmax_envelope_bytes = 1\nmax_read_envelope_bytes = 300000\nmax_read_body_bytes = 900000\n",
+        ).expect("parse independent read budgets");
+        config.validate().expect("retained objects can predate lower write limits");
+        let limits = config.sync.read_body_limits().expect("read limits");
+        assert_eq!(limits.max_envelope_bytes(), 300_000);
+        assert_eq!(limits.max_body_bytes(), 900_000);
+        config.sync.max_read_envelope_bytes = 0;
+        assert!(config.validate().is_err());
+        config.sync.max_read_envelope_bytes = 300_000;
+        config.sync.max_read_body_bytes = 0;
+        assert!(config.validate().is_err());
+        config.sync.max_read_body_bytes = 900_000;
+        config.sync.max_read_envelope_bytes = u64::MAX;
+        assert!(config.validate().is_err());
     }
 
     #[test]

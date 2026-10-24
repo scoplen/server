@@ -90,6 +90,7 @@ impl Listener {
             true,
             scoplen_sync::http::WriteRateLimits::default(),
             scoplen_sync::http::WriteBodyLimits::default(),
+            scoplen_sync::http::ReadBodyLimits::default(),
             hub.clone(),
         );
         let plain = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");

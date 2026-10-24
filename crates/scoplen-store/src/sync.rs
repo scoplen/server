@@ -25,9 +25,9 @@ use crate::{
 
 /// Maximum envelope size from the sync protocol's default limits.
 pub const MAX_ENVELOPE_BYTES: usize = 260 * 1024;
-/// Maximum number of objects in one write batch.
+/// Default maximum number of objects in one write batch.
 pub const MAX_BATCH_OBJECTS: usize = 500;
-/// Maximum combined envelope size in one write batch.
+/// Default maximum complete encoded CBOR request size in one write batch.
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum page size from the sync protocol.
 pub const MAX_PAGE_SIZE: u16 = 1_000;
@@ -332,13 +332,13 @@ pub enum SyncStoreError {
     #[error("sync write batch must not be empty")]
     EmptyBatch,
     /// The write batch exceeds the protocol object count limit.
-    #[error("sync write batch exceeds {MAX_BATCH_OBJECTS} objects")]
+    #[error("sync write batch exceeds the configured object limit")]
     BatchObjectLimit,
     /// The write batch exceeds the protocol byte limit.
-    #[error("sync write batch exceeds {MAX_BATCH_BYTES} bytes")]
+    #[error("sync write batch exceeds the configured encoded-byte limit")]
     BatchByteLimit,
     /// An envelope exceeds the protocol envelope limit or is empty.
-    #[error("sync envelope must contain between 1 and {MAX_ENVELOPE_BYTES} bytes")]
+    #[error("sync envelope is empty or exceeds the configured envelope limit")]
     InvalidEnvelope,
     /// The batch contains an object more than once.
     #[error("sync write batch contains a duplicate object id")]
@@ -1111,7 +1111,7 @@ impl SqliteStore {
         writes: &[ObjectWrite],
         authorization: Option<&PersonalMutation<'_>>,
     ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
-        validate_batch(writes)?;
+        validate_batch(writes, self.sync_write_limits())?;
         let mut transaction = self.pool().begin().await?;
         lock_vault(&mut transaction, vault_id).await?;
         let (current_seq, _) = vault_state(&mut transaction, vault_id).await?;
@@ -1586,7 +1586,7 @@ impl PostgresStore {
         writes: &[ObjectWrite],
         authorization: Option<&PersonalMutation<'_>>,
     ) -> Result<Vec<WriteReceipt>, SyncStoreError> {
-        validate_batch(writes)?;
+        validate_batch(writes, self.sync_write_limits())?;
         let mut transaction = self.pool().begin().await?;
         if let Some(authorization) = authorization {
             let epoch =
@@ -2913,15 +2913,18 @@ async fn insert_version_postgres(
     Ok(())
 }
 
-fn validate_batch(writes: &[ObjectWrite]) -> Result<(), SyncStoreError> {
+fn validate_batch(
+    writes: &[ObjectWrite],
+    limits: scoplen_api::sync::SyncWriteLimits,
+) -> Result<(), SyncStoreError> {
     if writes.is_empty() {
         return Err(SyncStoreError::EmptyBatch);
     }
-    if writes.len() > MAX_BATCH_OBJECTS {
+    if writes.len() > limits.max_batch_objects {
         return Err(SyncStoreError::BatchObjectLimit);
     }
     let mut ids = HashSet::with_capacity(writes.len());
-    let mut total_bytes = 0_usize;
+    let mut total_bytes = cbor_argument_bytes(writes.len() as u64);
     for write in writes {
         if write.key_epoch == 0 {
             return Err(SyncStoreError::InvalidEnvelope);
@@ -2929,13 +2932,19 @@ fn validate_batch(writes: &[ObjectWrite]) -> Result<(), SyncStoreError> {
         if !ids.insert(write.object_id) {
             return Err(SyncStoreError::DuplicateObject);
         }
-        if write.envelope.is_empty() || write.envelope.len() > MAX_ENVELOPE_BYTES {
+        if write.envelope.is_empty() || write.envelope.len() > limits.max_envelope_bytes {
             return Err(SyncStoreError::InvalidEnvelope);
         }
-        total_bytes =
-            total_bytes.checked_add(write.envelope.len()).ok_or(SyncStoreError::BatchByteLimit)?;
+        // K-4's four-field map: map header, four keys, UUID bytes and boolean, then the
+        // variable base and byte-string header. Count the wire request without cloning payloads.
+        total_bytes = total_bytes
+            .checked_add(23)
+            .and_then(|bytes| bytes.checked_add(write.base_sequence.map_or(1, cbor_argument_bytes)))
+            .and_then(|bytes| bytes.checked_add(cbor_argument_bytes(write.envelope.len() as u64)))
+            .and_then(|bytes| bytes.checked_add(write.envelope.len()))
+            .ok_or(SyncStoreError::BatchByteLimit)?;
     }
-    if total_bytes > MAX_BATCH_BYTES {
+    if total_bytes > limits.max_batch_bytes {
         return Err(SyncStoreError::BatchByteLimit);
     }
     Ok(())
@@ -3184,4 +3193,99 @@ fn now_ms() -> Result<i64, SyncStoreError> {
         .map_err(|_| SyncStoreError::CorruptRow("system time"))?
         .as_millis();
     i64::try_from(millis).map_err(|_| SyncStoreError::SequenceExhausted)
+}
+
+#[cfg(test)]
+mod write_limit_tests {
+    use super::*;
+    use scoplen_api::sync::{SyncWrite, SyncWriteBatch, SyncWriteLimits};
+    use uuid::Uuid;
+
+    #[test]
+    fn store_encoded_budget_matches_the_public_codec_at_cbor_boundaries() {
+        let limits = SyncWriteLimits {
+            max_envelope_bytes: MAX_ENVELOPE_BYTES + 1,
+            max_batch_objects: 501,
+            max_batch_bytes: usize::MAX,
+        };
+        for size in [1, 23, 24, 255, 256, 65_535, 65_536, MAX_ENVELOPE_BYTES + 1] {
+            for base in [
+                None,
+                Some(1),
+                Some(23),
+                Some(24),
+                Some(255),
+                Some(256),
+                Some(65_535),
+                Some(65_536),
+                Some(u64::from(u32::MAX)),
+                Some(u64::from(u32::MAX) + 1),
+                Some(u64::MAX),
+            ] {
+                let object = Uuid::now_v7();
+                let write = ObjectWrite {
+                    object_id: object.into_bytes(),
+                    base_sequence: base,
+                    envelope: vec![1; size],
+                    key_epoch: 1,
+                    tombstone: false,
+                    signer_device_id: None,
+                };
+                let encoded = SyncWriteBatch {
+                    writes: vec![SyncWrite {
+                        object_id: object,
+                        base_seq: base,
+                        payload: write.envelope.clone(),
+                        tombstone: false,
+                    }],
+                }
+                .to_cbor_with_limits(limits)
+                .expect("public encoding");
+                let exact = SyncWriteLimits { max_batch_bytes: encoded.len(), ..limits };
+                validate_batch(std::slice::from_ref(&write), exact)
+                    .expect("exact complete request size");
+                assert!(matches!(
+                    validate_batch(
+                        std::slice::from_ref(&write),
+                        SyncWriteLimits { max_batch_bytes: encoded.len() - 1, ..limits }
+                    ),
+                    Err(SyncStoreError::BatchByteLimit)
+                ));
+            }
+        }
+        for count in [1, 23, 24, 255, 256, 500, 501] {
+            let batch = SyncWriteBatch {
+                writes: (0..count)
+                    .map(|_| SyncWrite {
+                        object_id: Uuid::now_v7(),
+                        base_seq: None,
+                        payload: vec![1],
+                        tombstone: true,
+                    })
+                    .collect(),
+            };
+            let encoded = batch.to_cbor_with_limits(limits).expect("public batch encoding");
+            let writes = batch
+                .writes
+                .into_iter()
+                .map(|write| ObjectWrite {
+                    object_id: write.object_id.into_bytes(),
+                    base_sequence: write.base_seq,
+                    envelope: write.payload,
+                    key_epoch: 1,
+                    tombstone: write.tombstone,
+                    signer_device_id: None,
+                })
+                .collect::<Vec<_>>();
+            validate_batch(&writes, SyncWriteLimits { max_batch_bytes: encoded.len(), ..limits })
+                .expect("exact array-header size");
+            assert!(matches!(
+                validate_batch(
+                    &writes,
+                    SyncWriteLimits { max_batch_bytes: encoded.len() - 1, ..limits }
+                ),
+                Err(SyncStoreError::BatchByteLimit)
+            ));
+        }
+    }
 }

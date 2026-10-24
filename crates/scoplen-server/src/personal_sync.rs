@@ -514,6 +514,7 @@ fn storage_unavailable() -> AuthFailure {
 
 #[cfg(test)]
 mod tests {
+    mod limits;
     use super::*;
     use std::{fmt::Write as _, net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -546,7 +547,7 @@ mod tests {
     #[cfg(feature = "postgres-integration")]
     use crate::runtime::api_router;
     use crate::runtime::{ListenerDatabase, api_router_with_limits};
-    use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
+    use scoplen_sync::http::{ReadBodyLimits, WriteBodyLimits, WriteRateLimits};
 
     const ORIGIN: &str = "https://example.com";
 
@@ -920,6 +921,7 @@ mod tests {
                     true,
                     WriteRateLimits::new(7, 9).expect("rate limits"),
                     WriteBodyLimits::new(266_240, 1, 4_194_304).expect("body limits"),
+                    ReadBodyLimits::default(),
                 )
                 .into_make_service_with_connect_info::<SocketAddr>(),
             )
@@ -1155,6 +1157,7 @@ mod tests {
             true,
             WriteRateLimits::new(1, 1).expect("rate limits"),
             WriteBodyLimits::new(266_240, 1, 4_194_304).expect("body limits"),
+            ReadBodyLimits::default(),
         );
         let server = tokio::spawn(async move {
             axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
@@ -1297,6 +1300,7 @@ mod tests {
             true,
             WriteRateLimits::default(),
             WriteBodyLimits::default(),
+            ReadBodyLimits::default(),
         );
         let server = tokio::spawn(async move {
             axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())

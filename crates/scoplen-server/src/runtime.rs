@@ -25,7 +25,7 @@ use scoplen_store::{
     DeploymentAuditCheckpoint, JobQueueError, ObjectStorage, PostgresStore, SqliteStore,
     sync::SyncStoreError,
 };
-use scoplen_sync::http::{WriteBodyLimits, WriteRateLimits};
+use scoplen_sync::http::{ReadBodyLimits, WriteBodyLimits, WriteRateLimits};
 use scoplen_sync::{notification_fanout::PostgresNotificationFanout, notify::NotificationHub};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
@@ -204,6 +204,7 @@ async fn prepare_roles_with_setup(
                 PostgresStore::connect_with_sync_limits(
                     &database_url,
                     config.sync.cardinality_limits(),
+                    config.sync.write_body_limits()?.codec_limits(),
                 )
                 .await?,
             ),
@@ -214,6 +215,7 @@ async fn prepare_roles_with_setup(
                 SqliteStore::open_with_sync_limits(
                     &config.server.data_dir.join("scoplen.sqlite"),
                     config.sync.cardinality_limits(),
+                    config.sync.write_body_limits()?.codec_limits(),
                 )
                 .await?,
             ),
@@ -828,10 +830,12 @@ pub(crate) fn api_router(
         enrollment_enabled,
         WriteRateLimits::default(),
         WriteBodyLimits::default(),
+        ReadBodyLimits::default(),
     )
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn api_router_with_limits(
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
@@ -840,6 +844,7 @@ pub(crate) fn api_router_with_limits(
     enrollment_enabled: bool,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
 ) -> Router {
     api_router_with_notifications(
         database,
@@ -849,6 +854,7 @@ pub(crate) fn api_router_with_limits(
         enrollment_enabled,
         write_rate_limits,
         write_body_limits,
+        read_body_limits,
         NotificationHub::default(),
     )
 }
@@ -862,6 +868,7 @@ pub(crate) fn api_router_with_notifications(
     enrollment_enabled: bool,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
     notifications: NotificationHub,
 ) -> Router {
     let enrollment_backend = match &database {
@@ -948,6 +955,7 @@ pub(crate) fn api_router_with_notifications(
                 notifications,
                 write_rate_limits,
                 write_body_limits,
+                read_body_limits,
             ))
     } else {
         router
@@ -966,6 +974,7 @@ async fn run_public_listener(
     let enrollment_enabled = roles.contains(&Role::Api);
     let write_rate_limits = config.sync.write_rate_limits()?;
     let write_body_limits = config.sync.write_body_limits()?;
+    let read_body_limits = config.sync.read_body_limits()?;
     let notifications = NotificationHub::default();
     let fanout = match &database {
         ListenerDatabase::Postgres(store) if enrollment_enabled => Some(
@@ -991,6 +1000,7 @@ async fn run_public_listener(
         enrollment_enabled,
         write_rate_limits,
         write_body_limits,
+        read_body_limits,
         notifications,
     )
     .merge(crate::console::router(&config.console.assets_dir, enrollment_enabled).await);
@@ -1437,6 +1447,7 @@ mod tests {
                     true,
                     WriteRateLimits::default(),
                     WriteBodyLimits::default(),
+                    ReadBodyLimits::default(),
                     server_notifications,
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),

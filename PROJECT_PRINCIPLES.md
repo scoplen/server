@@ -22,8 +22,12 @@ self-hosted server, host agent, administration CLI, and web console.
   leased job queue with worker lease cleanup exist. The API listener mounts the Personal K-4
   subset on SQLite or PostgreSQL with enrolled-device tokens, durable DPoP replay protection,
   current certificates, scopes, vault ownership, signed envelopes, and transaction-local write
-  authorization. Configured rate and body limits apply across connections. Personal notifications
-  now use D-75 GET/H2 CONNECT context/authentication/ready, durable JWT/DPoP admission, bounded
+  authorization. Configured rate limits apply across connections. Deployment-selected D-91 write
+  exchange limits apply consistently in HTTP and both stores, with exact encoded request
+  admission, complete ordered responses and a fixed conflict cap. Independent
+  D-93 read budgets can retain larger history after writes are lowered; forward migrations preserve
+  current/history rows and relational constraints while removing the fixed default envelope ceiling.
+  Personal notifications now use D-75 GET/H2 CONNECT context/authentication/ready, durable JWT/DPoP admission, bounded
   transport and current-state checks, expiry/revocation closure and the committed-write local hub.
   PostgreSQL now publishes transactional content-free hints through schema-scoped LISTEN/NOTIFY,
   with bounded local dispatch, current recipient authorization, supervised recovery and generation

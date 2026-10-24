@@ -3,6 +3,7 @@
 mod support;
 use support::remove_test_directory;
 
+use scoplen_api::sync::SyncWriteLimits;
 use sqlx::Row;
 use std::{
     path::PathBuf,
@@ -242,9 +243,10 @@ async fn postgres_shared_vault_concurrent_creation_enforces_quota_and_unique_id(
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let limits = SyncCardinalityLimits { max_shared_vaults_per_account: 1, ..Default::default() };
-    let store = PostgresStore::connect_with_sync_limits(&database_url, limits)
-        .await
-        .expect("open PostgreSQL with shared quota");
+    let store =
+        PostgresStore::connect_with_sync_limits(&database_url, limits, SyncWriteLimits::default())
+            .await
+            .expect("open PostgreSQL with shared quota");
     let account = uuid::Uuid::new_v4().into_bytes();
     let left = uuid::Uuid::new_v4().into_bytes();
     let right = uuid::Uuid::new_v4().into_bytes();
@@ -610,9 +612,10 @@ async fn postgres_shared_vault_member_quotas_serialize_competing_additions() {
         max_members_per_shared_vault: 2,
         ..Default::default()
     };
-    let store = PostgresStore::connect_with_sync_limits(&database_url, limits)
-        .await
-        .expect("open PostgreSQL with quotas");
+    let store =
+        PostgresStore::connect_with_sync_limits(&database_url, limits, SyncWriteLimits::default())
+            .await
+            .expect("open PostgreSQL with quotas");
     let vault = uuid::Uuid::new_v4().into_bytes();
     store
         .create_shared_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
@@ -1053,9 +1056,10 @@ async fn postgres_personal_sync_write_change_ack_round_trip() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let limits = SyncCardinalityLimits { max_objects_per_vault: 2, ..Default::default() };
-    let store = PostgresStore::connect_with_sync_limits(&database_url, limits)
-        .await
-        .expect("open PostgreSQL with custom limits");
+    let store =
+        PostgresStore::connect_with_sync_limits(&database_url, limits, SyncWriteLimits::default())
+            .await
+            .expect("open PostgreSQL with custom limits");
     assert_eq!(store.sync_cardinality_limits(), limits);
     let vault = uuid::Uuid::new_v4().into_bytes();
     let account = uuid::Uuid::new_v4().into_bytes();
@@ -2054,7 +2058,7 @@ async fn invalid_cardinality_limits_are_rejected_before_opening_sqlite() {
         },
     ] {
         assert!(matches!(
-            SqliteStore::open_with_sync_limits(&path, limits).await,
+            SqliteStore::open_with_sync_limits(&path, limits, SyncWriteLimits::default()).await,
             Err(StoreError::InvalidSyncLimits(_))
         ));
         assert!(!path.exists());
@@ -2071,9 +2075,13 @@ async fn lower_configured_cardinality_limits_reject_atomically_and_allow_updates
         max_shared_vaults_per_account: 1,
         max_members_per_shared_vault: 1,
     };
-    let store = SqliteStore::open_with_sync_limits(&directory.join("scoplen.sqlite"), limits)
-        .await
-        .expect("open limited store");
+    let store = SqliteStore::open_with_sync_limits(
+        &directory.join("scoplen.sqlite"),
+        limits,
+        SyncWriteLimits::default(),
+    )
+    .await
+    .expect("open limited store");
     assert_eq!(store.sync_cardinality_limits(), limits);
     let account = [61; 16];
     let vault = [62; 16];
@@ -2125,9 +2133,13 @@ async fn above_default_object_and_account_limits_are_enforced_at_configured_valu
         max_shared_vaults_per_account: MAX_SHARED_VAULTS_PER_ACCOUNT + 1,
         max_members_per_shared_vault: MAX_MEMBERS_PER_SHARED_VAULT,
     };
-    let store = SqliteStore::open_with_sync_limits(&directory.join("scoplen.sqlite"), limits)
-        .await
-        .expect("open raised-limit store");
+    let store = SqliteStore::open_with_sync_limits(
+        &directory.join("scoplen.sqlite"),
+        limits,
+        SyncWriteLimits::default(),
+    )
+    .await
+    .expect("open raised-limit store");
     let account = [65; 16];
     sqlx::query(
         "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM ids WHERE n < ?)

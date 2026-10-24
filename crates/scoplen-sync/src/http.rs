@@ -34,8 +34,8 @@ use scoplen_model::CURRENT_SCHEMA_VERSION;
 use scoplen_store::{PostgresStore, SqliteStore, account_keys as key_storage, sync as storage};
 use uuid::{Uuid, Variant};
 
-/// The hard protocol ceiling for write bodies. A deployment may enforce a lower limit on the
-/// write endpoint; other routes use their fixed K-4 bounds or this router ceiling.
+/// Default request-body budget. Object writes use their explicit deployment limit;
+/// other routes retain their independent K-4 bounds.
 pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
 
 /// Maximum size of the first WebSocket message handed to the notification authenticator.
@@ -95,7 +95,7 @@ impl Default for WriteRateLimits {
     }
 }
 
-/// Configurable write bounds within the current K-4 codec and SQLite storage ceilings.
+/// Positive, platform-representable deployment bounds for the complete K-4 write exchange.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriteBodyLimits {
@@ -109,32 +109,29 @@ impl WriteBodyLimits {
     ///
     /// # Errors
     ///
-    /// Returns the invalid setting when it is zero or exceeds the current codec or storage bound.
+    /// Returns an invalid setting for zero, platform overflow, or assignment-bound overflow.
     pub fn new(
         max_envelope_bytes: u64,
         max_batch_objects: u64,
         max_batch_bytes: u64,
     ) -> Result<Self, String> {
-        fn bounded(name: &str, value: u64, maximum: usize) -> Result<usize, String> {
-            if value == 0 || value > maximum as u64 {
-                return Err(format!("sync.{name} must be between 1 and {maximum}"));
+        fn bounded(name: &str, value: u64) -> Result<usize, String> {
+            if value == 0 {
+                return Err(format!("sync.{name} must be positive"));
             }
             usize::try_from(value).map_err(|_| format!("sync.{name} cannot fit this platform"))
         }
 
-        Ok(Self {
-            max_envelope_bytes: bounded(
-                "max_envelope_bytes",
-                max_envelope_bytes,
-                storage::MAX_ENVELOPE_BYTES,
-            )?,
-            max_batch_objects: bounded(
-                "max_batch_objects",
-                max_batch_objects,
-                storage::MAX_BATCH_OBJECTS,
-            )?,
-            max_batch_bytes: bounded("max_batch_bytes", max_batch_bytes, storage::MAX_BATCH_BYTES)?,
-        })
+        let limits = Self {
+            max_envelope_bytes: bounded("max_envelope_bytes", max_envelope_bytes)?,
+            max_batch_objects: bounded("max_batch_objects", max_batch_objects)?,
+            max_batch_bytes: bounded("max_batch_bytes", max_batch_bytes)?,
+        };
+        limits
+            .codec_limits()
+            .validate()
+            .map_err(|error| format!("sync.max_batch_objects: {error}"))?;
+        Ok(limits)
     }
 
     /// Maximum opaque envelope bytes in one object write.
@@ -154,6 +151,16 @@ impl WriteBodyLimits {
     pub fn max_batch_bytes(self) -> u64 {
         self.max_batch_bytes as u64
     }
+
+    /// Return the same validated limits for HTTP codecs and durable storage admission.
+    #[must_use]
+    pub fn codec_limits(self) -> api::SyncWriteLimits {
+        api::SyncWriteLimits {
+            max_envelope_bytes: self.max_envelope_bytes,
+            max_batch_objects: self.max_batch_objects,
+            max_batch_bytes: self.max_batch_bytes,
+        }
+    }
 }
 
 impl Default for WriteBodyLimits {
@@ -163,6 +170,48 @@ impl Default for WriteBodyLimits {
             max_batch_objects: storage::MAX_BATCH_OBJECTS,
             max_batch_bytes: storage::MAX_BATCH_BYTES,
         }
+    }
+}
+
+/// Independent local budgets for stored changes, snapshots and complete version history.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReadBodyLimits(api::SyncReadLimits);
+
+impl ReadBodyLimits {
+    /// Validate positive platform-representable budgets, including derived page arithmetic.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid setting for zero, platform overflow or derived page overflow.
+    pub fn new(max_envelope_bytes: u64, max_body_bytes: u64) -> Result<Self, String> {
+        for (name, value) in [
+            ("max_read_envelope_bytes", max_envelope_bytes),
+            ("max_read_body_bytes", max_body_bytes),
+        ] {
+            if value == 0 {
+                return Err(format!("sync.{name} must be positive"));
+            }
+        }
+        let limits = api::SyncReadLimits {
+            max_envelope_bytes: usize::try_from(max_envelope_bytes)
+                .map_err(|_| "sync.max_read_envelope_bytes cannot fit this platform".to_owned())?,
+            max_body_bytes: usize::try_from(max_body_bytes)
+                .map_err(|_| "sync.max_read_body_bytes cannot fit this platform".to_owned())?,
+        };
+        limits.validate().map_err(|error| format!("sync.max_read_envelope_bytes: {error}"))?;
+        Ok(Self(limits))
+    }
+
+    /// Maximum payload bytes selected independently of current write limits.
+    #[must_use]
+    pub fn max_envelope_bytes(self) -> u64 {
+        self.0.max_envelope_bytes as u64
+    }
+
+    /// Maximum complete encoded read-response bytes.
+    #[must_use]
+    pub fn max_body_bytes(self) -> u64 {
+        self.0.max_body_bytes as u64
     }
 }
 
@@ -652,6 +701,7 @@ pub fn personal_router<A: SyncAuthenticator>(
         authenticator,
         WriteRateLimits::default(),
         WriteBodyLimits::default(),
+        ReadBodyLimits::default(),
     )
 }
 
@@ -661,6 +711,7 @@ pub fn personal_router_with_limits<A: SyncAuthenticator>(
     authenticator: A,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
 ) -> Router {
     personal_router_with_notifications(
         store,
@@ -668,6 +719,7 @@ pub fn personal_router_with_limits<A: SyncAuthenticator>(
         NotificationHub::default(),
         write_rate_limits,
         write_body_limits,
+        read_body_limits,
     )
 }
 
@@ -678,6 +730,7 @@ pub fn personal_router_with_notifications<A: SyncAuthenticator>(
     notifications: NotificationHub,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
 ) -> Router {
     let state = SyncHttpState {
         store: store.into(),
@@ -685,6 +738,7 @@ pub fn personal_router_with_notifications<A: SyncAuthenticator>(
         notifications,
         write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
         write_body_limits,
+        read_body_limits,
     };
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
@@ -729,6 +783,7 @@ pub fn router_with_write_rate_limits<A: SyncAuthenticator>(
         notifications,
         write_rate_limits,
         WriteBodyLimits::default(),
+        ReadBodyLimits::default(),
     )
 }
 
@@ -742,6 +797,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
     notifications: NotificationHub,
     write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
 ) -> Router {
     let state = SyncHttpState {
         store: store.into(),
@@ -749,6 +805,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
         notifications,
         write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
         write_body_limits,
+        read_body_limits,
     };
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
@@ -776,6 +833,7 @@ struct SyncHttpState<A> {
     notifications: NotificationHub,
     write_rate_limiter: WriteRateLimiter,
     write_body_limits: WriteBodyLimits,
+    read_body_limits: ReadBodyLimits,
 }
 
 async fn session<A: SyncAuthenticator>(
@@ -1305,13 +1363,12 @@ async fn changes<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
-    response
-        .validate_for_query(&query)
-        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(
-        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
-    ))
+    Ok(cbor_response(ReadPage::Changes(response).encode_prefix(
+        &query,
+        state.read_body_limits.0,
+        &instance,
+    )?))
 }
 
 async fn snapshot<A: SyncAuthenticator>(
@@ -1337,13 +1394,110 @@ async fn snapshot<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
-    response
-        .validate_for_query(&query)
-        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(
-        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
-    ))
+    Ok(cbor_response(ReadPage::Snapshot(response).encode_prefix(
+        &query,
+        state.read_body_limits.0,
+        &instance,
+    )?))
+}
+
+enum ReadPage {
+    Changes(api::SyncChangesResponse),
+    Snapshot(api::SyncSnapshotResponse),
+}
+
+impl ReadPage {
+    fn entries(&self) -> &[api::SyncChange] {
+        match self {
+            Self::Changes(page) => &page.changes,
+            Self::Snapshot(page) => &page.objects,
+        }
+    }
+
+    fn entries_mut(&mut self) -> &mut Vec<api::SyncChange> {
+        match self {
+            Self::Changes(page) => &mut page.changes,
+            Self::Snapshot(page) => &mut page.objects,
+        }
+    }
+
+    fn mark_non_final(&mut self) {
+        let cursor = self.entries().last().expect("nonempty selected prefix").seq;
+        match self {
+            Self::Changes(page) => {
+                page.next_cursor = cursor;
+                page.more = true;
+            }
+            Self::Snapshot(page) => {
+                page.next_cursor = cursor;
+                page.more = true;
+            }
+        }
+    }
+
+    fn validate(
+        &self,
+        query: &api::SyncChangesQuery,
+        limits: api::SyncReadLimits,
+    ) -> Result<(), api::SyncCodecError> {
+        match self {
+            Self::Changes(page) => page.validate_for_query_with_limits(query, limits),
+            Self::Snapshot(page) => page.validate_for_query_with_limits(query, limits),
+        }
+    }
+
+    fn encode_prefix(
+        mut self,
+        query: &api::SyncChangesQuery,
+        limits: api::SyncReadLimits,
+        instance: &str,
+    ) -> SyncResult<Vec<u8>> {
+        // Validate the entire source page before truncating, so a budget cannot conceal invalid
+        // ordering, duplicate objects, or a bad cursor in the omitted tail.
+        self.validate(
+            query,
+            api::SyncReadLimits {
+                max_envelope_bytes: self
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.payload.len())
+                    .max()
+                    .unwrap_or(1)
+                    .max(1),
+                max_body_bytes: usize::MAX,
+            },
+        )
+        .map_err(|_| SyncHttpError::invalid_stored_response(instance))?;
+        if self.validate(query, limits).is_err() {
+            let mut low = 0;
+            let mut high = self.entries().len().saturating_sub(1);
+            // Shared codecs check exact CBOR sizes without encoding or copying payloads. Move
+            // only entry metadata while selecting the longest eligible prefix of this page.
+            while low < high {
+                let count = low + (high - low).div_ceil(2);
+                let mut tail = self.entries_mut().split_off(count);
+                self.mark_non_final();
+                let fits = self.validate(query, limits).is_ok();
+                self.entries_mut().append(&mut tail);
+                if fits {
+                    low = count;
+                } else {
+                    high = count - 1;
+                }
+            }
+            if low == 0 {
+                return Err(SyncHttpError::invalid_stored_response(instance));
+            }
+            self.entries_mut().truncate(low);
+            self.mark_non_final();
+        }
+        let encoded = match self {
+            Self::Changes(page) => page.to_cbor_with_limits(limits),
+            Self::Snapshot(page) => page.to_cbor_with_limits(limits),
+        };
+        encoded.map_err(|_| SyncHttpError::invalid_stored_response(instance))
+    }
 }
 
 async fn versions<A: SyncAuthenticator>(
@@ -1367,11 +1521,13 @@ async fn versions<A: SyncAuthenticator>(
     let response =
         api::SyncVersionsResponse { versions: versions.into_iter().map(change_to_api).collect() };
     response
-        .validate_for_object(Uuid::from_bytes(object))
+        .validate_for_object_with_limits(Uuid::from_bytes(object), state.read_body_limits.0)
         .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
     Ok(cbor_response(
-        response.to_cbor().map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+        response
+            .to_cbor_with_limits(state.read_body_limits.0)
+            .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
     ))
 }
 
@@ -1416,10 +1572,8 @@ async fn objects<A: SyncAuthenticator>(
             format!("write batch exceeds {} bytes", state.write_body_limits.max_batch_bytes),
         )
     })?;
-    let batch = api::SyncWriteBatch::from_cbor(&body).map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("invalid write batch: {error}"))
-    })?;
-    validate_write_body_limits(&batch, state.write_body_limits, &instance)?;
+    let limits = state.write_body_limits.codec_limits();
+    let batch = decode_write_batch(&body, limits, &instance)?;
     let key_epochs = state
         .authenticator
         .validate_write(identity, vault, &batch.writes)
@@ -1449,11 +1603,12 @@ async fn objects<A: SyncAuthenticator>(
             signer_device_id: Some(identity.device_id),
         })
         .collect::<Vec<_>>();
-    let receipts = state
-        .authenticator
-        .commit_write(identity, vault, &writes, &state.store)
-        .await
-        .map_err(|error| SyncHttpError::from_store(error, &instance))?;
+    let receipts =
+        state
+            .authenticator
+            .commit_write(identity, vault, &writes, &state.store)
+            .await
+            .map_err(|error| SyncHttpError::from_write_store(error, &batch, limits, &instance))?;
     let response = api::SyncWriteBatchResponse {
         assignments: receipts
             .into_iter()
@@ -1463,41 +1618,43 @@ async fn objects<A: SyncAuthenticator>(
             })
             .collect(),
     };
-    response.validate_for_batch(&batch).map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("invalid write assignment: {error}"))
-    })?;
-    let response_body = response.to_cbor().map_err(|error| {
-        SyncHttpError::invalid(&instance, format!("could not encode write assignment: {error}"))
-    })?;
+    let response_body = response.validate_for_batch_with_limits(&batch, limits)
+        .and_then(|()| response.to_cbor_with_limits(limits))
+        .map_err(|_| SyncHttpError::known(
+            &instance, StatusCode::SERVICE_UNAVAILABLE, "sync.storage_unavailable",
+            "Sync response unavailable",
+            "The write committed but its complete receipt is unavailable; data changed, reconcile the vault before another write and do not automatically retry this batch.",
+            true, false,
+        ))?;
     if let Some(seq) = response.assignments.iter().map(|assignment| assignment.seq).max() {
         publish_vault_advanced(&state, vault, seq).await;
     }
     Ok(cbor_response(response_body))
 }
 
-fn validate_write_body_limits(
-    batch: &api::SyncWriteBatch,
-    limits: WriteBodyLimits,
+fn decode_write_batch(
+    body: &[u8],
+    limits: api::SyncWriteLimits,
     instance: &str,
-) -> SyncResult<()> {
-    if batch.writes.len() > limits.max_batch_objects {
-        return Err(SyncHttpError::too_large(
-            instance,
-            format!("write batch exceeds {} objects", limits.max_batch_objects),
-        ));
+) -> SyncResult<api::SyncWriteBatch> {
+    let batch =
+        api::SyncWriteBatch::from_cbor_with_limits(body, limits).map_err(|error| match &error {
+            api::SyncCodecError::Invalid(reason)
+                if matches!(
+                    reason.as_str(),
+                    "write batch exceeds the object limit"
+                        | "write payload exceeds the envelope limit"
+                        | "write batch exceeds the encoded-body limit"
+                ) =>
+            {
+                SyncHttpError::too_large(instance, format!("invalid write batch: {error}"))
+            }
+            _ => SyncHttpError::invalid(instance, format!("invalid write batch: {error}")),
+        })?;
+    if batch.writes.iter().any(|write| write.payload.is_empty()) {
+        return Err(SyncHttpError::invalid(instance, "write envelope must not be empty"));
     }
-    for write in &batch.writes {
-        if write.payload.is_empty() {
-            return Err(SyncHttpError::invalid(instance, "write envelope must not be empty"));
-        }
-        if write.payload.len() > limits.max_envelope_bytes {
-            return Err(SyncHttpError::too_large(
-                instance,
-                format!("write envelope exceeds {} bytes", limits.max_envelope_bytes),
-            ));
-        }
-    }
-    Ok(())
+    Ok(batch)
 }
 
 async fn publish_vault_advanced<A: SyncAuthenticator>(
@@ -1828,7 +1985,7 @@ impl SyncHttpError {
                     false,
                     true,
                 );
-                problem.with_conflicts(&conflicts)
+                problem.with_conflicts(conflicts, None, api::SyncWriteLimits::default())
             }
             storage::SyncStoreError::QuotaExceeded(_) => Self::known(
                 instance,
@@ -2058,18 +2215,49 @@ impl SyncHttpError {
         Box::new(Self { status, problem, body: None, retry_after: None })
     }
 
-    fn with_conflicts(mut self: Box<Self>, conflicts: &[storage::ConflictEntry]) -> Box<Self> {
+    fn from_write_store(
+        error: storage::SyncStoreError,
+        batch: &api::SyncWriteBatch,
+        limits: api::SyncWriteLimits,
+        instance: &str,
+    ) -> Box<Self> {
+        match error {
+            storage::SyncStoreError::Conflict { conflicts } => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Sync write conflict",
+                "One or more objects changed; no data changed and merge the returned current versions before retrying.",
+                false,
+                true,
+            ).with_conflicts(conflicts, Some(batch), limits),
+            error => Self::from_store(error, instance),
+        }
+    }
+
+    fn with_conflicts(
+        mut self: Box<Self>,
+        conflicts: Vec<storage::ConflictEntry>,
+        batch: Option<&api::SyncWriteBatch>,
+        limits: api::SyncWriteLimits,
+    ) -> Box<Self> {
         let response = api::SyncConflictProblem {
             problem: self.problem.clone(),
             conflicts: conflicts
-                .iter()
+                .into_iter()
                 .map(|conflict| api::SyncConflictEntry {
                     object_id: Uuid::from_bytes(conflict.object_id),
-                    current: conflict.current.clone().map(change_to_api),
+                    current: conflict.current.map(change_to_api),
                 })
                 .collect(),
         };
-        match response.to_cbor() {
+        let body = batch
+            .map_or_else(
+                || response.validate_with_limits(limits),
+                |batch| response.validate_for_batch_with_limits(batch, limits),
+            )
+            .and_then(|()| response.to_cbor_with_limits(limits));
+        match body {
             Ok(body) => {
                 self.body = Some(body);
                 self
@@ -2108,6 +2296,7 @@ impl IntoResponse for Box<SyncHttpError> {
 
 #[cfg(test)]
 mod tests {
+    mod limits;
     use std::sync::{
         Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
@@ -2141,6 +2330,7 @@ mod tests {
         notification_check_stalled: Arc<AtomicBool>,
         /// Test-only stand-in for the crypto and membership validator injected in production.
         reject_writes: bool,
+        truncate_write_receipts: Option<usize>,
         expected_key_signature: Option<Arc<AtomicU8>>,
         seen_requests: Arc<Mutex<Vec<(String, String)>>>,
     }
@@ -2156,6 +2346,7 @@ mod tests {
                 notification_auth_blocks: false,
                 notification_check_stalled: Arc::default(),
                 reject_writes: false,
+                truncate_write_receipts: None,
                 expected_key_signature: None,
                 seen_requests: Arc::new(Mutex::new(Vec::new())),
             }
@@ -2251,6 +2442,20 @@ mod tests {
             } else {
                 Ok(vec![1; writes.len()])
             }
+        }
+
+        async fn commit_write(
+            &self,
+            _identity: AuthenticatedDevice,
+            vault: storage::VaultId,
+            writes: &[storage::ObjectWrite],
+            store: &SyncBackend,
+        ) -> Result<Vec<storage::WriteReceipt>, storage::SyncStoreError> {
+            let mut receipts = store.write_sync_batch(vault, writes).await?;
+            if let Some(count) = self.truncate_write_receipts {
+                receipts.truncate(count);
+            }
+            Ok(receipts)
         }
 
         async fn account_id(
@@ -2610,7 +2815,7 @@ mod tests {
     }
 
     #[test]
-    fn write_body_limits_reject_zero_and_codec_excess() {
+    fn write_body_limits_reject_zero_and_overflow_and_allow_raised_limits() {
         let minimum = WriteBodyLimits::new(1, 1, 1).expect("positive minimum");
         assert_eq!(minimum.max_envelope_bytes(), 1);
         assert_eq!(minimum.max_batch_objects(), 1);
@@ -2623,9 +2828,7 @@ mod tests {
             ("max_envelope_bytes", [0, 1, 1]),
             ("max_batch_objects", [1, 0, 1]),
             ("max_batch_bytes", [1, 1, 0]),
-            ("max_envelope_bytes", [storage::MAX_ENVELOPE_BYTES as u64 + 1, 1, 1]),
-            ("max_batch_objects", [1, storage::MAX_BATCH_OBJECTS as u64 + 1, 1]),
-            ("max_batch_bytes", [1, 1, storage::MAX_BATCH_BYTES as u64 + 1]),
+            ("max_batch_objects", [1, u64::MAX, 1]),
         ] {
             assert!(
                 WriteBodyLimits::new(values[0], values[1], values[2])
@@ -2633,6 +2836,25 @@ mod tests {
                     .contains(name)
             );
         }
+        let raised = WriteBodyLimits::new(
+            storage::MAX_ENVELOPE_BYTES as u64 + 1,
+            storage::MAX_BATCH_OBJECTS as u64 + 1,
+            storage::MAX_BATCH_BYTES as u64 + 1,
+        )
+        .expect("positive raised deployment limits");
+        assert_eq!(raised.max_batch_objects(), 501);
+    }
+
+    #[test]
+    fn read_body_limits_are_independent_positive_and_checked() {
+        let defaults = ReadBodyLimits::default();
+        assert_eq!(defaults.max_envelope_bytes(), 266_240);
+        assert_eq!(defaults.max_body_bytes(), 266_295_039);
+        assert!(ReadBodyLimits::new(0, 1).is_err());
+        assert!(ReadBodyLimits::new(1, 0).is_err());
+        assert!(ReadBodyLimits::new(u64::MAX, 1).is_err());
+        assert!(ReadBodyLimits::new(300_000, 1).is_ok());
+        assert!(ReadBodyLimits::new(1, usize::MAX as u64).is_ok());
     }
 
     #[tokio::test]
@@ -2653,6 +2875,7 @@ mod tests {
             NotificationHub::default(),
             WriteRateLimits::default(),
             limits,
+            ReadBodyLimits::default(),
         );
 
         let session_body = api::SyncSessionRequest {
@@ -2732,6 +2955,7 @@ mod tests {
             NotificationHub::default(),
             WriteRateLimits::default(),
             exact_limits,
+            ReadBodyLimits::default(),
         );
         let exact_batch = SyncWriteBatch { writes: vec![write(vec![1, 2])] };
         assert_eq!(exact_batch.to_cbor().expect("exact batch").len(), exact_bytes);
@@ -3013,7 +3237,9 @@ mod tests {
             max_members_per_shared_vault: 2,
         };
         let store = Arc::new(
-            SqliteStore::open_with_sync_limits(&path, limits).await.expect("open limited store"),
+            SqliteStore::open_with_sync_limits(&path, limits, api::SyncWriteLimits::default())
+                .await
+                .expect("open limited store"),
         );
         let device = Uuid::now_v7();
         let app = router(store.clone(), TestAuthenticator::new(device.into_bytes(), true));
