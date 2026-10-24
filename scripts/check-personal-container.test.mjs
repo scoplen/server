@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   mkdtemp,
@@ -16,6 +17,7 @@ import {
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
+  describeCheckFailure,
   describeImageBuildFailure,
 } from "./check-personal-container.mjs";
 
@@ -65,6 +67,102 @@ test("build failures expose only fixed categories, stage names and bounded exit 
   );
 });
 
+test("post-build failures expose fixed phases, reasons and bounded metadata only", () => {
+  const secret = "synthetic-private-value";
+  const error = new Error(secret, {
+    cause: { code: 7, signal: secret, message: secret, stdout: secret },
+  });
+  for (const phase of [
+    "production image metadata",
+    "image data-directory validation",
+    "probe image pull",
+    "TLS fixture preparation",
+  ]) {
+    const description = describeCheckFailure({ phase, error });
+    assert.equal(description.phase, phase);
+    assert.equal(description.category, "command");
+    assert.equal(description.exitCode, 7);
+    assert.equal(description.signal, null);
+    assert(!JSON.stringify(description).includes(secret));
+  }
+  assert.deepEqual(
+    describeCheckFailure({ phase: secret, error: { code: secret } }),
+    {
+      phase: "unknown",
+      category: "operation",
+      reason: null,
+      ioCode: null,
+      exitCode: null,
+      signal: null,
+    },
+  );
+  for (const code of ["ENOSPC", "EDQUOT", "EACCES", "EPERM"]) {
+    const description = describeCheckFailure({
+      phase: "production image build",
+      error: { code, message: secret },
+      diagnosticWrite: true,
+    });
+    assert.equal(description.category, "private-diagnostic-write");
+    assert.equal(description.ioCode, code);
+    assert(!JSON.stringify(description).includes(secret));
+  }
+});
+
+test("a real private diagnostic write failure reports its phase without path or output disclosure", async () => {
+  const parent = await realpath(tmpdir());
+  const run = randomUUID();
+  const directory = await realpath(
+    await mkdtemp(join(parent, `scoplen-personal-container-${run}-`)),
+  );
+  try {
+    await writeFile(join(directory, ".container-check-owner"), run, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const secret = "synthetic-private-value";
+    const result = await new Promise((accept) => {
+      execFile(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `
+        const { writePrivateDiagnostic } = await import(process.env.SCOPLEN_TEST_MODULE);
+        try {
+          await writePrivateDiagnostic(process.env.SCOPLEN_TEST_PATH, process.env.SCOPLEN_TEST_SECRET, "production image build");
+        } catch { process.exitCode = 1; }
+      `,
+        ],
+        {
+          env: {
+            ...process.env,
+            SCOPLEN_TEST_MODULE: new URL(
+              "./check-personal-container.mjs",
+              import.meta.url,
+            ).href,
+            SCOPLEN_TEST_PATH: join(directory, "absent", secret),
+            SCOPLEN_TEST_SECRET: secret,
+          },
+        },
+        (error, stdout, stderr) => accept({ error, stdout, stderr }),
+      );
+    });
+    assert.equal(result.error?.code, 1);
+    assert.equal(result.stdout, "");
+    assert(!result.stderr.includes(secret));
+    assert(!result.stderr.includes(directory));
+    const description = JSON.parse(
+      result.stderr.trim().replace(/^Personal container check failure: /, ""),
+    );
+    assert.equal(description.phase, "production image build");
+    assert.equal(description.category, "private-diagnostic-write");
+    assert.equal(description.ioCode, "ENOENT");
+  } finally {
+    await assertOwnedFixture(directory, parent, run);
+    await rm(directory, { recursive: true });
+  }
+});
+
 test("cleanup refuses foreign Docker ownership even inside the expected Compose project", () => {
   const labels = {
     "com.scoplen.personal-container-check": "current",
@@ -87,10 +185,33 @@ test("actual image-directory metadata must prove private non-root ownership", ()
   assertPrivateDirectoryArchive(archive);
   const publicMode = Buffer.from(archive);
   publicMode.write("0000755", 100);
-  assert.throws(() => assertPrivateDirectoryArchive(publicMode));
+  assert.throws(
+    () => assertPrivateDirectoryArchive(publicMode),
+    (error) => {
+      const description = describeCheckFailure({
+        phase: "image data-directory validation",
+        error,
+      });
+      assert.equal(description.category, "validation");
+      assert.equal(description.reason, "directory-mode");
+      return true;
+    },
+  );
   const rootOwned = Buffer.from(archive);
   rootOwned.write("0000000", 108);
-  assert.throws(() => assertPrivateDirectoryArchive(rootOwned));
+  assert.throws(
+    () => assertPrivateDirectoryArchive(rootOwned),
+    (error) => {
+      assert.equal(
+        describeCheckFailure({
+          phase: "image data-directory validation",
+          error,
+        }).reason,
+        "directory-owner",
+      );
+      return true;
+    },
+  );
   const specialBits = Buffer.from(archive);
   specialBits.write("0001700", 100);
   assert.throws(() => assertPrivateDirectoryArchive(specialBits));
