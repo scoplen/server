@@ -21,8 +21,9 @@ use scoplen_model::CURRENT_SCHEMA_VERSION;
 use scoplen_store::{PostgresStore, RelationalStore, account_keys as keys, sync as storage};
 use scoplen_sync::{
     http::{
-        AuthFailure, AuthenticatedDevice, AuthenticatedNotification, MAX_REQUEST_BYTES,
-        SyncAuthenticator, SyncKeysOperation, SyncOperation, router_with_notifications,
+        AuthFailure, AuthenticatedDevice, AuthenticatedNotification, KeyUpdateError,
+        MAX_REQUEST_BYTES, SyncAuthenticator, SyncBackend, SyncKeysOperation, SyncOperation,
+        router_with_notifications,
     },
     notify::NotificationHub,
 };
@@ -57,6 +58,17 @@ impl TestAuthenticator {
 
 #[async_trait::async_trait]
 impl SyncAuthenticator for TestAuthenticator {
+    type KeyUpdateAuthorization = ();
+
+    async fn authenticate_key_update(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(AuthenticatedDevice, ()), AuthFailure> {
+        self.authenticate(method, uri, headers).await.map(|identity| (identity, ()))
+    }
+
     async fn authenticate(
         &self,
         method: &Method,
@@ -127,13 +139,21 @@ impl SyncAuthenticator for TestAuthenticator {
         Ok(())
     }
 
-    async fn validate_key_bundle_update(
+    async fn commit_key_update(
         &self,
         _identity: AuthenticatedDevice,
-        _account_id: keys::AccountId,
-        _update: &api::SyncAccountKeyBundleUpdate,
-    ) -> Result<(), AuthFailure> {
-        Ok(())
+        account_id: keys::AccountId,
+        _authorization: &(),
+        update: &api::SyncAccountKeyBundleUpdate,
+        store: &SyncBackend,
+    ) -> Result<keys::AccountKeyBundlePut, KeyUpdateError> {
+        let stored = keys::AccountKeyBundleUpdate::try_from(update)?;
+        Ok(match store {
+            SyncBackend::Sqlite(store) => store.put_account_key_bundle(account_id, &stored).await?,
+            SyncBackend::Postgres(store) => {
+                store.put_account_key_bundle(account_id, &stored).await?
+            }
+        })
     }
 
     async fn authorize_notifications(

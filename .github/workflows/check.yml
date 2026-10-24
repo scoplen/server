@@ -122,6 +122,8 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::account_profile::postgres_
       - name: Check PostgreSQL complete device statements, denials and consistency
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::account_devices::postgres_
+      - name: Check PostgreSQL real TLS account-key publication, expiry and uncertain commits
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::key_publication::postgres_
       - name: Check PostgreSQL pairing HTTP, admission and uncertain commits
         run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::pairing::postgres_
       - name: Check PostgreSQL real TLS notification authentication and lifecycle

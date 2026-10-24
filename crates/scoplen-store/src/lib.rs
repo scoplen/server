@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_devices;
+pub mod account_key_publication;
 pub mod account_keys;
 pub mod account_profile;
 pub mod audit;

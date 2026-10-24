@@ -298,6 +298,7 @@ pub struct CurrentPrincipal {
     pub device_id: [u8; 16],
     pub signing_public_key: Vec<u8>,
     pub jkt: String,
+    pub certificate: Vec<u8>,
 }
 
 struct RefreshFamily {
@@ -440,6 +441,7 @@ fn verify_current_principal(
         device_id,
         signing_public_key: certificate.signing_public_key,
         jkt,
+        certificate: certificate_bytes.to_vec(),
     })
 }
 
