@@ -419,40 +419,28 @@ fn validate_refresh_credential(token: &str) -> Result<[u8; 32], DeviceAuthentica
     Ok(Sha256::digest(token.as_bytes()).into())
 }
 
-fn verify_current_principal(
+// Admission and complete revocation checks remain the caller's responsibility.
+pub(crate) fn verify_current_certificate(
     account_id: Vec<u8>,
     device_id: [u8; 16],
-    account_signing_public_key: Vec<u8>,
+    account_signing_public_key: &[u8; 32],
     certificate_bytes: &[u8],
     certificate_published: bool,
-    revocations: Vec<Vec<u8>>,
 ) -> Result<CurrentPrincipal, DeviceAuthenticationError> {
     let account_id: [u8; 16] =
         account_id.try_into().map_err(|_| DeviceAuthenticationError::Database)?;
-    let account_signing_public_key: [u8; 32] =
-        account_signing_public_key.try_into().map_err(|_| DeviceAuthenticationError::Database)?;
     if !certificate_published {
         return Err(DeviceAuthenticationError::Denied { changed: false });
     }
     let certificate = DeviceCertificate::decode(certificate_bytes)
         .map_err(|_| DeviceAuthenticationError::Database)?;
     certificate
-        .verify(&account_signing_public_key)
+        .verify(account_signing_public_key)
         .map_err(|_| DeviceAuthenticationError::Database)?;
     if certificate.account_id.into_bytes() != account_id
         || certificate.device_id.into_bytes() != device_id
     {
         return Err(DeviceAuthenticationError::Database);
-    }
-    for bytes in revocations {
-        let statement =
-            RevocationStatement::decode(&bytes).map_err(|_| DeviceAuthenticationError::Database)?;
-        statement
-            .verify(&account_signing_public_key)
-            .map_err(|_| DeviceAuthenticationError::Database)?;
-        if statement.device_id.into_bytes() == device_id {
-            return Err(DeviceAuthenticationError::Denied { changed: false });
-        }
     }
     let jkt = dpop_jwk_thumbprint(&certificate.signing_public_key)
         .map_err(|_| DeviceAuthenticationError::Database)?;
@@ -463,6 +451,36 @@ fn verify_current_principal(
         jkt,
         certificate: certificate_bytes.to_vec(),
     })
+}
+
+fn verify_current_principal(
+    account_id: Vec<u8>,
+    device_id: [u8; 16],
+    account_signing_public_key: Vec<u8>,
+    certificate_bytes: &[u8],
+    certificate_published: bool,
+    revocations: Vec<Vec<u8>>,
+) -> Result<CurrentPrincipal, DeviceAuthenticationError> {
+    let account_signing_public_key: [u8; 32] =
+        account_signing_public_key.try_into().map_err(|_| DeviceAuthenticationError::Database)?;
+    let principal = verify_current_certificate(
+        account_id,
+        device_id,
+        &account_signing_public_key,
+        certificate_bytes,
+        certificate_published,
+    )?;
+    for bytes in revocations {
+        let statement =
+            RevocationStatement::decode(&bytes).map_err(|_| DeviceAuthenticationError::Database)?;
+        statement
+            .verify(&account_signing_public_key)
+            .map_err(|_| DeviceAuthenticationError::Database)?;
+        if statement.device_id.into_bytes() == device_id {
+            return Err(DeviceAuthenticationError::Denied { changed: false });
+        }
+    }
+    Ok(principal)
 }
 
 fn verify_device_signature(

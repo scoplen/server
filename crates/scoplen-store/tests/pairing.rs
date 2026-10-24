@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "pairing/retention.rs"]
+mod retention;
+
 use std::net::IpAddr;
 
 use scoplen_api::{
@@ -117,8 +120,9 @@ fn principal(request: &PersonalEnrollmentRequest) -> CurrentPrincipal {
 fn completion(
     context: &PairingContext,
     request: &PersonalEnrollmentRequest,
+    key: u8,
 ) -> PairingCompleteRequest {
-    let cert = certificate(request.account_id, context.responder_device_id, 3)
+    let cert = certificate(request.account_id, context.responder_device_id, key)
         .encode()
         .expect("new certificate");
     let mut update = request.key_bundle_update.clone();
@@ -141,7 +145,7 @@ fn completion(
     let signature =
         PairingCompletionContext::new(&context, request.account_id, &[2; 41], &cert, &update)
             .expect("completion context")
-            .sign(&device_key(3))
+            .sign(&device_key(key))
             .expect("acceptance");
     PairingCompleteRequest {
         device_certificate: cert,
@@ -174,11 +178,19 @@ macro_rules! pairing_tests {
             }
 
             async fn ready_with_device_id(store:&$store,request:&PersonalEnrollmentRequest,device_id:Uuid)->(PairingContext,[u8;32],PairingCompleteRequest) {
+                ready_with_device_id_and_key(store,request,device_id,3).await
+            }
+
+            pub(super) async fn ready_with_key(store:&$store,request:&PersonalEnrollmentRequest,key:u8)->(PairingContext,[u8;32],PairingCompleteRequest) {
+                ready_with_device_id_and_key(store,request,Uuid::now_v7(),key).await
+            }
+
+            async fn ready_with_device_id_and_key(store:&$store,request:&PersonalEnrollmentRequest,device_id:Uuid,key:u8)->(PairingContext,[u8;32],PairingCompleteRequest) {
                 let created=store.create_pairing(ORIGIN,&PairingCreateRequest {device_id},source()).await.expect("create");
                 let token=*created.new_device_token.as_bytes();
                 let principal=principal(request);
                 let context=store.claim_pairing(ORIGIN,created.context.pairing_id,&principal,source()).await.expect("claim").context;
-                let completion=completion(&context,request);
+                let completion=completion(&context,request,key);
                 for step in PairingStep::ALL {
                     let payload=match step {PairingStep::NewDevice=>vec![1;41],PairingStep::Handoff=>vec![2;41],
                         PairingStep::Acceptance=>completion.new_device_signature.to_vec(),_=>vec![3;32]};

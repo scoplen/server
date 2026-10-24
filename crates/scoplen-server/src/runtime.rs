@@ -652,7 +652,7 @@ const RETENTION_RETRY_MS: i64 = 60_000;
 const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
-trait WorkerStoreBackend: Send + Sync {
+pub(crate) trait WorkerStoreBackend: Send + Sync {
     fn requeue_expired_jobs(
         &self,
         now_ms: i64,
@@ -679,10 +679,9 @@ trait WorkerStoreBackend: Send + Sync {
         now_ms: i64,
         lease_ms: i64,
     ) -> impl Future<Output = Result<Option<scoplen_store::Job>, JobQueueError>> + Send;
-    fn purge_sync_history(
+    fn purge_sync_history_for_worker(
         &self,
         vault_id: [u8; 16],
-        acknowledged_through: Option<u64>,
         now_ms: i64,
     ) -> impl Future<Output = Result<scoplen_store::sync::PurgeReport, SyncStoreError>> + Send;
     fn complete_job(
@@ -772,13 +771,12 @@ macro_rules! impl_worker_store_backend {
                 <$store>::claim_job_kind(self, kind, owner, now_ms, lease_ms)
             }
 
-            fn purge_sync_history(
+            fn purge_sync_history_for_worker(
                 &self,
                 vault_id: [u8; 16],
-                acknowledged_through: Option<u64>,
                 now_ms: i64,
             ) -> impl Future<Output = Result<scoplen_store::sync::PurgeReport, SyncStoreError>> + Send {
-                <$store>::purge_sync_history(self, vault_id, acknowledged_through, now_ms)
+                <$store>::purge_sync_history_for_worker(self, vault_id, now_ms)
             }
 
             fn complete_job(
@@ -918,7 +916,7 @@ async fn worker_retention_pass<S: WorkerStoreBackend>(
     worker_retention_pass_at(store, now).await
 }
 
-async fn worker_retention_pass_at<S: WorkerStoreBackend>(
+pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
     store: &S,
     now: i64,
 ) -> Result<(u64, u64), ServerError> {
@@ -963,7 +961,7 @@ async fn worker_retention_pass_at<S: WorkerStoreBackend>(
             .payload
             .as_slice()
             .try_into()
-            .map(|vault_id| store.purge_sync_history(vault_id, None, now));
+            .map(|vault_id| store.purge_sync_history_for_worker(vault_id, now));
         let result = match result {
             Ok(purge) => purge.await,
             Err(_) => Err(SyncStoreError::CorruptRow("retention payload")),
@@ -2962,7 +2960,7 @@ mod tests {
             (count - 1, count),
             "all pages are scheduled and existing jobs remain deduplicated"
         );
-        let report = store.purge_sync_history(vault, None, now).await.expect("already purged");
+        let report = store.purge_sync_history_for_worker(vault, now).await.expect("already purged");
         assert_eq!(report.purged_tombstones, 0, "worker must have purged the later page");
         assert_eq!(report.purge_horizon, 1);
     }

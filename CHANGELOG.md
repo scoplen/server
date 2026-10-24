@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Connected worker retention to transaction-current Personal device acknowledgements on SQLite
+  and PostgreSQL. Complete signed certificate/revocation verification, current admission checks,
+  ACK reads and tombstone/history deletion share one transaction. Missing ACKs count as zero;
+  inactive or missing unrevoked identities, empty sets and unsupported membership retain the
+  180-day policy. Corrupt statements or ACKs fail without partial deletion. Account-before-vault
+  locking serializes with pairing, account-key publication and authenticated ACKs. Shared and
+  organization device membership remains separate work.
+
 - Added a private, stable deployment lease for server and local `splctl` state access. Running
   processes hold shared admission; offline operations require exclusive admission. Shutdown first
   fences notification streams and drains role tasks and pools for up to 10 seconds. A timed-out

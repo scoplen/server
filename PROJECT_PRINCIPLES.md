@@ -27,7 +27,7 @@ self-hosted server, host agent, administration CLI, and web console.
 
 - ACME TLS-ALPN-01 issuance and renewal are integrated; live CA issuance and renewal have not been
   verified against an external authority.
-- SQLite migrations, transactions, sync storage, an atomic retention primitive, and a durable
+- SQLite migrations, transactions, sync storage, atomic Personal retention, and a durable
   leased job queue with worker lease cleanup exist. The API listener mounts the Personal K-4
   subset on SQLite or PostgreSQL with enrolled-device tokens, durable DPoP replay protection,
   current certificates, scopes, vault ownership, signed envelopes, and transaction-local write
@@ -71,9 +71,15 @@ self-hosted server, host agent, administration CLI, and web console.
   requests through the generated public API contract. Its proof key and access token stay in
   memory; reloads require a new login. Manifest-validated static assets fail independently of
   API readiness. Physical passkey/browser interoperability, remaining console administration,
-  complete identity and policy workflows, membership-aware purge scheduling,
+  complete identity and policy workflows, Shared/organization membership-aware purging,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker
   can use the PostgreSQL query backend; API and edge can start with PostgreSQL and check readiness.
+  Personal worker retention verifies complete signed statements and current identities before
+  reading every device's ACK and deleting tombstones in one transaction. Missing ACKs count as
+  zero; incomplete/empty admission state keeps the 180-day policy. Corrupt identity or ACK state
+  fails without partial deletion. SQLite takes the writer lock before reading membership;
+  PostgreSQL takes the shared account-key and identity locks before locking the vault, so pairing,
+  key publication, ACKs and retention keep a consistent order.
 - A source-built Personal Compose entry bundles the console, uses externally provisioned HTTPS
   certificates, and retains SQLite and keys in a private volume under a non-root distroless
   runtime. Its public-API container check covers setup, fresh software-passkey login, invitation
