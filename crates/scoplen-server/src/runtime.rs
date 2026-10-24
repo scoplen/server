@@ -3036,22 +3036,34 @@ mod tests {
                 .await
                 .expect("seed vault");
         }
-        // Every scheduled id appends a larger id, so an unfenced sweep cannot exhaust the source.
-        sqlx::query(
+        // Appends prevent exhaustion; the trigger rejects an unfenced sweep without a time budget.
+        sqlx::query(&format!(
             "CREATE TRIGGER append_vault_on_job AFTER INSERT ON jobs
              BEGIN
+               SELECT CASE WHEN (SELECT COUNT(*) FROM jobs) > {count}
+                 THEN RAISE(ABORT, 'retention sweep crossed its captured boundary') END;
                INSERT INTO sync_vaults (vault_id, kind)
                VALUES (CAST(printf('%016x', (SELECT COUNT(*) FROM sync_vaults)) AS BLOB), 'personal');
              END",
-        )
+        ))
         .execute(store.pool())
         .await
         .expect("append vaults during scheduling");
-        let result = tokio::time::timeout(Duration::from_secs(30), worker_retention_pass(&store))
-            .await
-            .expect("fixed upper bound ends sweep")
-            .expect("retention sweep");
+        let now = worker_now_ms().expect("clock");
+        let result = worker_retention_pass_at(&store, now).await.expect("retention sweep");
         assert_eq!(result, (count, count));
+        assert!(
+            store
+                .enqueue_job_if_absent(
+                    uuid::Uuid::new_v4().into_bytes(),
+                    RETENTION_JOB_KIND,
+                    &retention_vault_id(count + 1),
+                    now,
+                )
+                .await
+                .is_err(),
+            "the fixture must reject scheduling beyond the captured vault count"
+        );
         let vault_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_vaults")
             .fetch_one(store.pool())
             .await
