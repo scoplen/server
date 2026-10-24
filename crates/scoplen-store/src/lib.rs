@@ -52,10 +52,12 @@ pub use personal_enrollment::{
 use std::{path::Path, time::Duration};
 
 use sqlx::{
-    PgPool, Pool, Postgres, Sqlite, SqlitePool,
+    Connection, PgPool, Pool, Postgres, Sqlite, SqlitePool, TransactionManager,
     migrate::Migrator,
     postgres::PgPoolOptions,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteTransactionManager,
+    },
 };
 use thiserror::Error;
 
@@ -124,7 +126,22 @@ impl SqliteStore {
             .journal_mode(SqliteJournalMode::Wal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5));
-        let pool = SqlitePoolOptions::new().max_connections(5).connect_with(options).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .after_release(|connection, _| {
+                Box::pin(async move {
+                    // SQLx custom BEGIN validates the handle after acknowledgement. Cancellation
+                    // there has no Transaction guard, so clean before another request can acquire it.
+                    if connection.is_in_transaction()
+                        && SqliteTransactionManager::rollback(connection).await.is_err()
+                    {
+                        return Ok(false);
+                    }
+                    Ok(!connection.is_in_transaction())
+                })
+            })
+            .connect_with(options)
+            .await?;
         SQLITE_MIGRATIONS.run(&pool).await?;
         Ok(Self { pool, sync_cardinality_limits, sync_write_limits })
     }

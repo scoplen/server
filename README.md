@@ -456,7 +456,12 @@ Operator HTTP quota fixtures set both the exhausted count and a fresh full windo
 failure cooldowns so quota-before-parsing assertions remain valid across minute boundaries.
 
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
-roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
+roles start, and a migration failure stops startup. Before a pooled SQLite connection becomes
+available to another request, any remaining tracked transaction is rolled back; failed cleanup
+discards the connection. A deterministic cancellation test covers SQLx's acknowledged custom-BEGIN
+validation window, subsequent source admission and rollback failure. This separate cancellation
+defect does not establish the cause of the unresolved native post-reopen refresh failure.
+API, edge, and worker roles may instead use
 PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or
 `SPL_STORAGE_DATABASE_URL`). Object storage is initialized alongside the database for
 database-backed roles. The default `storage.object.backend = "filesystem"` stores below

@@ -42,6 +42,13 @@ SQLite uses a five-second busy timeout; WAL permits readers while an unrelated w
 its reservation, but another writer can still fail before source admission is committed.
 Controlled HTTP contention and admission-cancellation tests cover those boundaries. They do
 not identify the cause of the observed native post-reopen refresh failure.
+The SQLite pool also rolls back a remaining tracked transaction before returning a connection to
+the idle queue, discarding it if cleanup fails or it remains in a transaction. SQLx 0.8.6 acknowledges
+a custom `BEGIN IMMEDIATE` before asynchronously validating its handle; cancellation in that
+window can leave an open transaction without a constructed `Transaction` guard. A controlled
+worker/acknowledgement regression reproduces that separate defect and checks same-connection
+reuse, failed-cleanup replacement, queued-rollback ordering and subsequent real source admission.
+No business operation is retried or detached, and unknown refresh commit recovery is unchanged.
 For a private diagnostic run, `RUST_LOG=info,scoplen_server::device_auth=debug` includes
 admission receipt; storage warnings are already visible at the default info level.
 
