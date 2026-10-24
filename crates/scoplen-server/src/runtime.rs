@@ -37,11 +37,11 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
-use crate::deployment_lease::{DeploymentLease, FILE_NAME as DEPLOYMENT_LEASE_FILE};
+use crate::deployment_lease::DeploymentLease;
 use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment, personal_sync};
 
 #[cfg(windows)]
-use crate::windows_private_directory;
+use crate::{deployment_lease::FILE_NAME as DEPLOYMENT_LEASE_FILE, windows_private_directory};
 
 const GRACEFUL_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 const FORCED_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
