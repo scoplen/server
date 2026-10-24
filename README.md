@@ -12,11 +12,17 @@ plain, file-based, or ACME TLS. The `api`, `worker`, and `edge` roles open the s
 PostgreSQL database and apply forward migrations; readiness checks that database. The SQLite
 storage layer has the first sync foundation: per-vault gap-free sequence allocation, atomic
 compare-and-swap batches, current change and snapshot paging, acknowledgement cursors, and
-bounded version reads. It also exposes an atomic retention pass for the worker: historical rows are
-version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
-horizon while deleting their retained history. The `scoplen-store` queue now persists opaque jobs
-with bounded payloads, atomic claims, owner-checked leases, retry/failure state, and expired-lease
-requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
+bounded version reads. Its atomic worker retention pass keeps the current version plus at most
+20 previous versions for 30 days. For an enrolled Personal vault, it verifies the complete signed
+certificate/revocation set and current admission identities, then reads every device's ACK and
+purges eligible tombstones in the same transaction. A missing ACK counts as zero; an inactive or
+missing unrevoked identity disables early purging. Empty or unsupported membership, including
+Shared/organization and bare Personal vaults, retains the 180-day tombstone policy. Invalid signed
+state or an ACK ahead of the vault fails the pass without partial deletion. Purging removes all
+retained versions of the tombstone and advances the purge horizon. The `scoplen-store` queue now
+persists opaque jobs with bounded payloads, atomic claims, owner-checked leases, retry/failure
+state, and expired-lease requeue; the `worker` role runs a 30-second heartbeat that requeues
+abandoned leases.
 Standalone `ca` and `gateway` roles do not open a database or generate Personal setup material.
 New bootstrap material uses exclusive file creation and, on Unix, owner read/write permissions
 (`0600`). Existing files are preserved; an incomplete CA pair requires recovery from the
@@ -151,7 +157,7 @@ The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
 backend and include it in `/readyz`. Complete control-plane policy filtering,
-membership-aware purge orchestration, organization vault ownership in session listings, higher wire ceilings and
+Shared/organization membership-aware purge orchestration, organization vault ownership in session listings, higher wire ceilings and
 other route body limits, control, gateway, and remaining console administration are still
 roadmap work. The audit crate and SQLite/PostgreSQL stores provide bounded canonical-event SHA-256
 hashing, same-transaction append helpers, durable checkpoints, and chain verification for separate

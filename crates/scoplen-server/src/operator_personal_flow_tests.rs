@@ -32,6 +32,8 @@ mod key_publication;
 mod notifications;
 #[path = "pairing_http_tests.rs"]
 mod pairing;
+#[path = "personal_retention_tests.rs"]
+mod retention;
 
 async fn mount_complete_api(f: &mut Fixture) {
     f.server.abort();

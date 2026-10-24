@@ -147,6 +147,8 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::postgres_
       - name: Check PostgreSQL public Personal bootstrap and sync
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::postgres_
+      - name: Check PostgreSQL public ACK and atomic Personal worker retention
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::retention::postgres_
       - name: Check PostgreSQL current account profile and denials
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::account_profile::postgres_
       - name: Check PostgreSQL complete device statements, denials and consistency

@@ -175,11 +175,25 @@ visits every vault through strictly increasing id pages of at most 1,000 entries
 PostgreSQL. Each sweep captures its greatest id before paging, defers later appended ids, and
 restarts from the beginning on the next heartbeat to discover ids inserted behind its cursor.
 Shutdown can interrupt an active retention sweep; unfinished durable jobs keep their existing
-deduplication, lease and retry behavior. The worker currently supplies no acknowledgement floor,
-so tombstones are purged only after the 180-day retention period; enrolled, unrevoked membership
-and policy-aware orchestration remain open. API/edge PostgreSQL startup and listener readiness
-are available; remaining shared-sync router mounting, application-level
-column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
+deduplication, lease and retry behavior. Retention jobs use the same SQLite/PostgreSQL transaction
+for Personal ownership, complete bounded signed certificates/revocations, current admission
+identities, ACKs, tombstone/history deletion and the purge horizon. The signed set is validated
+once and at most 1,000 unrevoked identities are streamed and checked in device-id order; each
+identity's current certificate/root/account binding and P-256
+proof-key thumbprint use the same verifier as device authentication. Missing ACKs count as zero.
+Inactive or missing unrevoked identities cannot shrink the signed set: they disable early
+purging, as do empty sets, unsupported vault kinds and absent enrollment state. Those vaults
+retain the 180-day policy. Invalid signed state, mismatched current identities and ACKs ahead of
+the vault fail atomically and retain the job for retry. SQLite begins
+with its writer lock. PostgreSQL discovers the candidate owner, takes the shared seed-0 account-key
+lock, locks current identity and ownership rows, then locks the vault and rechecks ownership before
+reading ACKs. This serializes with exclusive account-key publication/pairing and follows the
+account-before-vault order used by authenticated ACKs and object writes. The raw caller-supplied
+floor primitive and the worker entry share their backend's transaction-local purge SQL.
+Shared/organization membership-aware purging and policy filtering remain open. API/edge PostgreSQL
+startup and listener readiness are available; remaining shared-sync router mounting,
+application-level column encryption, control-plane audit event producers, and other worker jobs
+remain roadmap work.
 The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;
 cloud adapters, column encryption, and external KMS readiness remain open. Database-backed role
 preparation loads and validates the local backend before startup. Bootstrap creates an independent
