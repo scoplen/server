@@ -267,6 +267,14 @@ async fn prepare_roles_with_setup(
             None,
         )
     };
+    let origin = config.public_origin()?;
+    if let Some(store) = &store {
+        store.check_operator_setup_startup(&origin, reissue).await?;
+    } else if let Some(store) = &postgres_store {
+        store.check_operator_setup_startup(&origin, reissue).await?;
+    } else {
+        return Err(ServerError::MissingStore);
+    }
     let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
     let object_storage = ObjectStorage::from_config(&object_config)?;
     bootstrap(config)?;
@@ -275,7 +283,6 @@ async fn prepare_roles_with_setup(
     let audit_signer =
         Some(LocalAuditSigner::load(config.storage.kms_audit_key_file(&config.server.data_dir)?)?);
     let setup_link = if roles.contains(&Role::Api) {
-        let origin = config.public_origin()?;
         if let Some(store) = &store {
             store.initialize_operator_setup(&origin, reissue).await?
         } else if let Some(store) = &postgres_store {
@@ -1237,6 +1244,7 @@ mod tests {
 
     use super::*;
     use scoplen_store::RelationalStore;
+    use scoplen_store::operator_setup::OperatorSetupError;
     use scoplen_store::sync::{ObjectWrite, TOMBSTONE_PURGE_AFTER_DAYS, VaultKind};
     use tokio::io::AsyncReadExt;
 
@@ -1718,20 +1726,36 @@ mod tests {
         assert_eq!(initial, retained);
         store.pool().close().await;
         drop(restarted);
+        config.server.public_port = 9443;
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            assert!(matches!(
+                prepare_roles(&config, &[role]).await,
+                Err(ServerError::OperatorSetup(OperatorSetupError::OriginMismatch))
+            ));
+        }
         let replacement = reissue_operator_setup(&config).await.expect("local reissue");
-        assert!(replacement.expose_link().starts_with("https://operator.example.com/setup#token="));
+        assert!(
+            replacement.expose_link().starts_with("https://operator.example.com:9443/setup#token=")
+        );
         let store = SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("read back");
-        let digest: Vec<u8> = sqlx::query_scalar("SELECT token_digest FROM operator_setup")
-            .fetch_one(store.pool())
-            .await
-            .expect("replacement digest");
+        let (digest, origin): (Vec<u8>, String) =
+            sqlx::query_as("SELECT token_digest, trusted_origin FROM operator_setup")
+                .fetch_one(store.pool())
+                .await
+                .expect("replacement setup");
         assert_ne!(digest, initial.0);
+        assert_eq!(origin, "https://operator.example.com:9443");
         store.pool().close().await;
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            let prepared = prepare_roles(&config, &[role]).await.expect("reissued origin");
+            assert!(prepared.setup_link.is_none());
+            prepared.store.as_ref().expect("SQLite store").pool().close().await;
+        }
         remove_test_directory(&data_dir).await;
     }
 
     #[tokio::test]
-    async fn pending_operator_setup_requires_dns_but_completed_setup_preserves_ip_device_origin() {
+    async fn pending_operator_setup_requires_dns_and_completed_setup_retains_origin() {
         let data_dir =
             std::env::temp_dir().join(format!("scoplen-operator-origin-{}", uuid::Uuid::new_v4()));
         let mut config = Config::default();
@@ -1753,17 +1777,184 @@ mod tests {
         store.pool().close().await;
         drop(prepared);
         config.server.public_host = "127.0.0.1".into();
-        let completed =
-            prepare_roles(&config, &[Role::Api]).await.expect("completed IP origin for devices");
-        assert!(completed.setup_link.is_none());
-        completed.store.as_ref().expect("SQLite store").pool().close().await;
-        drop(completed);
+        assert!(matches!(
+            prepare_roles(&config, &[Role::Api]).await,
+            Err(ServerError::OperatorSetup(OperatorSetupError::OriginMismatch))
+        ));
         assert!(matches!(
             reissue_operator_setup(&config).await,
             Err(ServerError::OperatorSetup(
                 scoplen_store::operator_setup::OperatorSetupError::Denied { consumed: false }
             ))
         ));
+        config.server.public_host = "operator.example.com".into();
+        let completed = prepare_roles(&config, &[Role::Api]).await.expect("retained DNS origin");
+        assert!(completed.setup_link.is_none());
+        completed.store.as_ref().expect("SQLite store").pool().close().await;
+        drop(completed);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_storage_roles_check_completed_origin_before_creating_material() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-origin-guard-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.public_host = "operator.example.com".into();
+        prepare_data_directory(&config).expect("private fixture directory");
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("fixture store");
+        store
+            .initialize_operator_setup("https://operator.example.com", false)
+            .await
+            .expect("initial setup")
+            .expect("initial link");
+        sqlx::query("UPDATE operator_setup SET completed_at_s = issued_at_s")
+            .execute(store.pool())
+            .await
+            .expect("complete fixture setup");
+        let setup_before: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("fixture setup");
+        let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("fixture audit count");
+        store.pool().close().await;
+
+        config.server.public_host = "other.example.com".into();
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            match prepare_roles(&config, &[role]).await {
+                Err(ServerError::OperatorSetup(OperatorSetupError::OriginMismatch)) => {}
+                Err(error) => panic!("{role} returned {error} instead of an origin mismatch"),
+                Ok(prepared) => {
+                    prepared.store.as_ref().expect("SQLite store").pool().close().await;
+                    panic!("{role} accepted a changed origin");
+                }
+            }
+            assert!(!data_dir.join("deployment.key").exists());
+            assert!(!data_dir.join("internal-ca.pem").exists());
+            assert!(!data_dir.join("objects").exists());
+        }
+        assert!(matches!(
+            reissue_operator_setup(&config).await,
+            Err(ServerError::OperatorSetup(
+                scoplen_store::operator_setup::OperatorSetupError::Denied { consumed: false }
+            ))
+        ));
+        assert!(!data_dir.join("deployment.key").exists());
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("read back fixture");
+        let setup_after: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("unchanged setup");
+        let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged audit count");
+        assert_eq!(setup_before, setup_after);
+        assert_eq!(audits_before, audits_after);
+        store.pool().close().await;
+
+        config.server.public_host = "operator.example.com".into();
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            let prepared = prepare_roles(&config, &[role]).await.expect("retained origin");
+            prepared.store.as_ref().expect("SQLite store").pool().close().await;
+        }
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_storage_roles_check_completed_origin_before_creating_material() {
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(database_url.as_str()).await.expect("fixture store");
+        store
+            .initialize_operator_setup("https://operator.example.com", false)
+            .await
+            .expect("initial setup")
+            .expect("initial link");
+        sqlx::query("UPDATE operator_setup SET completed_at_s = issued_at_s")
+            .execute(store.pool())
+            .await
+            .expect("complete fixture setup");
+        let setup_before: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("fixture setup");
+        let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("fixture audit count");
+        store.pool().close().await;
+
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-postgres-origin-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.server.public_host = "other.example.com".into();
+        config.storage.backend = "postgres".into();
+        config.storage.database_url = Some(
+            toml::Value::String(database_url.to_string())
+                .try_into()
+                .expect("PostgreSQL URL setting"),
+        );
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            match prepare_roles(&config, &[role]).await {
+                Err(ServerError::OperatorSetup(OperatorSetupError::OriginMismatch)) => {}
+                Err(error) => panic!("{role} returned {error} instead of an origin mismatch"),
+                Ok(prepared) => {
+                    prepared
+                        .postgres_store
+                        .as_ref()
+                        .expect("PostgreSQL store")
+                        .pool()
+                        .close()
+                        .await;
+                    panic!("{role} accepted a changed origin");
+                }
+            }
+            assert!(!data_dir.join("deployment.key").exists());
+            assert!(!data_dir.join("internal-ca.pem").exists());
+            assert!(!data_dir.join("objects").exists());
+        }
+        assert!(matches!(
+            reissue_operator_setup(&config).await,
+            Err(ServerError::OperatorSetup(
+                scoplen_store::operator_setup::OperatorSetupError::Denied { consumed: false }
+            ))
+        ));
+        assert!(!data_dir.join("deployment.key").exists());
+        let store = PostgresStore::connect(database_url.as_str()).await.expect("read back fixture");
+        let setup_after: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("unchanged setup");
+        let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged audit count");
+        assert_eq!(setup_before, setup_after);
+        assert_eq!(audits_before, audits_after);
+        store.pool().close().await;
+
+        config.server.public_host = "operator.example.com".into();
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            let prepared = prepare_roles(&config, &[role]).await.expect("retained origin");
+            prepared.postgres_store.as_ref().expect("PostgreSQL store").pool().close().await;
+        }
+        cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
     }
 

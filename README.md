@@ -364,7 +364,12 @@ externally reachable HTTPS port, defaulting to 443; it is independent of the loc
 uses it for generated setup links. Port 443 is omitted from those links; a different external
 port is included. Invalid or ambiguous public hosts fail `--validate-config` and startup.
 When first-operator setup is pending, `server.public_host` must be a DNS name with valid HTTPS.
-An IP-literal origin remains usable for devices after initial operator setup has completed.
+Once a setup entitlement exists, the `api`, `worker`, and `edge` roles compare the configured
+origin with its durable origin before creating local key, CA, or object-storage material. They
+refuse startup if `server.public_host` or `server.public_port` changes. Restore the original
+configuration before restarting. Completed setup does not authorize an origin change; a
+separate identity-preserving migration procedure is required and is not yet available. An
+IP-literal origin can be used only when it already exactly matches the retained completed origin.
 Only the first API initializer discloses a one-hour setup link through local terminal output,
 after its digest and audit are durably committed. Protect that output: the link is not logged,
 written to `setup-link.txt`, or recoverable from the database. Other replicas, restarts, edge
