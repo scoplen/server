@@ -20,11 +20,12 @@ requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned le
 Standalone `ca` and `gateway` roles do not open a database or generate Personal setup material.
 New bootstrap material uses exclusive file creation and, on Unix, owner read/write permissions
 (`0600`). Existing files are preserved; an incomplete CA pair requires recovery from the
-operator's backup. Windows inherits the data directory's access controls: the operator must
-protect that directory before first startup. Bootstrap does not restrict or validate its Windows
-ACL, so a directory that grants other users access also exposes generated secrets to them.
-Existing deployments retain their current file permissions, which the operator must restrict
-separately if needed.
+operator's backup. Windows creates a missing data directory with a protected, inheritable DACL
+for the server account, Local System and Administrators before opening storage. Existing
+directories and private keys with unsafe or unsupported ACLs are rejected without changing
+their permissions. This requires OS Windows PowerShell 5.1; see
+[Windows data-directory permissions](docs/windows-data-directory.md) for provisioning and
+recovery. Operators remain responsible for preventing untrusted parent-directory replacement.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for a session handshake that lists
 account-owned personal vaults and current shared-vault memberships with their rotation state,
 shared-vault creation, key retrieval, epoch publication, and member addition and removal, plus
@@ -314,6 +315,10 @@ before running Cargo: MSVC Build Tools and Strawberry Perl on Windows, Xcode Com
 on macOS, or the usual C compiler, Make and Perl packages on Linux. Put `perl` on `PATH` (the
 Strawberry default is `C:\Strawberry\perl\bin`). NASM is optional on Windows; the vendored build
 automatically disables assembly when NASM is unavailable.
+
+Windows startup also requires the OS Windows PowerShell 5.1 executable and .NET filesystem
+access-control APIs for permission admission. A missing or restricted runtime stops startup
+with an actionable error; existing ACLs are never silently repaired.
 
 SQL migrations use LF line endings on every platform. SQLx embeds and hashes the exact SQL
 bytes, so keep the repository's migration attributes when creating a checkout. A database made

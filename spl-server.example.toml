@@ -7,6 +7,7 @@ listen_port = 8443
 # Use a lowercase DNS name, canonical IPv4, or unbracketed canonical IPv6.
 public_host = "localhost"
 public_port = 443
+# Windows: private creation/ACL admission requires OS PowerShell 5.1; see docs/windows-data-directory.md.
 data_dir = "./data"
 
 [tls]

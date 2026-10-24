@@ -10,6 +10,10 @@ self-hosted server, host agent, administration CLI, and web console.
   web console. It does not own client source or shared wire contracts.
 - The vendor does not receive deployment data. Operators control the server's data directory,
   keys, logs, backups, and retention.
+- Windows bootstrap and storage startup create private missing data directories and reject
+  unsafe existing directory/key ACLs through bounded OS PowerShell 5.1/.NET admission, without
+  rewriting existing permissions. Operators retain parent-directory and recovery responsibility;
+  see [the Windows procedure](docs/windows-data-directory.md).
 - The repository is Exploration maturity until the roadmap evidence is complete. The baseline
   listener is useful for local development and reverse-proxy integration; it is not a complete
   production server.

@@ -34,6 +34,10 @@ use tracing::{error, info, warn};
 
 use crate::{Config, Role, ServerError, TlsMode, device_auth, personal_enrollment, personal_sync};
 
+#[cfg(windows)]
+#[path = "private_material/windows.rs"]
+mod windows_private_directory;
+
 /// Role-specific startup resources prepared before role tasks begin.
 pub struct PreparedRoles {
     /// Database pool for roles that need relational storage.
@@ -73,9 +77,7 @@ impl ListenerDatabase {
 /// Returns an error when the data directory or generated key material cannot be created.
 /// Operator setup entitlements are initialized separately, in the API role's database.
 pub fn bootstrap(config: &Config) -> Result<(), ServerError> {
-    std::fs::create_dir_all(&config.server.data_dir).map_err(|source| {
-        ServerError::DataDirectory { path: config.server.data_dir.clone(), source }
-    })?;
+    prepare_data_directory(config)?;
 
     let deployment_key = config.server.data_dir.join("deployment.key");
     if !deployment_key.exists() {
@@ -126,6 +128,27 @@ pub fn bootstrap(config: &Config) -> Result<(), ServerError> {
     }
 
     Ok(())
+}
+
+fn prepare_data_directory(config: &Config) -> Result<(), ServerError> {
+    let directory = &config.server.data_dir;
+    #[cfg(windows)]
+    let private_files = [
+        directory.join("deployment.key"),
+        config.storage.kms_key_file(directory)?,
+        config.storage.kms_audit_key_file(directory)?,
+        directory.join("internal-ca-key.pem"),
+    ];
+    #[cfg(windows)]
+    let result = windows_private_directory::prepare_directory(directory, &private_files);
+    #[cfg(not(windows))]
+    let result = std::fs::create_dir_all(directory);
+    result.map_err(|source| {
+        #[cfg(windows)]
+        return ServerError::PrivateMaterialAccess(source);
+        #[cfg(not(windows))]
+        ServerError::DataDirectory { path: directory.clone(), source }
+    })
 }
 
 fn write_private(path: &Path, contents: &str) -> Result<(), ServerError> {
@@ -187,6 +210,7 @@ async fn prepare_roles_with_setup(
             setup_link: None,
         });
     }
+    prepare_data_directory(config)?;
     let (store, postgres_store) = if uses_postgres(config) {
         let database_url = config
             .storage
@@ -1605,13 +1629,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_refuses_unwritable_database_path() {
+    async fn server_refuses_non_directory_before_storage_initialization() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-path-{}", uuid::Uuid::new_v4()));
         fs::write(&data_dir, "occupied").expect("create file where directory is needed");
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
         let result = prepare_roles(&config, &[Role::Worker]).await;
-        assert!(matches!(result, Err(ServerError::Storage(_))));
+        #[cfg(windows)]
+        assert!(matches!(result, Err(ServerError::PrivateMaterialAccess(_))));
+        #[cfg(not(windows))]
+        assert!(matches!(result, Err(ServerError::DataDirectory { .. })));
+        assert_eq!(fs::read_to_string(&data_dir).expect("retained occupied path"), "occupied");
         fs::remove_file(data_dir).expect("test file is removable");
     }
 
@@ -2109,9 +2137,11 @@ mod tests {
     #[tokio::test]
     async fn api_and_edge_require_the_configured_database() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
-        fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
+        prepare_data_directory(&config).expect("private data directory");
+        fs::write(data_dir.join("scoplen.sqlite"), "invalid database")
+            .expect("invalid database fixture");
 
         for role in [Role::Api, Role::Edge] {
             let result = prepare_roles(&config, &[role]).await;
@@ -2119,6 +2149,6 @@ mod tests {
         }
         let result = run_roles(config, vec![Role::Api], None, None, None, None, None).await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
-        fs::remove_file(data_dir).expect("test file is removable");
+        fs::remove_dir_all(data_dir).expect("owned test directory is removable");
     }
 }
