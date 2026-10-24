@@ -33,6 +33,13 @@ are never created or repaired by this check. Newly generated files inherit the p
 exclusive creation still refuses to replace a destination. File creation or flush failure stops
 startup and requires inspection of incomplete material.
 
+The persistent `scoplen.sqlite.migration.lock` is admitted as private material too. Before
+storage startup, an existing `scoplen.sqlite.migration-snapshots` directory and every entry are
+checked with the same native ACL policy without repair. New upgrade-snapshot directories and
+files inherit the admitted data-directory DACL. A rejected recovery point must be inspected,
+not deleted to bypass admission; see [the container operations notes](personal-container.md)
+for snapshot retention and the separate complete-backup requirement.
+
 For a new deployment, run under the intended server account, select a missing data directory
 below a parent controlled by that account, and set `server.data_dir` or `SPL_SERVER_DATA_DIR`
 to that path. The server creates the restricted directory before storing any deployment data.
@@ -45,7 +52,8 @@ For an existing directory rejected at startup:
    server account, Local System or Administrators. Disable inheritance and remove inherited
    access for other principals. Grant the server account full control applying to this folder,
    subfolders and files; Local System and Administrators may retain the same access.
-3. Review the deployment key, configured KMS and audit keys, and internal CA private key
+3. Review the deployment key, configured KMS and audit keys, internal CA private key, migration
+   lock, and any migration-snapshot directory/files
    individually. Remove broad or unusual file permissions; a directory repair does not prove
    that an existing file has changed its DACL. Do not change unrelated parent permissions.
 4. Ensure the intended server account can run Windows PowerShell 5.1 and use .NET filesystem

@@ -23,6 +23,7 @@ pub mod pairing;
 pub mod pairing_admission;
 pub mod personal_admission;
 pub mod personal_enrollment;
+mod pre_migration;
 #[cfg(test)]
 mod schema;
 pub mod sync;
@@ -84,7 +85,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    /// Open a SQLite file in WAL mode and apply all forward migrations.
+    /// Open SQLite in WAL mode, snapshot an existing schema before upgrades, and migrate.
     ///
     /// # Errors
     ///
@@ -142,7 +143,7 @@ impl SqliteStore {
             })
             .connect_with(options)
             .await?;
-        SQLITE_MIGRATIONS.run(&pool).await?;
+        pre_migration::migrate(&pool, path).await?;
         Ok(Self { pool, sync_cardinality_limits, sync_write_limits })
     }
 
@@ -269,4 +270,9 @@ pub enum StoreError {
     /// A forward migration could not be applied.
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    /// SQLite upgrade protection could not complete safely.
+    #[error(
+        "SQLite upgrade protection failed ({0}); startup stopped; check private snapshot storage and available space before restarting"
+    )]
+    MigrationSnapshot(&'static str),
 }

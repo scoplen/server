@@ -138,9 +138,30 @@ fn prepare_data_directory(config: &Config) -> Result<(), ServerError> {
         config.storage.kms_key_file(directory)?,
         config.storage.kms_audit_key_file(directory)?,
         directory.join("internal-ca-key.pem"),
+        directory.join("scoplen.sqlite.migration.lock"),
     ];
     #[cfg(windows)]
-    let result = windows_private_directory::prepare_directory(directory, &private_files);
+    let result = (|| {
+        windows_private_directory::prepare_directory(directory, &private_files)?;
+        let snapshots = directory.join("scoplen.sqlite.migration-snapshots");
+        match std::fs::symlink_metadata(&snapshots) {
+            Ok(_) => {
+                windows_private_directory::prepare_directory(&snapshots, &[])?;
+                let files = std::fs::read_dir(&snapshots)
+                    .and_then(|entries| {
+                        entries.map(|entry| entry.map(|entry| entry.path())).collect::<Result<Vec<_>, _>>()
+                    })
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                        "Windows snapshot permissions could not be verified; inspect the private migration-snapshot directory before restarting"))?;
+                windows_private_directory::prepare_directory(&snapshots, &files)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Windows snapshot permissions could not be verified; inspect the private migration-snapshot directory before restarting",
+            )),
+        }
+    })();
     #[cfg(not(windows))]
     let result = std::fs::create_dir_all(directory);
     result.map_err(|source| {

@@ -28,9 +28,9 @@ serde_json.workspace = true
 base64 = "0.22.1"
 url = "2.5.8"
 time = { version = "0.3.55", features = ["formatting"] }
+tokio.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
 ciborium = "0.2.2"
 webauthn-rs-core = "=0.5.5"
