@@ -736,7 +736,7 @@ async fn postgres_router_shared_vault_mutations_and_membership() {
     let limits =
         storage::SyncCardinalityLimits { max_shared_vaults_per_account: 1, ..Default::default() };
     let store = Arc::new(
-        PostgresStore::connect_with_sync_limits(&url, limits)
+        PostgresStore::connect_with_sync_limits(&url, limits, api::SyncWriteLimits::default())
             .await
             .expect("connect PostgreSQL 17 with quota"),
     );

@@ -26,11 +26,14 @@ names = ["all"]
 assets_dir = "web/console/dist"
 
 [sync]
-# Write bounds can be lowered, but cannot exceed these codec and storage ceilings.
+# Positive platform-representable write bounds may be raised or lowered from these defaults.
 max_envelope_bytes = 266240
 max_batch_objects = 500
 max_batch_bytes = 4194304
-# SQLite cardinality limits. Session handshakes advertise the values enforced by the store.
+# Independent read budgets: keep these large enough for retained data after lowering writes.
+max_read_envelope_bytes = 266240
+max_read_body_bytes = 266295039
+# Relational cardinality limits. Session handshakes advertise values enforced by the store.
 max_objects_per_vault = 100000
 max_shared_vaults_per_account = 1000
 # Keep this at or below 1000 so a new epoch can include one wrap per member.

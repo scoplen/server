@@ -78,6 +78,7 @@ pub trait RelationalStore {
 pub struct SqliteStore {
     pool: SqlitePool,
     sync_cardinality_limits: sync::SyncCardinalityLimits,
+    sync_write_limits: scoplen_api::sync::SyncWriteLimits,
 }
 
 impl SqliteStore {
@@ -88,10 +89,15 @@ impl SqliteStore {
     /// Returns an error if the parent directory cannot be created, the database cannot be
     /// opened, or a migration fails. A failed migration prevents server startup.
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::open_with_sync_limits(path, sync::SyncCardinalityLimits::default()).await
+        Self::open_with_sync_limits(
+            path,
+            sync::SyncCardinalityLimits::default(),
+            scoplen_api::sync::SyncWriteLimits::default(),
+        )
+        .await
     }
 
-    /// Open SQLite with validated per-deployment sync cardinality limits.
+    /// Open SQLite with validated per-deployment cardinality and write-exchange limits.
     ///
     /// # Errors
     ///
@@ -99,8 +105,12 @@ impl SqliteStore {
     pub async fn open_with_sync_limits(
         path: &Path,
         sync_cardinality_limits: sync::SyncCardinalityLimits,
+        sync_write_limits: scoplen_api::sync::SyncWriteLimits,
     ) -> Result<Self, StoreError> {
         sync_cardinality_limits.validate().map_err(StoreError::InvalidSyncLimits)?;
+        sync_write_limits
+            .validate()
+            .map_err(|error| StoreError::InvalidSyncLimits(error.to_string()))?;
         if path.as_os_str().is_empty() {
             return Err(StoreError::EmptyPath);
         }
@@ -116,13 +126,19 @@ impl SqliteStore {
             .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(5).connect_with(options).await?;
         SQLITE_MIGRATIONS.run(&pool).await?;
-        Ok(Self { pool, sync_cardinality_limits })
+        Ok(Self { pool, sync_cardinality_limits, sync_write_limits })
     }
 
     /// Return the limits enforced by this SQLite store.
     #[must_use]
     pub fn sync_cardinality_limits(&self) -> sync::SyncCardinalityLimits {
         self.sync_cardinality_limits
+    }
+
+    /// Return the write-exchange limits enforced before every storage mutation.
+    #[must_use]
+    pub fn sync_write_limits(&self) -> scoplen_api::sync::SyncWriteLimits {
+        self.sync_write_limits
     }
 
     /// Check whether the database can execute a query for readiness checks.
@@ -149,6 +165,7 @@ impl RelationalStore for SqliteStore {
 pub struct PostgresStore {
     pool: PgPool,
     sync_cardinality_limits: sync::SyncCardinalityLimits,
+    sync_write_limits: scoplen_api::sync::SyncWriteLimits,
 }
 
 impl PostgresStore {
@@ -159,10 +176,15 @@ impl PostgresStore {
     /// Returns an error when the connection or migration fails. A failed migration prevents
     /// callers from using the store.
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
-        Self::connect_with_sync_limits(database_url, sync::SyncCardinalityLimits::default()).await
+        Self::connect_with_sync_limits(
+            database_url,
+            sync::SyncCardinalityLimits::default(),
+            scoplen_api::sync::SyncWriteLimits::default(),
+        )
+        .await
     }
 
-    /// Connect to PostgreSQL with validated per-deployment sync cardinality limits.
+    /// Connect to PostgreSQL with validated per-deployment cardinality and write-exchange limits.
     ///
     /// # Errors
     ///
@@ -170,17 +192,27 @@ impl PostgresStore {
     pub async fn connect_with_sync_limits(
         database_url: &str,
         sync_cardinality_limits: sync::SyncCardinalityLimits,
+        sync_write_limits: scoplen_api::sync::SyncWriteLimits,
     ) -> Result<Self, StoreError> {
         sync_cardinality_limits.validate().map_err(StoreError::InvalidSyncLimits)?;
+        sync_write_limits
+            .validate()
+            .map_err(|error| StoreError::InvalidSyncLimits(error.to_string()))?;
         let pool = PgPoolOptions::new().max_connections(5).connect(database_url).await?;
         POSTGRES_MIGRATIONS.run(&pool).await?;
-        Ok(Self { pool, sync_cardinality_limits })
+        Ok(Self { pool, sync_cardinality_limits, sync_write_limits })
     }
 
     /// Return the limits enforced by this PostgreSQL store.
     #[must_use]
     pub fn sync_cardinality_limits(&self) -> sync::SyncCardinalityLimits {
         self.sync_cardinality_limits
+    }
+
+    /// Return the write-exchange limits enforced before every storage mutation.
+    #[must_use]
+    pub fn sync_write_limits(&self) -> scoplen_api::sync::SyncWriteLimits {
+        self.sync_write_limits
     }
 
     /// Check whether the database can execute a query for readiness checks.
@@ -205,8 +237,8 @@ impl RelationalStore for PostgresStore {
 /// Storage initialization errors.
 #[derive(Debug, Error)]
 pub enum StoreError {
-    /// The configured SQLite sync limits cannot be enforced safely.
-    #[error("invalid sync cardinality limits: {0}")]
+    /// The configured sync limits cannot be enforced safely.
+    #[error("invalid sync limits: {0}")]
     InvalidSyncLimits(String),
     /// The database path was empty.
     #[error("storage database path must not be empty")]

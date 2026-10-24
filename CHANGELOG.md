@@ -9,6 +9,17 @@ Changes are recorded here for released or reviewable repository outcomes.
   The PostgreSQL CI job now runs the complete 38-test sync storage suite instead of three
   name-filtered subsets.
 
+- Adopted deployment-selected D-91 write limits across request decoding, SQLite/PostgreSQL
+  storage admission, ordered assignments and complete request-bound conflicts. Exact CBOR
+  request bytes include field/header overhead; higher limits can exceed the former defaults.
+  Conflicts keep their independent 128 MiB cap and fail without partial results. Separate
+  D-93 read payload/body budgets preserve access to retained data when write limits decrease.
+  Changes and snapshots return budgeted prefixes with progress-preserving cursors; an unencodable
+  first entry or complete unpaged history fails without partial results.
+  New forward migrations retain objects, history, epochs, signers, timestamps and relational
+  constraints while removing the fixed envelope ceiling. Added populated-migration,
+  501-object, raised-envelope, reopen and certified-signature HTTP regressions on both stores.
+
 - Upgraded the shared protocol pin to `cb4f248`, including the D-75 GET/CONNECT notification
   scope lookup, and regenerated the console's public API types from the same published revision.
 

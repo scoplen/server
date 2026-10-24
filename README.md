@@ -454,9 +454,33 @@ process until shared admission is implemented; connections share the same bucket
 configured-certificate TLS, and ACME TLS listeners.
 Set `sync.max_envelope_bytes`, `sync.max_batch_objects`, and `sync.max_batch_bytes` in the same file,
 or use `SPL_SYNC_MAX_ENVELOPE_BYTES`, `SPL_SYNC_MAX_BATCH_OBJECTS`, and
-`SPL_SYNC_MAX_BATCH_BYTES`. Each must be positive and no greater than its default: 266,240 bytes,
-500 objects, and 4,194,304 encoded bytes respectively. The authenticated K-4 router takes these
-validated write bounds on the mounted Personal sync routes.
+`SPL_SYNC_MAX_BATCH_BYTES`. Each must be positive and fit the platform; limits may be raised or
+lowered from the defaults of 266,240 bytes, 500 objects, and 4,194,304 encoded bytes respectively.
+The checked assignment bound `9 + 29 * max_batch_objects` must also fit. The same deployment
+limits govern the HTTP request, durable SQLite/PostgreSQL admission, complete ordered receipts,
+and request-bound conflicts. Batch bytes include the complete CBOR request, not just payloads.
+The complete conflict cap remains 128 MiB; an unencodable conflict returns
+`503 sync.storage_unavailable` with no partial results or object mutations.
+
+Read budgets are separate: `sync.max_read_envelope_bytes` and `sync.max_read_body_bytes`, or
+`SPL_SYNC_MAX_READ_ENVELOPE_BYTES` and `SPL_SYNC_MAX_READ_BODY_BYTES`. Their defaults are 266,240
+payload bytes and 266,295,039 complete encoded response bytes. Select adequate read budgets when
+raising write limits, and retain them when lowering write limits so previously stored objects
+and history remain readable. Changes and snapshots return the longest eligible prefix that fits
+the budgets, with `more = true` and the last returned sequence as the cursor when shortened. If
+the first entry cannot fit, or complete unpaged history cannot fit, the read returns
+`503 sync.storage_unavailable`; it does not expire a cursor or advance stored state. Exact size
+checks precede response encoding and payload copies; storage still loads up to the requested
+1,000-row page before this response selection. Complete version history remains at most 21
+entries. Key and notification limits remain independent.
+
+The configurable-limit forward migration preserves current objects, retained versions, epochs,
+signers, timestamps, foreign keys, uniqueness and indexes while moving the envelope upper bound
+into validated storage admission. SQLite rebuilds the two leaf tables inside the migration
+transaction; allow temporary disk space for the copy. Preserve a consistent deployment backup
+before an upgrade. A failed migration rolls back and prevents startup; it does not partially
+upgrade the tables. The migration has no automatic down path; rollback uses the pre-upgrade
+backup and matching server version.
 
 ## Security
 
