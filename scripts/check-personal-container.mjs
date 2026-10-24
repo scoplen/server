@@ -105,6 +105,69 @@ export function describeCheckFailure({
   };
 }
 
+export function describeWalHolderFailure(state, stderr) {
+  let probe = null;
+  const prefix = "Scoplen SQLite probe failure: ";
+  const line =
+    typeof stderr === "string"
+      ? stderr.split(/\r?\n/).find((value) => value.startsWith(prefix))
+      : undefined;
+  if (line) {
+    try {
+      const value = JSON.parse(line.slice(prefix.length));
+      if (
+        [
+          "context",
+          "open-seed-database",
+          "verify-seed-schema",
+          "seed-rows",
+          "write-object-marker",
+          "verify-material",
+          "verify-live-wal",
+          "verify-wal-readback",
+          "verify-base-only",
+          "hold-seed",
+        ].includes(value?.phase)
+      ) {
+        probe = {
+          phase: value.phase,
+          code: [
+            "ERR_ASSERTION",
+            "ERR_SQLITE_ERROR",
+            "EACCES",
+            "EPERM",
+            "ENOSPC",
+            "EDQUOT",
+            "ENOENT",
+            "EEXIST",
+            "EISDIR",
+          ].includes(value.code)
+            ? value.code
+            : null,
+          sqliteCode:
+            Number.isInteger(value.sqliteCode) &&
+            value.sqliteCode >= 0 &&
+            value.sqliteCode <= 65535
+              ? value.sqliteCode
+              : null,
+        };
+      }
+    } catch {
+      // Raw probe output remains in the private diagnostic files.
+    }
+  }
+  return {
+    exitCode:
+      Number.isInteger(state?.ExitCode) &&
+      state.ExitCode >= 0 &&
+      state.ExitCode <= 255
+        ? state.ExitCode
+        : null,
+    oomKilled: state?.OOMKilled === true,
+    probe,
+  };
+}
+
 export async function writePrivateDiagnostic(path, value, phase) {
   try {
     await writeFile(path, value, { flag: "wx", mode: 0o600 });
@@ -694,10 +757,17 @@ export async function checkPersonalContainer(driverPath) {
     assert.equal(holderService.Image, probeImageId);
     const walDeadline = Date.now() + 30_000;
     for (;;) {
-      const holderLogs = (await docker(["logs", walHolderId])).stdout;
-      if (holderLogs.trim() === "ready") break;
+      const holderLogs = await docker(["logs", walHolderId]);
+      if (holderLogs.stdout.trim() === "ready") break;
+      const holderState = (await inspect("container", walHolderId)).State;
+      if (!holderState.Running) {
+        const finalLogs = await docker(["logs", walHolderId]);
+        console.error(
+          `Committed WAL fixture failure: ${JSON.stringify(describeWalHolderFailure(holderState, finalLogs.stderr))}`,
+        );
+      }
       assert(
-        (await inspect("container", walHolderId)).State.Running,
+        holderState.Running,
         "committed WAL fixture exited before readiness",
       );
       assert(Date.now() < walDeadline, "committed WAL fixture timed out");

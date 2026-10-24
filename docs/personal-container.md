@@ -168,7 +168,10 @@ Before building images, the check admits its SQLite probe as UID/GID 65532 using
 read-only context containing only the public check identity. The private temporary directory,
 TLS material and command diagnostics keep their original permissions and are not exposed to
 that probe. A seeding process that exits before readiness fails immediately with a fixed
-reason; its detailed output remains private.
+reason. Its summary includes bounded exit/OOM status and, when present, a fixed probe phase,
+an allowlisted error code and a bounded numeric SQLite code. The final log is read after
+process exit so a fast failure does not hide its summary. Detailed output remains private;
+these observations do not establish the underlying cause.
 
 The check builds the production image, starts its own uniquely named Compose project, and
 checks image/data-volume permissions, non-root writes, TLS trust and hostname rejection,

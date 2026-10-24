@@ -17,6 +17,32 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 
+let failurePhase = "context";
+process.on("uncaughtExceptionMonitor", (error) => {
+  const code = [
+    "ERR_ASSERTION",
+    "ERR_SQLITE_ERROR",
+    "EACCES",
+    "EPERM",
+    "ENOSPC",
+    "EDQUOT",
+    "ENOENT",
+    "EEXIST",
+    "EISDIR",
+  ].includes(error?.code)
+    ? error.code
+    : null;
+  const sqliteCode =
+    Number.isInteger(error?.errcode) &&
+    error.errcode >= 0 &&
+    error.errcode <= 65535
+      ? error.errcode
+      : null;
+  console.error(
+    `Scoplen SQLite probe failure: ${JSON.stringify({ phase: failurePhase, code, sqliteCode })}`,
+  );
+});
+
 const [operation, run] = process.argv.slice(2);
 assert(
   /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(run),
@@ -134,9 +160,12 @@ function inspectStandaloneSnapshot(root) {
 }
 
 function assertLiveCommittedWal(root) {
+  failurePhase = "verify-live-wal";
   const wal = ordinary(join(root, "scoplen.sqlite-wal"));
   assert(wal.size > 0, "committed WAL must still be live");
+  failurePhase = "verify-wal-readback";
   inspectDatabase(join(root, "scoplen.sqlite"), false);
+  failurePhase = "verify-base-only";
   const bare = "/tmp/base-without-wal.sqlite";
   copyFileSync(join(root, "scoplen.sqlite"), bare, constants.COPYFILE_EXCL);
   const database = new DatabaseSync(bare);
@@ -192,16 +221,19 @@ if (operation === "check-context") {
   assert.deepEqual(readdirSync("/check"), [".container-check-owner"]);
   console.log("context-ready");
 } else if (operation === "seed-and-hold") {
+  failurePhase = "open-seed-database";
   const root = "/var/lib/spl";
   ordinary(root, true);
   const database = new DatabaseSync(join(root, "scoplen.sqlite"));
   try {
+    failurePhase = "verify-seed-schema";
     assert.equal(
       database
         .prepare("SELECT MAX(version) AS version FROM _sqlx_migrations")
         .get().version,
       oldMigration,
     );
+    failurePhase = "seed-rows";
     database.exec(
       "PRAGMA foreign_keys = ON; PRAGMA wal_autocheckpoint = 0; BEGIN IMMEDIATE",
     );
@@ -232,13 +264,16 @@ if (operation === "check-context") {
     database.close();
     throw error;
   }
+  failurePhase = "write-object-marker";
   ordinary(join(root, "objects"), true);
   writeFileSync(join(root, "objects", "ci-recovery-marker"), objectMarker, {
     flag: "wx",
     mode: 0o600,
   });
+  failurePhase = "verify-material";
   assertMaterial(root);
   assertLiveCommittedWal(root);
+  failurePhase = "hold-seed";
   process.on("SIGTERM", () => {
     database.close();
     process.exit(0);
