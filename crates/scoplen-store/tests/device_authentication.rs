@@ -5,6 +5,7 @@ mod support;
 #[cfg(feature = "postgres-integration")]
 use std::time::Duration;
 use std::{
+    collections::BTreeMap,
     net::IpAddr,
     path::PathBuf,
     sync::Arc,
@@ -178,12 +179,67 @@ fn refresh_proof(key: &P256SigningKey) -> DpopProof {
         .expect("proof")
 }
 
+async fn assert_sqlite_admission_windows(
+    store: &SqliteStore,
+    kind: i64,
+    limit: i64,
+    decisions: &[DeviceAuthAdmission],
+) {
+    let observations: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT window_start_ms, attempts FROM admission_observations WHERE kind=? ORDER BY sequence",
+    )
+    .bind(kind)
+    .fetch_all(store.pool())
+    .await
+    .expect("committed admission observations");
+    assert_eq!(observations.len(), decisions.len(), "every decision has one committed observation");
+    let mut windows = BTreeMap::<i64, i64>::new();
+    let mut expected_admitted = 0;
+    for (window, attempts) in observations {
+        let count = windows.entry(window).or_default();
+        *count += 1;
+        assert_eq!(
+            attempts,
+            (*count).min(limit),
+            "exact quota sequence in committed window {window}"
+        );
+        if *count <= limit {
+            expected_admitted += 1;
+        }
+    }
+    let mut admitted = 0;
+    for decision in decisions {
+        match decision {
+            DeviceAuthAdmission::Admitted => admitted += 1,
+            DeviceAuthAdmission::RateLimited(delay) => assert!((1..=60).contains(delay)),
+        }
+    }
+    assert_eq!(admitted, expected_admitted, "decisions match the exact quota in every window");
+}
+
 #[tokio::test]
 async fn sqlite_admission_and_challenges_are_durable_and_non_identifying() {
     let directory = directory();
     let path = directory.join("scoplen.sqlite");
     let first = SqliteStore::open(&path).await.expect("first");
     let second = SqliteStore::open(&path).await.expect("second");
+    // Real-clock transactions can span minutes; retain every committed counter transition.
+    sqlx::raw_sql(
+        "CREATE TABLE admission_observations (
+             sequence INTEGER PRIMARY KEY, kind INTEGER, window_start_ms INTEGER, attempts INTEGER
+         );
+         CREATE TRIGGER observe_admission_insert AFTER INSERT ON device_auth_admission BEGIN
+             INSERT INTO admission_observations (kind, window_start_ms, attempts)
+                 VALUES (NEW.kind, NEW.window_start_ms, NEW.attempts);
+         END;
+         CREATE TRIGGER observe_admission_update AFTER UPDATE ON device_auth_admission BEGIN
+             INSERT INTO admission_observations (kind, window_start_ms, attempts)
+                 VALUES (NEW.kind, NEW.window_start_ms, NEW.attempts);
+         END;",
+    )
+    .execute(first.pool())
+    .await
+    .expect("observe committed admission windows");
     let device_id = Uuid::now_v7();
     let mut tasks = Vec::new();
     for index in 0..40 {
@@ -192,27 +248,22 @@ async fn sqlite_admission_and_challenges_are_durable_and_non_identifying() {
             store.admit_device_auth_source(DeviceAuthEndpoint::Challenge, source()).await
         }));
     }
-    let mut admitted = 0;
+    let mut decisions = Vec::new();
     for task in tasks {
-        match task.await.expect("join").expect("admission") {
-            DeviceAuthAdmission::Admitted => admitted += 1,
-            DeviceAuthAdmission::RateLimited(delay) => assert!((1..=60).contains(&delay)),
-        }
+        decisions.push(task.await.expect("join").expect("admission"));
     }
-    assert_eq!(admitted, 30);
-    for _ in 0..10 {
-        assert_eq!(
-            first
+    assert_sqlite_admission_windows(&second, 1, 30, &decisions).await;
+    let mut device_decisions = Vec::new();
+    for index in 0..11 {
+        let store = if index % 2 == 0 { &first } else { &second };
+        device_decisions.push(
+            store
                 .admit_device_auth_device(DeviceAuthEndpoint::Challenge, *device_id.as_bytes())
                 .await
                 .expect("device admission"),
-            DeviceAuthAdmission::Admitted
         );
     }
-    assert!(matches!(
-        second.admit_device_auth_device(DeviceAuthEndpoint::Challenge, *device_id.as_bytes()).await,
-        Ok(DeviceAuthAdmission::RateLimited(_))
-    ));
+    assert_sqlite_admission_windows(&second, 2, 10, &device_decisions).await;
     let challenge = first.issue_device_challenge(*device_id.as_bytes()).await.expect("challenge");
     let digest: [u8; 32] = Sha256::digest(challenge.nonce()).into();
     let stored: Vec<u8> = sqlx::query_scalar("SELECT nonce_digest FROM device_auth_challenges")

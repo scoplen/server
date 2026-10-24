@@ -2010,3 +2010,31 @@ async fn update_postgres_bucket(
         .execute(&mut **tx).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Bucket, DeviceAuthAdmission, WINDOW_MS, bucket_limit};
+
+    #[test]
+    fn admission_quota_resets_at_the_exact_minute_boundary() {
+        for kind in [1, 2, 3] {
+            let limit = bucket_limit(kind);
+            let mut bucket = Bucket::fresh(WINDOW_MS - 1);
+            for _ in 0..limit {
+                assert_eq!(bucket.admit(WINDOW_MS - 1, limit), DeviceAuthAdmission::Admitted);
+            }
+            for _ in 0..2 {
+                assert_eq!(bucket.admit(WINDOW_MS - 1, limit), DeviceAuthAdmission::RateLimited(1));
+                assert_eq!(bucket.attempts, limit);
+            }
+            assert_eq!(bucket.admit(WINDOW_MS, limit), DeviceAuthAdmission::Admitted);
+            assert_eq!(bucket.window_start_ms, WINDOW_MS);
+            assert_eq!(bucket.attempts, 1);
+            for _ in 1..limit {
+                assert_eq!(bucket.admit(WINDOW_MS + 1, limit), DeviceAuthAdmission::Admitted);
+            }
+            assert_eq!(bucket.admit(WINDOW_MS + 1, limit), DeviceAuthAdmission::RateLimited(60));
+            assert_eq!(bucket.attempts, limit);
+        }
+    }
+}
