@@ -27,7 +27,11 @@ self-hosted server, host agent, administration CLI, and web console.
   transport and current-state checks, expiry/revocation closure and the committed-write local hub.
   PostgreSQL now publishes transactional content-free hints through schema-scoped LISTEN/NOTIFY,
   with bounded local dispatch, current recipient authorization, supervised recovery and generation
-  fences closing sockets on gaps or overflow. Shared-vault mutations and account-key updates remain open.
+  fences closing sockets on gaps or overflow. Personal account-key publication rechecks the
+  original identity and token lifetime under the account transaction, verifies complete signed
+  recipients, and commits revision, response bounds and audit atomically. Exact replay and
+  uncertain commits retain distinct recovery semantics. Shared-vault mutations, public-root
+  replacement, ARK rotation and device revocation workflows remain open.
   Durable first-operator
   setup and maintained WebAuthn verification exist on both stores, including discoverable login,
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
