@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Prevented an acknowledged SQLite custom-BEGIN cancellation from returning an open transaction
+  to the pool. Connections with remaining tracked transactions are rolled back before reuse;
+  failed cleanup discards them. Deterministic worker/acknowledgement barriers cover the exact
+  cancellation window, same-connection reuse, failed-cleanup replacement, queued rollback ordering
+  and subsequent authentication source admission. This distinct defect does not identify the
+  cause of the historical native post-reopen refresh failure.
+
 - Upgraded every Rust protocol dependency and the generated console contract source to
   `proto@e2b8817`, containing D-116 asynchronous agent signing. The server's API, crypto and
   model consumers and the public API artifact retain their existing behavior; server SSH
