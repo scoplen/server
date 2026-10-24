@@ -3,90 +3,6 @@
 use super::*;
 
 #[test]
-fn budgeted_read_prefixes_preserve_cursors_and_validate_the_whole_source_page() {
-    let entries = [23, 24, 256]
-        .map(|seq| api::SyncChange {
-            object_id: Uuid::now_v7(),
-            seq,
-            payload: vec![1; 32],
-            tombstone: false,
-            signer_device_id: Some(Uuid::now_v7()),
-        })
-        .to_vec();
-    let query = api::SyncChangesQuery { after: 0, limit: 1_000 };
-    for snapshot in [false, true] {
-        let page = |entries, next_cursor, more| {
-            if snapshot {
-                ReadPage::Snapshot(api::SyncSnapshotResponse {
-                    objects: entries,
-                    next_cursor,
-                    more,
-                })
-            } else {
-                ReadPage::Changes(api::SyncChangesResponse { changes: entries, next_cursor, more })
-            }
-        };
-        let decode = |body: &[u8]| {
-            if snapshot {
-                let result = api::SyncSnapshotResponse::from_cbor(body).expect("snapshot prefix");
-                api::SyncChangesResponse {
-                    changes: result.objects,
-                    next_cursor: result.next_cursor,
-                    more: result.more,
-                }
-            } else {
-                api::SyncChangesResponse::from_cbor(body).expect("changes prefix")
-            }
-        };
-        let exact_prefix = page(entries[..2].to_vec(), 24, true)
-            .encode_prefix(&query, api::SyncReadLimits::default(), "test")
-            .expect("exact two-entry encoding");
-        let limits =
-            api::SyncReadLimits { max_envelope_bytes: 32, max_body_bytes: exact_prefix.len() };
-        for (cursor, more) in [(256, true), (512, false)] {
-            let body = page(entries.clone(), cursor, more)
-                .encode_prefix(&query, limits, "test")
-                .expect("largest prefix");
-            assert_eq!(body, exact_prefix);
-            let body = page(entries.clone(), cursor, more)
-                .encode_prefix(&query, api::SyncReadLimits::default(), "test")
-                .expect("complete source fits");
-            let result = decode(&body);
-            assert_eq!(result.changes, entries);
-            assert_eq!(result.next_cursor, cursor);
-            assert_eq!(result.more, more);
-        }
-        for defect in 0..3 {
-            let mut invalid = entries.clone();
-            let mut cursor = 512;
-            match defect {
-                0 => invalid[2].object_id = invalid[0].object_id,
-                1 => invalid[2].seq = invalid[1].seq,
-                _ => cursor = 24,
-            }
-            assert!(page(invalid, cursor, false).encode_prefix(&query, limits, "test").is_err());
-        }
-        let empty_query = api::SyncChangesQuery { after: 512, limit: 1_000 };
-        let body = page(Vec::new(), 512, false)
-            .encode_prefix(&empty_query, api::SyncReadLimits::default(), "test")
-            .expect("empty final page");
-        let result = decode(&body);
-        assert_eq!(result.changes, Vec::new());
-        assert_eq!(result.next_cursor, 512);
-        assert!(!result.more);
-        assert!(
-            page(Vec::new(), 512, false)
-                .encode_prefix(
-                    &empty_query,
-                    api::SyncReadLimits { max_body_bytes: 1, ..limits },
-                    "test",
-                )
-                .is_err()
-        );
-    }
-}
-
-#[test]
 fn complete_conflict_cap_and_request_binding_fail_closed() {
     let object = Uuid::now_v7();
     let batch = SyncWriteBatch {
@@ -437,7 +353,11 @@ async fn round_trip(store: SyncBackend, vault: storage::VaultId) -> Uuid {
         }
     }
     assert_eq!(
-        store.sync_changes(vault, 0, 1_000).await.expect("unchanged store").next_cursor,
+        store
+            .sync_changes_with_read_limits(vault, 0, 1_000, reads.0)
+            .await
+            .expect("unchanged store")
+            .next_cursor,
         502
     );
     object

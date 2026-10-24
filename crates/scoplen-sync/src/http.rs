@@ -648,24 +648,30 @@ impl SyncBackend {
         >
     );
     backend_async!(
-        sync_changes(
+        sync_changes_with_read_limits(
             vault_id: storage::VaultId,
             after: u64,
             limit: u16,
-        ) -> Result<storage::ChangePage, storage::SyncStoreError>
+            limits: api::SyncReadLimits,
+        )
+            -> Result<storage::ChangePage, storage::SyncStoreError>
     );
     backend_async!(
-        sync_snapshot(
+        sync_snapshot_with_read_limits(
             vault_id: storage::VaultId,
             after: u64,
             limit: u16,
-        ) -> Result<storage::SnapshotPage, storage::SyncStoreError>
+            limits: api::SyncReadLimits,
+        )
+            -> Result<storage::SnapshotPage, storage::SyncStoreError>
     );
     backend_async!(
-        sync_versions(
+        sync_versions_with_read_limits(
             vault_id: storage::VaultId,
             object_id: storage::ObjectId,
-        ) -> Result<Vec<storage::SyncChange>, storage::SyncStoreError>
+            limits: api::SyncReadLimits,
+        )
+            -> Result<Vec<storage::SyncChange>, storage::SyncStoreError>
     );
     backend_async!(
         write_sync_batch(
@@ -1355,7 +1361,7 @@ async fn changes<A: SyncAuthenticator>(
     let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
-        .sync_changes(vault, query.after, query.limit)
+        .sync_changes_with_read_limits(vault, query.after, query.limit, state.read_body_limits.0)
         .await
         .map_err(|error| SyncHttpError::from_page_store(error, &instance))?;
     let response = api::SyncChangesResponse {
@@ -1363,12 +1369,15 @@ async fn changes<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
+    response
+        .validate_for_query_with_limits(&query, state.read_body_limits.0)
+        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(ReadPage::Changes(response).encode_prefix(
-        &query,
-        state.read_body_limits.0,
-        &instance,
-    )?))
+    Ok(cbor_response(
+        response
+            .to_cbor_with_limits(state.read_body_limits.0)
+            .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn snapshot<A: SyncAuthenticator>(
@@ -1386,7 +1395,7 @@ async fn snapshot<A: SyncAuthenticator>(
     let query = parse_query(uri.query(), &instance)?;
     let page = state
         .store
-        .sync_snapshot(vault, query.after, query.limit)
+        .sync_snapshot_with_read_limits(vault, query.after, query.limit, state.read_body_limits.0)
         .await
         .map_err(|error| SyncHttpError::from_page_store(error, &instance))?;
     let response = api::SyncSnapshotResponse {
@@ -1394,110 +1403,15 @@ async fn snapshot<A: SyncAuthenticator>(
         next_cursor: page.next_cursor,
         more: page.more,
     };
+    response
+        .validate_for_query_with_limits(&query, state.read_body_limits.0)
+        .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?;
     let _ = identity;
-    Ok(cbor_response(ReadPage::Snapshot(response).encode_prefix(
-        &query,
-        state.read_body_limits.0,
-        &instance,
-    )?))
-}
-
-enum ReadPage {
-    Changes(api::SyncChangesResponse),
-    Snapshot(api::SyncSnapshotResponse),
-}
-
-impl ReadPage {
-    fn entries(&self) -> &[api::SyncChange] {
-        match self {
-            Self::Changes(page) => &page.changes,
-            Self::Snapshot(page) => &page.objects,
-        }
-    }
-
-    fn entries_mut(&mut self) -> &mut Vec<api::SyncChange> {
-        match self {
-            Self::Changes(page) => &mut page.changes,
-            Self::Snapshot(page) => &mut page.objects,
-        }
-    }
-
-    fn mark_non_final(&mut self) {
-        let cursor = self.entries().last().expect("nonempty selected prefix").seq;
-        match self {
-            Self::Changes(page) => {
-                page.next_cursor = cursor;
-                page.more = true;
-            }
-            Self::Snapshot(page) => {
-                page.next_cursor = cursor;
-                page.more = true;
-            }
-        }
-    }
-
-    fn validate(
-        &self,
-        query: &api::SyncChangesQuery,
-        limits: api::SyncReadLimits,
-    ) -> Result<(), api::SyncCodecError> {
-        match self {
-            Self::Changes(page) => page.validate_for_query_with_limits(query, limits),
-            Self::Snapshot(page) => page.validate_for_query_with_limits(query, limits),
-        }
-    }
-
-    fn encode_prefix(
-        mut self,
-        query: &api::SyncChangesQuery,
-        limits: api::SyncReadLimits,
-        instance: &str,
-    ) -> SyncResult<Vec<u8>> {
-        // Validate the entire source page before truncating, so a budget cannot conceal invalid
-        // ordering, duplicate objects, or a bad cursor in the omitted tail.
-        self.validate(
-            query,
-            api::SyncReadLimits {
-                max_envelope_bytes: self
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.payload.len())
-                    .max()
-                    .unwrap_or(1)
-                    .max(1),
-                max_body_bytes: usize::MAX,
-            },
-        )
-        .map_err(|_| SyncHttpError::invalid_stored_response(instance))?;
-        if self.validate(query, limits).is_err() {
-            let mut low = 0;
-            let mut high = self.entries().len().saturating_sub(1);
-            // Shared codecs check exact CBOR sizes without encoding or copying payloads. Move
-            // only entry metadata while selecting the longest eligible prefix of this page.
-            while low < high {
-                let count = low + (high - low).div_ceil(2);
-                let mut tail = self.entries_mut().split_off(count);
-                self.mark_non_final();
-                let fits = self.validate(query, limits).is_ok();
-                self.entries_mut().append(&mut tail);
-                if fits {
-                    low = count;
-                } else {
-                    high = count - 1;
-                }
-            }
-            if low == 0 {
-                return Err(SyncHttpError::invalid_stored_response(instance));
-            }
-            self.entries_mut().truncate(low);
-            self.mark_non_final();
-        }
-        let encoded = match self {
-            Self::Changes(page) => page.to_cbor_with_limits(limits),
-            Self::Snapshot(page) => page.to_cbor_with_limits(limits),
-        };
-        encoded.map_err(|_| SyncHttpError::invalid_stored_response(instance))
-    }
+    Ok(cbor_response(
+        response
+            .to_cbor_with_limits(state.read_body_limits.0)
+            .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+    ))
 }
 
 async fn versions<A: SyncAuthenticator>(
@@ -1515,7 +1429,7 @@ async fn versions<A: SyncAuthenticator>(
             .await?;
     let versions = state
         .store
-        .sync_versions(vault, object)
+        .sync_versions_with_read_limits(vault, object, state.read_body_limits.0)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?;
     let response =
@@ -2012,6 +1926,8 @@ impl SyncHttpError {
             storage::SyncStoreError::Constraint(_)
             | storage::SyncStoreError::SequenceExhausted
             | storage::SyncStoreError::CorruptRow(_)
+            | storage::SyncStoreError::ReadBudgetExceeded
+            | storage::SyncStoreError::InvalidReadLimits
             | storage::SyncStoreError::Database(_) => Self::known(
                 instance,
                 StatusCode::SERVICE_UNAVAILABLE,
