@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Aligned PostgreSQL sync test vault ids with the UUIDv7 notification contract, restoring
+  shared-vault and Personal mutation coverage after transactional notification publication.
+  The PostgreSQL CI job now runs the complete 38-test sync storage suite instead of three
+  name-filtered subsets.
+
 - Upgraded the shared protocol pin to `cb4f248`, including the D-75 GET/CONNECT notification
   scope lookup, and regenerated the console's public API types from the same published revision.
 
