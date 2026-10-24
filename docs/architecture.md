@@ -170,9 +170,14 @@ storage boundary for local filesystem and S3-compatible stores, with validated k
 or multipart access. Database-backed roles initialize the configured object backend at startup and
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
-expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
-retention job scheduling and membership-aware tombstone purge orchestration run through the same
-bounded worker paths on SQLite and PostgreSQL. API/edge PostgreSQL startup and listener readiness
+expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Retention scheduling
+visits every vault through strictly increasing id pages of at most 1,000 entries on SQLite and
+PostgreSQL. Each sweep captures its greatest id before paging, defers later appended ids, and
+restarts from the beginning on the next heartbeat to discover ids inserted behind its cursor.
+Shutdown can interrupt an active retention sweep; unfinished durable jobs keep their existing
+deduplication, lease and retry behavior. The worker currently supplies no acknowledgement floor,
+so tombstones are purged only after the 180-day retention period; enrolled, unrevoked membership
+and policy-aware orchestration remain open. API/edge PostgreSQL startup and listener readiness
 are available; remaining shared-sync router mounting, application-level
 column encryption, control-plane audit event producers, and other worker jobs remain roadmap work.
 The storage boundary defines a redacted local deployment-key-file backend behind a KMS trait;

@@ -659,8 +659,12 @@ trait WorkerStoreBackend: Send + Sync {
     ) -> impl Future<Output = Result<u64, JobQueueError>> + Send;
     fn list_sync_vault_ids(
         &self,
+        after: Option<[u8; 16]>,
         limit: u16,
     ) -> impl Future<Output = Result<Vec<[u8; 16]>, SyncStoreError>> + Send;
+    fn last_sync_vault_id(
+        &self,
+    ) -> impl Future<Output = Result<Option<[u8; 16]>, SyncStoreError>> + Send;
     fn enqueue_job_if_absent(
         &self,
         id: [u8; 16],
@@ -736,9 +740,16 @@ macro_rules! impl_worker_store_backend {
 
             fn list_sync_vault_ids(
                 &self,
+                after: Option<[u8; 16]>,
                 limit: u16,
             ) -> impl Future<Output = Result<Vec<[u8; 16]>, SyncStoreError>> + Send {
-                <$store>::list_sync_vault_ids(self, limit)
+                <$store>::list_sync_vault_ids(self, after, limit)
+            }
+
+            fn last_sync_vault_id(
+                &self,
+            ) -> impl Future<Output = Result<Option<[u8; 16]>, SyncStoreError>> + Send {
+                <$store>::last_sync_vault_id(self)
             }
 
             fn enqueue_job_if_absent(
@@ -861,7 +872,12 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
             }
             Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
         }
-        match worker_retention_pass(store.as_ref()).await {
+        let retention = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = worker_retention_pass(store.as_ref()) => result,
+        };
+        match retention {
             Ok((scheduled, processed)) => {
                 info!(
                     role = "worker",
@@ -907,22 +923,33 @@ async fn worker_retention_pass_at<S: WorkerStoreBackend>(
     now: i64,
 ) -> Result<(u64, u64), ServerError> {
     let mut scheduled = 0_u64;
-    for vault_id in store
-        .list_sync_vault_ids(MAX_PAGE_SIZE)
-        .await
-        .map_err(|error| ServerError::Task(error.to_string()))?
-    {
-        if store
-            .enqueue_job_if_absent(
-                uuid::Uuid::new_v4().into_bytes(),
-                RETENTION_JOB_KIND,
-                &vault_id,
-                now,
-            )
+    // Fix the end before paging so newly appended ids cannot prolong this sweep. A new
+    // heartbeat starts from the beginning, including ids inserted behind this sweep's cursor.
+    let through =
+        store.last_sync_vault_id().await.map_err(|error| ServerError::Task(error.to_string()))?;
+    let mut after = None;
+    while let Some(through) = through {
+        let vaults = store
+            .list_sync_vault_ids(after, MAX_PAGE_SIZE)
             .await
-            .map_err(|error| ServerError::Task(error.to_string()))?
-        {
-            scheduled = scheduled.saturating_add(1);
+            .map_err(|error| ServerError::Task(error.to_string()))?;
+        for vault_id in vaults.iter().take_while(|id| **id <= through) {
+            if store
+                .enqueue_job_if_absent(
+                    uuid::Uuid::new_v4().into_bytes(),
+                    RETENTION_JOB_KIND,
+                    vault_id,
+                    now,
+                )
+                .await
+                .map_err(|error| ServerError::Task(error.to_string()))?
+            {
+                scheduled = scheduled.saturating_add(1);
+            }
+        }
+        after = vaults.last().copied();
+        if vaults.len() < usize::from(MAX_PAGE_SIZE) || after.is_some_and(|id| id >= through) {
+            break;
         }
     }
 
@@ -2893,6 +2920,214 @@ mod tests {
 
         store.pool().close().await;
         drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    fn retention_vault_id(index: u64) -> [u8; 16] {
+        let mut id = u128::from(index).to_be_bytes();
+        id[0] = 1;
+        id[6] = 0x70;
+        id[8] = (id[8] & 0x3f) | 0x80;
+        id
+    }
+
+    fn retention_tombstone() -> ObjectWrite {
+        ObjectWrite {
+            object_id: [62; 16],
+            base_sequence: None,
+            envelope: vec![1],
+            key_epoch: 1,
+            tombstone: true,
+            signer_device_id: Some([63; 16]),
+        }
+    }
+
+    async fn assert_worker_retention_sweep<S: WorkerStoreBackend>(
+        store: &S,
+        vault: [u8; 16],
+        count: u64,
+        now: i64,
+    ) {
+        store
+            .enqueue_job_if_absent(
+                uuid::Uuid::new_v4().into_bytes(),
+                RETENTION_JOB_KIND,
+                &vault,
+                now,
+            )
+            .await
+            .expect("preexisting retention job");
+        assert_eq!(
+            worker_retention_pass_at(store, now).await.expect("retention sweep"),
+            (count - 1, count),
+            "all pages are scheduled and existing jobs remain deduplicated"
+        );
+        let report = store.purge_sync_history(vault, None, now).await.expect("already purged");
+        assert_eq!(report.purged_tombstones, 0, "worker must have purged the later page");
+        assert_eq!(report.purge_horizon, 1);
+    }
+
+    #[tokio::test]
+    async fn worker_retention_pages_reach_later_vaults_and_restart_from_smaller_ids() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-retention-pages-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("open retention database");
+        let count = u64::from(MAX_PAGE_SIZE) + 1;
+        for index in 1..=count {
+            store
+                .create_sync_vault(retention_vault_id(index), VaultKind::Personal)
+                .await
+                .expect("seed vault");
+        }
+        let last = retention_vault_id(count);
+        store.write_sync_batch(last, &[retention_tombstone()]).await.expect("later tombstone");
+        let now =
+            worker_now_ms().expect("clock") + TOMBSTONE_PURGE_AFTER_DAYS * 24 * 60 * 60 * 1_000 + 1;
+        assert_worker_retention_sweep(&store, last, count, now).await;
+
+        let smaller = retention_vault_id(0);
+        store.create_sync_vault(smaller, VaultKind::Personal).await.expect("new smaller vault");
+        store.write_sync_batch(smaller, &[retention_tombstone()]).await.expect("new tombstone");
+        let next_now =
+            worker_now_ms().expect("clock") + TOMBSTONE_PURGE_AFTER_DAYS * 24 * 60 * 60 * 1_000 + 1;
+        assert_worker_retention_sweep(&store, smaller, count + 1, next_now).await;
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_retention_pages_reach_later_vaults_and_restart_from_smaller_ids() {
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(database_url.as_str()).await.expect("open PostgreSQL");
+        let count = u64::from(MAX_PAGE_SIZE) + 1;
+        for index in 1..=count {
+            let id = retention_vault_id(index);
+            store.create_personal_sync_vault(id, id, &[1]).await.expect("seed vault");
+        }
+        let last = retention_vault_id(count);
+        store.write_sync_batch(last, &[retention_tombstone()]).await.expect("later tombstone");
+        let now =
+            worker_now_ms().expect("clock") + TOMBSTONE_PURGE_AFTER_DAYS * 24 * 60 * 60 * 1_000 + 1;
+        assert_worker_retention_sweep(&store, last, count, now).await;
+
+        let smaller = retention_vault_id(0);
+        store.create_personal_sync_vault(smaller, smaller, &[1]).await.expect("new smaller vault");
+        store.write_sync_batch(smaller, &[retention_tombstone()]).await.expect("new tombstone");
+        let next_now =
+            worker_now_ms().expect("clock") + TOMBSTONE_PURGE_AFTER_DAYS * 24 * 60 * 60 * 1_000 + 1;
+        assert_worker_retention_sweep(&store, smaller, count + 1, next_now).await;
+        store.pool().close().await;
+        cleanup_postgres_fixture(fixture_pool, schema).await;
+    }
+
+    #[tokio::test]
+    async fn worker_retention_sweep_defers_vaults_appended_during_scheduling() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-retention-bound-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("open retention database");
+        let count = u64::from(MAX_PAGE_SIZE) + 1;
+        for index in 1..=count {
+            store
+                .create_sync_vault(retention_vault_id(index), VaultKind::Personal)
+                .await
+                .expect("seed vault");
+        }
+        // Every scheduled id appends a larger id, so an unfenced sweep cannot exhaust the source.
+        sqlx::query(
+            "CREATE TRIGGER append_vault_on_job AFTER INSERT ON jobs
+             BEGIN
+               INSERT INTO sync_vaults (vault_id, kind)
+               VALUES (CAST(printf('%016x', (SELECT COUNT(*) FROM sync_vaults)) AS BLOB), 'personal');
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .expect("append vaults during scheduling");
+        let result = tokio::time::timeout(Duration::from_secs(30), worker_retention_pass(&store))
+            .await
+            .expect("fixed upper bound ends sweep")
+            .expect("retention sweep");
+        assert_eq!(result, (count, count));
+        let vault_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_vaults")
+            .fetch_one(store.pool())
+            .await
+            .expect("appended vaults remain");
+        assert_eq!(vault_count, i64::try_from(count * 2).expect("test count"));
+        sqlx::query("DROP TRIGGER append_vault_on_job")
+            .execute(store.pool())
+            .await
+            .expect("stop fixture appends");
+        assert_eq!(
+            worker_retention_pass(&store).await.expect("next sweep"),
+            (count * 2, count * 2)
+        );
+        store.pool().close().await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_shutdown_interrupts_blocked_retention_scheduling() {
+        let (database_url, fixture_pool, schema) = postgres_fixture().await;
+        let store =
+            Arc::new(PostgresStore::connect(database_url.as_str()).await.expect("open PostgreSQL"));
+        let vault = [61; 16];
+        store.create_personal_sync_vault(vault, vault, &[1]).await.expect("create vault");
+        let mut blocker = store.pool().begin().await.expect("hold scheduling lock");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("blocker pid");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || encode($2, 'hex'), 0))")
+            .bind(RETENTION_JOB_KIND)
+            .bind(vault.as_slice())
+            .execute(&mut *blocker)
+            .await
+            .expect("hold vault scheduling lock");
+        let data_dir = std::env::temp_dir()
+            .join(format!("scoplen-retention-shutdown-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&data_dir).expect("signer directory");
+        let signer_path = data_dir.join("audit-signing.key");
+        fs::write(&signer_path, "11".repeat(32)).expect("write audit key");
+        let signer = LocalAuditSigner::load(&signer_path).expect("audit signer");
+        let (shutdown, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_worker_role(store.clone(), Arc::new(signer), receiver));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(blocker_pid)
+                .fetch_one(store.pool())
+                .await
+                .expect("observe retention scheduling waiter");
+                if waiting {
+                    break;
+                }
+                assert!(!worker.is_finished(), "worker must still be waiting");
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("worker reached retention scheduling");
+        shutdown.send(true).expect("request shutdown");
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("retention cancellation does not wait for database lock")
+            .expect("worker task")
+            .expect("normal shutdown");
+        blocker.rollback().await.expect("release fixture lock");
+        store.pool().close().await;
+        drop(store);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
     }
 

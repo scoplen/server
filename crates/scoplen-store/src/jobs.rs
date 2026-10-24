@@ -402,7 +402,7 @@ impl PostgresStore {
             .bind(payload)
             .execute(&mut *transaction)
             .await?;
-        let existing = sqlx::query_scalar::<_, i64>(
+        let existing = sqlx::query_scalar::<_, i32>(
             "SELECT 1 FROM jobs WHERE kind = $1 AND payload = $2 AND finished_at_ms IS NULL LIMIT 1",
         )
         .bind(kind)

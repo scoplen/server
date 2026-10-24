@@ -433,26 +433,51 @@ impl SqliteStore {
             .collect()
     }
 
-    /// List a bounded, stable page of vault identifiers for retention scheduling.
+    /// List a bounded page of vault identifiers strictly after `after`, in byte order.
     ///
     /// The worker deliberately receives identifiers only; membership and acknowledgement policy
-    /// stay outside this storage enumeration. Callers repeat the bounded pass on later heartbeats.
+    /// stay outside this storage enumeration. Continue from the last returned id to visit later
+    /// pages; start from `None` on each new retention sweep to discover newly inserted smaller ids.
     ///
     /// # Errors
     ///
     /// Returns [`SyncStoreError::InvalidPageSize`] for an invalid bound or a database/corrupt-row
     /// error when vault identifiers cannot be read safely.
-    pub async fn list_sync_vault_ids(&self, limit: u16) -> Result<Vec<VaultId>, SyncStoreError> {
+    pub async fn list_sync_vault_ids(
+        &self,
+        after: Option<VaultId>,
+        limit: u16,
+    ) -> Result<Vec<VaultId>, SyncStoreError> {
         if !(1..=MAX_PAGE_SIZE).contains(&limit) {
             return Err(SyncStoreError::InvalidPageSize);
         }
-        let rows = sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT ?")
-            .bind(i64::from(limit))
-            .fetch_all(self.pool())
-            .await?;
+        let query = if let Some(after) = after {
+            sqlx::query(
+                "SELECT vault_id FROM sync_vaults WHERE vault_id > ? ORDER BY vault_id ASC LIMIT ?",
+            )
+            .bind(after.to_vec())
+        } else {
+            sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT ?")
+        };
+        let rows = query.bind(i64::from(limit)).fetch_all(self.pool()).await?;
         rows.into_iter()
             .map(|row| id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id"))
             .collect()
+    }
+
+    /// Read the greatest vault id in byte order as a retention sweep's fixed upper bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error when the identifier cannot be read safely.
+    pub async fn last_sync_vault_id(&self) -> Result<Option<VaultId>, SyncStoreError> {
+        sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT vault_id FROM sync_vaults ORDER BY vault_id DESC LIMIT 1",
+        )
+        .fetch_optional(self.pool())
+        .await?
+        .map(|id| id_from_bytes(&id, "vault_id"))
+        .transpose()
     }
 
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
@@ -2527,23 +2552,51 @@ impl PostgresStore {
         Ok((vault_id, wrapped_key))
     }
 
-    /// List a bounded, stable page of vault identifiers for retention scheduling.
+    /// List a bounded page of vault identifiers strictly after `after`, in byte order.
+    ///
+    /// Continue from the last returned id; start from `None` on each new retention sweep to
+    /// discover newly inserted smaller ids. Membership and acknowledgement policy stay outside
+    /// this storage enumeration.
     ///
     /// # Errors
     ///
     /// Returns [`SyncStoreError::InvalidPageSize`] for an invalid bound or a database/corrupt-row
     /// error when vault identifiers cannot be read safely.
-    pub async fn list_sync_vault_ids(&self, limit: u16) -> Result<Vec<VaultId>, SyncStoreError> {
+    pub async fn list_sync_vault_ids(
+        &self,
+        after: Option<VaultId>,
+        limit: u16,
+    ) -> Result<Vec<VaultId>, SyncStoreError> {
         if !(1..=MAX_PAGE_SIZE).contains(&limit) {
             return Err(SyncStoreError::InvalidPageSize);
         }
-        let rows = sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT $1")
-            .bind(i64::from(limit))
-            .fetch_all(self.pool())
-            .await?;
+        let query = if let Some(after) = after {
+            sqlx::query(
+                "SELECT vault_id FROM sync_vaults WHERE vault_id > $1 ORDER BY vault_id ASC LIMIT $2",
+            )
+            .bind(after.to_vec())
+        } else {
+            sqlx::query("SELECT vault_id FROM sync_vaults ORDER BY vault_id ASC LIMIT $1")
+        };
+        let rows = query.bind(i64::from(limit)).fetch_all(self.pool()).await?;
         rows.into_iter()
             .map(|row| id_from_bytes(&row.try_get::<Vec<u8>, _>("vault_id")?, "vault_id"))
             .collect()
+    }
+
+    /// Read the greatest vault id in byte order as a retention sweep's fixed upper bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error when the identifier cannot be read safely.
+    pub async fn last_sync_vault_id(&self) -> Result<Option<VaultId>, SyncStoreError> {
+        sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT vault_id FROM sync_vaults ORDER BY vault_id DESC LIMIT 1",
+        )
+        .fetch_optional(self.pool())
+        .await?
+        .map(|id| id_from_bytes(&id, "vault_id"))
+        .transpose()
     }
 
     /// Prune old PostgreSQL versions and purge eligible tombstones for one vault.

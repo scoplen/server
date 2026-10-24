@@ -15,9 +15,9 @@ use scoplen_store::PostgresStore;
 use scoplen_store::{
     RelationalStore, SqliteStore, StoreError,
     sync::{
-        MAX_MEMBERS_PER_SHARED_VAULT, MAX_OBJECTS_PER_VAULT, MAX_SHARED_VAULT_KEY_BYTES,
-        MAX_SHARED_VAULT_KEY_EPOCHS, MAX_SHARED_VAULTS_PER_ACCOUNT, ObjectWrite,
-        SharedVaultEpochWrap, SharedVaultKey, SyncCardinalityLimits, SyncStoreError,
+        MAX_MEMBERS_PER_SHARED_VAULT, MAX_OBJECTS_PER_VAULT, MAX_PAGE_SIZE,
+        MAX_SHARED_VAULT_KEY_BYTES, MAX_SHARED_VAULT_KEY_EPOCHS, MAX_SHARED_VAULTS_PER_ACCOUNT,
+        ObjectWrite, SharedVaultEpochWrap, SharedVaultKey, SyncCardinalityLimits, SyncStoreError,
         TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
     },
 };
@@ -26,6 +26,100 @@ fn test_directory() -> PathBuf {
     let path = std::env::temp_dir().join(format!("scoplen-sync-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&path).expect("create isolated test directory");
     path
+}
+
+async fn assert_retention_vault_pages<F, P>(mut page: F, expected: &[[u8; 16]])
+where
+    F: FnMut(Option<[u8; 16]>, u16) -> P,
+    P: std::future::Future<Output = Result<Vec<[u8; 16]>, SyncStoreError>>,
+{
+    let mut after = None;
+    let mut actual = Vec::new();
+    loop {
+        let ids = page(after, MAX_PAGE_SIZE).await.expect("retention page");
+        assert!(ids.len() <= usize::from(MAX_PAGE_SIZE));
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(ids.first().is_none_or(|first| after.is_none_or(|after| *first > after)));
+        if ids.is_empty() {
+            break;
+        }
+        after = ids.last().copied();
+        actual.extend(ids);
+        assert!(actual.len() <= expected.len(), "enumeration must terminate without repetition");
+    }
+    assert_eq!(actual, expected);
+    for limit in [0, MAX_PAGE_SIZE + 1] {
+        assert!(matches!(page(None, limit).await, Err(SyncStoreError::InvalidPageSize)));
+    }
+}
+
+#[tokio::test]
+async fn retention_vault_pages_cover_every_id_once() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    assert_eq!(store.last_sync_vault_id().await.expect("empty upper bound"), None);
+    assert_eq!(
+        store.list_sync_vault_ids(None, MAX_PAGE_SIZE).await.expect("empty page"),
+        Vec::<[u8; 16]>::new()
+    );
+    let mut expected: Vec<_> = (0..=u128::from(MAX_PAGE_SIZE) * 2).map(u128::to_be_bytes).collect();
+    expected.push([255; 16]);
+    let mut transaction = store.pool().begin().await.expect("seed transaction");
+    for id in expected.iter().rev() {
+        sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES (?, 'personal')")
+            .bind(id.as_slice())
+            .execute(&mut *transaction)
+            .await
+            .expect("seed vault");
+    }
+    transaction.commit().await.expect("seed vaults");
+    assert_eq!(store.last_sync_vault_id().await.expect("upper bound"), Some([255; 16]));
+    assert_retention_vault_pages(|after, limit| store.list_sync_vault_ids(after, limit), &expected)
+        .await;
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_retention_vault_pages_cover_every_id_once() {
+    let database = std::env::var("SCOPLEN_TEST_DATABASE_URL")
+        .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
+    let pool = sqlx::PgPool::connect(&database).await.expect("fixture admin pool");
+    let schema = format!("retention_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&pool)
+        .await
+        .expect("owned retention schema");
+    let mut url = url::Url::parse(&database).expect("fixture URL");
+    url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+    let store = PostgresStore::connect(url.as_str()).await.expect("open PostgreSQL");
+    assert_eq!(store.last_sync_vault_id().await.expect("empty upper bound"), None);
+    assert_eq!(
+        store.list_sync_vault_ids(None, MAX_PAGE_SIZE).await.expect("empty page"),
+        Vec::<[u8; 16]>::new()
+    );
+    let mut expected: Vec<_> = (0..=u128::from(MAX_PAGE_SIZE) * 2).map(u128::to_be_bytes).collect();
+    expected.push([255; 16]);
+    let mut transaction = store.pool().begin().await.expect("seed transaction");
+    for id in expected.iter().rev() {
+        sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES ($1, 'personal')")
+            .bind(id.as_slice())
+            .execute(&mut *transaction)
+            .await
+            .expect("seed vault");
+    }
+    transaction.commit().await.expect("seed vaults");
+    assert_eq!(store.last_sync_vault_id().await.expect("upper bound"), Some([255; 16]));
+    assert_retention_vault_pages(|after, limit| store.list_sync_vault_ids(after, limit), &expected)
+        .await;
+    store.pool().close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&pool)
+        .await
+        .expect("remove owned retention schema");
+    pool.close().await;
 }
 
 #[cfg(feature = "postgres-integration")]
