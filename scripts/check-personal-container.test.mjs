@@ -15,14 +15,91 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
   describeCheckFailure,
   describeImageBuildFailure,
+  describeWalHolderFailure,
   prepareRecoveryProbeContext,
 } from "./check-personal-container.mjs";
+
+test("actual recovery probe reports a bounded failure before opening an invalid context", async () => {
+  const { error, stdout, stderr } = await new Promise((accept) => {
+    execFile(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("./personal-sqlite-recovery-probe.mjs", import.meta.url),
+        ),
+        "seed-and-hold",
+        "invalid",
+      ],
+      { timeout: 10_000, windowsHide: true },
+      (error, stdout, stderr) => accept({ error, stdout, stderr }),
+    );
+  });
+  assert.equal(error?.code, 1);
+  assert.equal(stdout, "");
+  assert.deepEqual(describeWalHolderFailure({ ExitCode: error.code }, stderr), {
+    exitCode: 1,
+    oomKilled: false,
+    probe: { phase: "context", code: "ERR_ASSERTION", sqliteCode: null },
+  });
+});
+
+test("WAL holder failures expose only fixed probe phases and bounded status", () => {
+  const secret = "synthetic-private-value";
+  const stderr = `Scoplen SQLite probe failure: ${JSON.stringify({
+    phase: "verify-base-only",
+    code: "ERR_SQLITE_ERROR",
+    sqliteCode: 14,
+    message: secret,
+  })}\n${secret}`;
+  assert.deepEqual(
+    describeWalHolderFailure(
+      { ExitCode: 1, OOMKilled: false, Error: secret },
+      stderr,
+    ),
+    {
+      exitCode: 1,
+      oomKilled: false,
+      probe: {
+        phase: "verify-base-only",
+        code: "ERR_SQLITE_ERROR",
+        sqliteCode: 14,
+      },
+    },
+  );
+  for (const value of [
+    secret,
+    "{",
+    JSON.stringify({ phase: secret }),
+    "null",
+  ]) {
+    const result = describeWalHolderFailure(
+      { ExitCode: secret, OOMKilled: secret },
+      `Scoplen SQLite probe failure: ${value}`,
+    );
+    assert.deepEqual(result, { exitCode: null, oomKilled: false, probe: null });
+    assert(!JSON.stringify(result).includes(secret));
+  }
+  const result = describeWalHolderFailure(
+    { ExitCode: 137, OOMKilled: true },
+    `Scoplen SQLite probe failure: ${JSON.stringify({
+      phase: "seed-rows",
+      code: secret,
+      sqliteCode: 65536,
+    })}`,
+  );
+  assert.deepEqual(result, {
+    exitCode: 137,
+    oomKilled: true,
+    probe: { phase: "seed-rows", code: null, sqliteCode: null },
+  });
+});
 
 test("build failures expose only fixed categories, stage names and bounded exit metadata", () => {
   const secret = "synthetic-private-value";
