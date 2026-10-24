@@ -25,6 +25,20 @@ The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracin
 material is written only under the configured data directory and is never included in request
 responses or logs.
 
+Device-refresh storage warnings carry only the request id, the fixed endpoint, an operation
+phase (`source_admission`, `keyring`, or `refresh_transaction`), a static error category and
+elapsed milliseconds. Admission receipt is a debug event with the same request id. Storage
+classification discards the original database error and distinguishes SQLite busy/locked,
+pool timeout and pool closure from other database failures. No SQL text, URL, proof, token or
+submitted content is logged. These events locate future failures without changing HTTP
+responses or automatically replaying refresh credentials after an uncertain commit.
+SQLite uses a five-second busy timeout; WAL permits readers while an unrelated writer holds
+its reservation, but another writer can still fail before source admission is committed.
+Controlled HTTP contention and admission-cancellation tests cover those boundaries. They do
+not identify the cause of the observed native post-reopen refresh failure.
+For a private diagnostic run, `RUST_LOG=info,scoplen_server::device_auth=debug` includes
+admission receipt; storage warnings are already visible at the default info level.
+
 The API role loads the React Personal console from `console.assets_dir`, defaulting to
 `web/console/dist` relative to the working directory, with `SPL_CONSOLE_ASSETS_DIR` as an override.
 The production build records explicit paths, byte lengths and SHA-256 hashes. Startup reads only

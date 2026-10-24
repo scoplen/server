@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added content-free authentication storage diagnostics with request-id correlation, static
+  phases/error categories and elapsed time. SQLite busy/locked failures and connection-pool
+  failures remain distinguishable without retaining database text. Real HTTP writer-timeout
+  and cancelled-admission tests preserve credentials, audit state, pool availability and
+  existing recovery flags. The historical native post-reopen refresh failure remains unresolved.
+
 - Moved D-93 read admission into SQLite/PostgreSQL metadata queries before envelope loading.
   The production changes, snapshot and history paths validate full source metadata, select exact
   encoded budgets and load only approved payloads in the same snapshot. First-entry and complete

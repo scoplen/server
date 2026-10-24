@@ -5,6 +5,7 @@ use std::{
     error::Error as _,
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Instant,
 };
 
 use axum::{
@@ -638,9 +639,21 @@ async fn refresh(
             }
         }
     };
+    let keyring_started = Instant::now();
     let keyring = match state.backend.keyring(&state.kms).await {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let error = match error {
+                DeviceTokenKeyError::Storage(error) => DeviceAuthenticationError::from(error),
+                DeviceTokenKeyError::Audit(_) => DeviceAuthenticationError::Audit,
+                DeviceTokenKeyError::Clock => DeviceAuthenticationError::Clock,
+                DeviceTokenKeyError::Entropy => DeviceAuthenticationError::Entropy,
+                DeviceTokenKeyError::Integrity => DeviceAuthenticationError::Database,
+                DeviceTokenKeyError::CommitOutcomeUnknown => {
+                    DeviceAuthenticationError::CommitOutcomeUnknown
+                }
+            };
+            log_auth_storage_failure(&error, endpoint, "keyring", &request_id, keyring_started);
             return refresh_problem(
                 &state,
                 source,
@@ -653,6 +666,7 @@ async fn refresh(
             .await;
         }
     };
+    let refresh_started = Instant::now();
     let mut result = match state
         .backend
         .refresh(source, &state.trusted_origin, &refresh_token, &proof, &keyring)
@@ -700,7 +714,16 @@ async fn refresh(
                 }
             }
         }
-        Err(error) => business_problem(&error, &request_id),
+        Err(error) => {
+            log_auth_storage_failure(
+                &error,
+                endpoint,
+                "refresh_transaction",
+                &request_id,
+                refresh_started,
+            );
+            business_problem(&error, &request_id)
+        }
     };
     if cors {
         add_cors(&mut result, &state.trusted_origin);
@@ -822,6 +845,8 @@ async fn source_admission(
     source: IpAddr,
     request_id: &str,
 ) -> Result<(), Response> {
+    let started = Instant::now();
+    tracing::debug!(request_id, endpoint = ?endpoint, phase = "source_admission", "authentication request received");
     match state.backend.admit_source(endpoint, source).await {
         Ok(DeviceAuthAdmission::Admitted) => Ok(()),
         Ok(DeviceAuthAdmission::RateLimited(delay)) => Err(audited_problem(
@@ -837,15 +862,46 @@ async fn source_admission(
             Some(delay),
         )
         .await),
-        Err(_) => Err(problem(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "auth.storage_unavailable",
-            false,
-            true,
-            request_id,
-            None,
-        )),
+        Err(error) => {
+            log_auth_storage_failure(&error, endpoint, "source_admission", request_id, started);
+            Err(problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "auth.storage_unavailable",
+                false,
+                true,
+                request_id,
+                None,
+            ))
+        }
     }
+}
+
+fn log_auth_storage_failure(
+    error: &DeviceAuthenticationError,
+    endpoint: DeviceAuthEndpoint,
+    phase: &'static str,
+    request_id: &str,
+    started: Instant,
+) {
+    let kind = match error {
+        DeviceAuthenticationError::Database => "database",
+        DeviceAuthenticationError::DatabaseBusy => "database_busy",
+        DeviceAuthenticationError::PoolTimedOut => "pool_timeout",
+        DeviceAuthenticationError::PoolClosed => "pool_closed",
+        DeviceAuthenticationError::Audit => "audit",
+        DeviceAuthenticationError::Clock => "clock",
+        DeviceAuthenticationError::Entropy => "entropy",
+        DeviceAuthenticationError::CommitOutcomeUnknown => "commit_outcome_unknown",
+        _ => return,
+    };
+    tracing::warn!(
+        request_id,
+        endpoint = ?endpoint,
+        phase,
+        error_kind = kind,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "authentication storage operation failed"
+    );
 }
 
 #[allow(clippy::result_large_err)]
@@ -1212,6 +1268,8 @@ fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], ()> {
 
 #[cfg(test)]
 mod tests {
+    mod diagnostics;
+
     use super::*;
     use scoplen_api::auth::INITIAL_DEVICE_ACCESS_SCOPE;
     use scoplen_crypto::{

@@ -408,7 +408,15 @@ listener returns no-store JSON and RFC 9457 problems. Device and refresh admissi
 across API instances; a verified spent-token reuse revokes its 30-day family. A refresh response
 whose commit cannot be confirmed requires a new device challenge instead of retrying the old
 credential. `GET /.well-known/jwks.json` publishes only the active and unexpired overlap public
-token keys. `GET /api/v1/accounts/me` uses the same enrolled-device boundary with the exact
+token keys. Source-admission and device-refresh storage failures emit a warning correlated
+with the problem's request id, a static operation phase and error category, and elapsed
+milliseconds. SQLite busy/locked errors and closed or timed-out connection pools have distinct
+categories; raw database errors, credentials and proofs are excluded. The device-refresh phases
+distinguish source admission, keyring loading and the refresh transaction. A controlled SQLite writer
+timeout returns `auth.storage_unavailable` without consuming the refresh credential; this
+coverage does not establish the cause of the unresolved native post-reopen refresh failure.
+Unknown commit outcomes retain their separate non-retryable device-challenge recovery.
+`GET /api/v1/accounts/me` uses the same enrolled-device boundary with the exact
 `account:read` scope. It rechecks the account, device, proof key, certificate publication and
 revocation inside the read transaction, and returns only the caller's bounded account Resource.
 The HTTP ETag equals the stable strong body tag; responses disable caching and preserve
