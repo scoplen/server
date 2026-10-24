@@ -11,9 +11,9 @@ workspace = true
 
 [dependencies]
 scoplen-audit = { path = "../scoplen-audit" }
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cb4f2488ae1847ede2534a8585ba1907c8978f21" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "22a83ad3d68557f2e19be570af0facbd5c0b8265" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cb4f2488ae1847ede2534a8585ba1907c8978f21" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "22a83ad3d68557f2e19be570af0facbd5c0b8265" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true

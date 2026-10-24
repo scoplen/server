@@ -108,9 +108,11 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Console integration and remaining
 control-plane authorization remain roadmap work. All server proto dependencies
-are pinned to `proto@cb4f2488` for shared authentication, Operator token, scope,
+are pinned to `proto@22a83ad3` for shared authentication, Operator token, scope,
 object-signature, complete account-device statement, D-114 pairing and notification scope lookup
-contracts.
+contracts, D-115 account-key problem vectors and RUSTSEC-2026-0387 dependency fixes.
+The server lock also resolves patched `crypto-bigint` 0.7.6 and `ctutils` 0.4.5;
+published K-2 formats and shared public APIs remain unchanged.
 The stores also provide independent durable pairing admission for each method/route:
 30 mutation attempts or 120 reads per actual source, 30 mutations or 60 reads per verified
 capability, and 30 mutations or 120 reads per current authenticated account per 60 seconds.
