@@ -344,7 +344,7 @@ async fn postgres_shared_vault_epoch_publication_and_retirement_are_atomic() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     let admin = uuid::Uuid::new_v4().into_bytes();
     store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
     assert!(matches!(
@@ -505,7 +505,7 @@ async fn postgres_shared_vault_member_addition_and_removal_preserve_key_isolatio
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     let admin = uuid::Uuid::new_v4().into_bytes();
     let member = uuid::Uuid::new_v4().into_bytes();
     store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
@@ -727,7 +727,7 @@ async fn postgres_shared_vault_mutations_roll_back_late_storage_failures() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     let admin = uuid::Uuid::new_v4().into_bytes();
     let member = uuid::Uuid::new_v4().into_bytes();
     store.create_shared_sync_vault(vault, admin, &[1]).await.expect("create shared vault");
@@ -1057,7 +1057,7 @@ async fn postgres_personal_sync_write_change_ack_round_trip() {
         .await
         .expect("open PostgreSQL with custom limits");
     assert_eq!(store.sync_cardinality_limits(), limits);
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     let account = uuid::Uuid::new_v4().into_bytes();
     store.create_personal_sync_vault(vault, account, &[7]).await.expect("personal vault");
     assert_eq!(store.sync_vault_kind(vault).await.expect("vault kind"), VaultKind::Personal);
@@ -1142,7 +1142,7 @@ async fn postgres_personal_sync_conflicts_rollback_in_request_order() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     store
         .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[7])
         .await
@@ -1191,7 +1191,7 @@ async fn postgres_personal_sync_concurrent_writes_and_acks_are_monotone() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     store
         .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[7])
         .await
@@ -1245,8 +1245,8 @@ async fn postgres_personal_sync_snapshot_and_versions_are_vault_scoped() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let first = uuid::Uuid::new_v4().into_bytes();
-    let second = uuid::Uuid::new_v4().into_bytes();
+    let first = uuid::Uuid::now_v7().into_bytes();
+    let second = uuid::Uuid::now_v7().into_bytes();
     store
         .create_personal_sync_vault(first, uuid::Uuid::new_v4().into_bytes(), &[1])
         .await
@@ -1322,7 +1322,7 @@ async fn postgres_personal_sync_snapshot_recovers_after_retention() {
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     store
         .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
         .await
@@ -1376,7 +1376,7 @@ async fn postgres_personal_sync_snapshot_and_versions_remain_consistent_during_w
     let database_url = std::env::var("SCOPLEN_TEST_DATABASE_URL")
         .expect("SCOPLEN_TEST_DATABASE_URL is required for PostgreSQL integration tests");
     let store = PostgresStore::connect(&database_url).await.expect("open PostgreSQL");
-    let vault = uuid::Uuid::new_v4().into_bytes();
+    let vault = uuid::Uuid::now_v7().into_bytes();
     store
         .create_personal_sync_vault(vault, uuid::Uuid::new_v4().into_bytes(), &[1])
         .await
