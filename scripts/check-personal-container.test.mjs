@@ -16,7 +16,54 @@ import {
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
+  describeImageBuildFailure,
 } from "./check-personal-container.mjs";
+
+test("build failures expose only fixed categories, stage names and bounded exit metadata", () => {
+  const secret = "synthetic-private-value";
+  const describe = (stderr, error = { code: 1 }) =>
+    describeImageBuildFailure({ error, stdout: secret, stderr });
+  assert.deepEqual(
+    describe(`#17 [server-build 8/8] RUN ${secret}\nno space left on device`),
+    {
+      category: "storage-exhausted",
+      lastObservedStage: "server-build",
+      exitCode: 1,
+      signal: null,
+    },
+  );
+  for (const [message, expected] of [
+    ["cannot allocate memory", "memory-or-kill"],
+    ["process exited with exit code: 137", "memory-or-kill"],
+    ["could not resolve host", "network"],
+    ["error[E0308]: could not compile", "compiler"],
+    [secret, "unknown"],
+  ]) {
+    const result = describe(
+      `#2 [console-build 1/2]\n#3 [runtime 1/7]\n${secret}\n${message}`,
+    );
+    assert.equal(result.category, expected);
+    assert.equal(result.lastObservedStage, "runtime");
+    assert(!JSON.stringify(result).includes(secret));
+  }
+  assert.equal(
+    describe("", { killed: true, signal: "SIGTERM" }).category,
+    "deadline-or-kill",
+  );
+  assert.equal(
+    describe("", { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }).category,
+    "output-limit",
+  );
+  assert.deepEqual(
+    describe(secret, { code: secret, signal: secret, message: secret }),
+    {
+      category: "unknown",
+      lastObservedStage: "unknown",
+      exitCode: null,
+      signal: null,
+    },
+  );
+});
 
 test("cleanup refuses foreign Docker ownership even inside the expected Compose project", () => {
   const labels = {

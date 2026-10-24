@@ -21,6 +21,52 @@ const repository = fileURLToPath(new URL("../", import.meta.url));
 const ownerLabel = "com.scoplen.personal-container-check";
 const fixturePrefix = "scoplen-personal-container-";
 
+export function describeImageBuildFailure({ error, stdout, stderr }) {
+  const output = `${stdout ?? ""}\n${stderr ?? ""}`;
+  let category = "unknown";
+  if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+    category = "output-limit";
+  else if (
+    /no space left on device|disk quota exceeded|\bENOSPC\b/i.test(output)
+  )
+    category = "storage-exhausted";
+  else if (
+    /cannot allocate memory|out of memory|signal: (?:9|killed)|exit code: 137\b/i.test(
+      output,
+    )
+  )
+    category = "memory-or-kill";
+  else if (error?.killed) category = "deadline-or-kill";
+  else if (
+    /could not resolve host|failed to resolve|connection (?:timed out|reset|refused)|TLS handshake timeout|network is unreachable/i.test(
+      output,
+    )
+  )
+    category = "network";
+  else if (
+    /error\[E\d{4}\]|could not compile|linking with .+ failed|compilation terminated/i.test(
+      output,
+    )
+  )
+    category = "compiler";
+  let lastObservedStage = "unknown";
+  for (const stage of output.matchAll(
+    /#\d+\s+\[(console-build|server-build|runtime)(?:\s[^\]]*)?\]/g,
+  ))
+    lastObservedStage = stage[1];
+  return {
+    category,
+    lastObservedStage,
+    exitCode:
+      Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255
+        ? error.code
+        : null,
+    signal: ["SIGTERM", "SIGKILL", "SIGABRT"].includes(error?.signal)
+      ? error.signal
+      : null,
+  };
+}
+
 export function assertOwnedResource(labels, run, project) {
   assert.equal(labels?.[ownerLabel], run, "resource belongs to another check");
   if (project !== undefined)
@@ -319,7 +365,7 @@ export async function checkPersonalContainer(driverPath) {
     }
 
     progress("production image build");
-    await docker(
+    const build = await docker(
       [
         "build",
         "--label",
@@ -330,8 +376,16 @@ export async function checkPersonalContainer(driverPath) {
         "plain",
         ".",
       ],
-      { timeout: 3_600_000 },
+      { timeout: 3_600_000, allowFailure: true },
     );
+    if (build.error) {
+      console.error(
+        `Personal image build failure: ${JSON.stringify(describeImageBuildFailure(build))}`,
+      );
+      throw new Error(
+        "production image build failed; inspect private build output",
+      );
+    }
     const built = await inspect("image", image);
     assertOwnedResource(built.Config.Labels, run);
     imageId = built.Id;
