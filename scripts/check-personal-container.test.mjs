@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -19,6 +21,7 @@ import {
   assertPrivateDirectoryArchive,
   describeCheckFailure,
   describeImageBuildFailure,
+  prepareRecoveryProbeContext,
 } from "./check-personal-container.mjs";
 
 test("build failures expose only fixed categories, stage names and bounded exit metadata", () => {
@@ -81,6 +84,7 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
     "production image metadata",
     "image data-directory validation",
     "probe image pull",
+    "non-root recovery probe admission",
     "TLS fixture preparation",
     "historical source extraction",
     "matching old image build",
@@ -116,6 +120,54 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
     assert.equal(description.category, "private-diagnostic-write");
     assert.equal(description.ioCode, code);
     assert(!JSON.stringify(description).includes(secret));
+  }
+  for (const [message, reason] of [
+    ["committed WAL fixture exited before readiness", "wal-holder-exit"],
+    ["committed WAL fixture timed out", "wal-holder-timeout"],
+  ]) {
+    assert.equal(
+      describeCheckFailure({
+        phase: "old schema seed",
+        error: { code: "ERR_ASSERTION", message: `${message}: ${secret}` },
+      }).reason,
+      reason,
+    );
+  }
+});
+
+test("non-root recovery context exposes only the public owner marker without widening private files", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "scoplen-probe-context-test-"),
+  );
+  try {
+    const run = randomUUID();
+    const privateFile = join(directory, "private.txt");
+    await writeFile(privateFile, "synthetic-private-value", { mode: 0o600 });
+    const parentMode = (await lstat(directory)).mode;
+    const privateMode = (await lstat(privateFile)).mode;
+    const context = await prepareRecoveryProbeContext(directory, run);
+    assert.deepEqual(await readdir(context), [".container-check-owner"]);
+    assert.equal(
+      await readFile(join(context, ".container-check-owner"), "utf8"),
+      run,
+    );
+    assert.equal((await lstat(directory)).mode, parentMode);
+    assert.equal((await lstat(privateFile)).mode, privateMode);
+    if (process.platform !== "win32") {
+      assert.equal((await lstat(context)).mode & 0o7777, 0o755);
+      assert.equal(
+        (await lstat(join(context, ".container-check-owner"))).mode & 0o7777,
+        0o444,
+      );
+    }
+    await assert.rejects(prepareRecoveryProbeContext(directory, run));
+    await assert.rejects(prepareRecoveryProbeContext(directory, "invalid"));
+    assert.equal(
+      await readFile(privateFile, "utf8"),
+      "synthetic-private-value",
+    );
+  } finally {
+    await rm(directory, { recursive: true });
   }
 });
 

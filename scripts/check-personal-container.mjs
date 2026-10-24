@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
@@ -28,6 +29,7 @@ const failurePhases = new Set([
   "production image metadata",
   "image data-directory validation",
   "probe image pull",
+  "non-root recovery probe admission",
   "TLS fixture preparation",
   "historical source extraction",
   "matching old image build",
@@ -62,6 +64,8 @@ export function describeCheckFailure({
     ["image data directory has the wrong owner", "directory-owner"],
     ["image data directory has the wrong group", "directory-group"],
     ["image data directory missing", "directory-missing"],
+    ["committed WAL fixture exited before readiness", "wal-holder-exit"],
+    ["committed WAL fixture timed out", "wal-holder-timeout"],
   ];
   const reason =
     (assertion && typeof error.message === "string"
@@ -110,6 +114,18 @@ export async function writePrivateDiagnostic(path, value, phase) {
     );
     throw new Error("private diagnostic write failed", { cause: error });
   }
+}
+
+export async function prepareRecoveryProbeContext(directory, run) {
+  assert(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(run));
+  const context = join(directory, "recovery-probe-context");
+  await mkdir(context, { mode: 0o755 });
+  const marker = join(context, ".container-check-owner");
+  await writeFile(marker, run, { flag: "wx", mode: 0o444 });
+  // Only the public check identity is shared with a different container UID.
+  await chmod(marker, 0o444);
+  await chmod(context, 0o755);
+  return context;
 }
 
 export function describeImageBuildFailure({ error, stdout, stderr }) {
@@ -311,6 +327,7 @@ export async function checkPersonalContainer(driverPath) {
   let historicalImageId;
   let probeImage;
   let probeImageId;
+  let recoveryProbeContext;
   let container;
   let certificatePrepared = false;
   await writeFile(join(directory, ".container-check-owner"), run, {
@@ -401,7 +418,7 @@ export async function checkPersonalContainer(driverPath) {
       "--mount",
       `type=bind,source=${join(repository, "scripts/personal-sqlite-recovery-probe.mjs")},target=/sqlite-probe.mjs,readonly`,
       "--mount",
-      `type=bind,source=${directory},target=/check`,
+      `type=bind,source=${recoveryProbeContext},target=/check,readonly`,
       ...mounts,
       probeImage,
       "node",
@@ -416,6 +433,7 @@ export async function checkPersonalContainer(driverPath) {
   }
 
   try {
+    recoveryProbeContext = await prepareRecoveryProbeContext(directory, run);
     assert.equal(
       (await docker(["info", "--format", "{{.OSType}}"])).stdout.trim(),
       "linux",
@@ -488,6 +506,15 @@ export async function checkPersonalContainer(driverPath) {
       );
     }
 
+    progress("probe image pull");
+    await docker(["pull", probeImage], { timeout: 300_000 });
+    probeImageId = (await inspect("image", probeImage)).Id;
+    progress("non-root recovery probe admission");
+    assert.equal(
+      (await sqliteProbe("check-context", [])).stdout.trim(),
+      "context-ready",
+    );
+
     progress("production image build");
     const build = await docker(
       [
@@ -535,9 +562,6 @@ export async function checkPersonalContainer(driverPath) {
       (await docker(["cp", `${inspector}:/var/lib/spl`, "-"], { binary: true }))
         .stdout,
     );
-    progress("probe image pull");
-    await docker(["pull", probeImage], { timeout: 300_000 });
-    probeImageId = (await inspect("image", probeImage)).Id;
     const fixtureMount = [
       "--mount",
       `type=bind,source=${directory},target=/check`,
@@ -654,7 +678,7 @@ export async function checkPersonalContainer(driverPath) {
         "--mount",
         `type=bind,source=${join(repository, "scripts/personal-sqlite-recovery-probe.mjs")},target=/sqlite-probe.mjs,readonly`,
         "--mount",
-        `type=bind,source=${directory},target=/check`,
+        `type=bind,source=${recoveryProbeContext},target=/check,readonly`,
         "--mount",
         `type=volume,source=${project}_data,target=/var/lib/spl`,
         probeImage,
@@ -672,6 +696,10 @@ export async function checkPersonalContainer(driverPath) {
     for (;;) {
       const holderLogs = (await docker(["logs", walHolderId])).stdout;
       if (holderLogs.trim() === "ready") break;
+      assert(
+        (await inspect("container", walHolderId)).State.Running,
+        "committed WAL fixture exited before readiness",
+      );
       assert(Date.now() < walDeadline, "committed WAL fixture timed out");
       await new Promise((accept) => setTimeout(accept, 250));
     }
