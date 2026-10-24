@@ -159,6 +159,12 @@ by Cargo. Unset `SPL_*` overrides and use a private temporary directory outside 
 The check uses a fresh disposable CA trusted only by its HTTPS clients; it does not change
 the operating system or browser trust store.
 
+Before building images, the check admits its SQLite probe as UID/GID 65532 using a separate
+read-only context containing only the public check identity. The private temporary directory,
+TLS material and command diagnostics keep their original permissions and are not exposed to
+that probe. A seeding process that exits before readiness fails immediately with a fixed
+reason; its detailed output remains private.
+
 The check builds the production image, starts its own uniquely named Compose project, and
 checks image/data-volume permissions, non-root writes, TLS trust and hostname rejection,
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs

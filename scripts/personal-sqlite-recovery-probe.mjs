@@ -186,7 +186,12 @@ function copyObjects(source, destination) {
   }
 }
 
-if (operation === "seed-and-hold") {
+if (operation === "check-context") {
+  assert.equal(process.getuid(), 65532);
+  assert.equal(process.getgid(), 65532);
+  assert.deepEqual(readdirSync("/check"), [".container-check-owner"]);
+  console.log("context-ready");
+} else if (operation === "seed-and-hold") {
   const root = "/var/lib/spl";
   ordinary(root, true);
   const database = new DatabaseSync(join(root, "scoplen.sqlite"));
