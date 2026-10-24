@@ -14,6 +14,11 @@ self-hosted server, host agent, administration CLI, and web console.
   unsafe existing directory/key ACLs through bounded OS PowerShell 5.1/.NET admission, without
   rewriting existing permissions. Operators retain parent-directory and recovery responsibility;
   see [the Windows procedure](docs/windows-data-directory.md).
+- Before upgrading an existing SQLite schema, startup preserves a verified standalone recovery
+  snapshot including committed WAL pages and retains three private completed recovery points.
+  Snapshot failure stops upgrade; explicit offline recovery still requires the matching server
+  version, deployment keys and local objects. Complete encrypted backup and CLI restoration
+  remain separate roadmap gaps.
 - The repository is Exploration maturity until the roadmap evidence is complete. The baseline
   listener is useful for local development and reverse-proxy integration; it is not a complete
   production server.

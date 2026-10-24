@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added verified, standalone SQLite snapshots before upgrading existing schemas, including
+  committed WAL pages. Empty/current databases skip snapshots; snapshot failures stop migration.
+  Private snapshots retain the three newest completed recovery points, including after a failed
+  migration. A cross-process startup lock prevents duplicate upgrades and remains held when a
+  caller cancels initialization. Windows checks existing snapshot and lock ACLs before storage
+  startup. Complete encrypted deployment backup, scheduled backup and CLI restore remain planned.
+
 - Added Windows data-directory admission before database/object-storage initialization and
   standalone bootstrap. New directories receive a private inheritable DACL at creation;
   existing directories, custom key parents and private key files with unsafe or unsupported

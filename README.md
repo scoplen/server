@@ -522,14 +522,33 @@ reads. Key and notification limits remain independent.
 The configurable-limit forward migration preserves current objects, retained versions, epochs,
 signers, timestamps, foreign keys, uniqueness and indexes while moving the envelope upper bound
 into validated storage admission. SQLite rebuilds the two leaf tables inside the migration
-transaction; allow temporary disk space for the copy. Preserve a consistent deployment backup
-before an upgrade. A failed migration rolls back and prevents startup; it does not partially
-upgrade the tables. The migration has no automatic down path; rollback uses the pre-upgrade
-backup and matching server version.
+transaction; allow temporary disk space for the copy. Before the first pending migration on an
+existing SQLite schema, startup creates a consistent standalone snapshot, including committed
+WAL pages, in `scoplen.sqlite.migration-snapshots/` beside the database. It verifies SQLite and
+foreign-key integrity before publishing a private `pre-migration-<UUIDv7>.sqlite` file and keeps
+the three newest completed snapshots. Ordering stays monotonic against retained snapshot ids
+after a clock rollback. Fresh empty databases and already-current databases create
+no snapshot. Failed snapshot creation, verification, or retention blocks migration. A persistent
+`scoplen.sqlite.migration.lock` serializes startup; leave that file in place.
+Another startup waits up to five seconds for the lock, then stops without applying migrations
+if it is still held. Let the active startup finish before retrying.
+
+Each failed migration rolls back its own transaction and prevents startup; earlier migrations
+from the same startup may already have committed. The snapshot retains the schema before any of
+those steps. There is no automatic downgrade or replacement of the live database. Recovery uses
+an offline copy of the snapshot, the matching old server image, and the unchanged deployment
+keys and local objects; stop every writer before recovery and never reuse newer WAL/SHM files
+with an older database. Retention only removes recognized completed snapshots beyond the newest
+three. Unrecognized files and interrupted `.partial` files remain for operator inspection.
+Unix snapshot directories/files are created with mode 0700/0600; Windows inherits the admitted
+private data-directory ACL and refuses unsafe existing snapshot ACLs at startup.
 
 ## Security
 
 See [SECURITY.md](SECURITY.md). The SQLite database, generated deployment keys, CA keys, and setup
 links are private deployment material; keep the data directory out of source control and unprotected
 backups. Copying only `scoplen.sqlite` while the server is running is not a consistent backup in WAL
-mode. Built-in backup and restore are still roadmap work.
+mode. Upgrade snapshots contain database material and need the same protection. They do not
+include object files, deployment/CA/audit keys, external key paths, or certificates. Preserve a
+consistent complete deployment backup before upgrading. Single-archive encrypted backup,
+scheduled backup and `splctl backup` recovery remain roadmap work.

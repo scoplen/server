@@ -121,10 +121,27 @@ files, restart the container to load them. After changing source/assets, rebuild
 recreate the service. `down` removes the service while retaining its named volume; `down --volumes`
 deletes the database and keys and must not be used for a deployment you intend to keep.
 
-Automatic backups, restoration, and reversible upgrades are not implemented yet. Keep this an
-explicit trial environment until those gates are complete; retain a consistent offline copy of
-the entire data volume and the matching image before an upgrade. Exporting only SQLite loses
-the keys required to use its encrypted records.
+Before upgrading an existing SQLite schema, the server creates and verifies a standalone
+`pre-migration-<UUIDv7>.sqlite` snapshot in `/var/lib/spl/scoplen.sqlite.migration-snapshots/`.
+Committed WAL pages are included. The three newest completed snapshots are retained; fresh empty
+databases and restarts without pending migrations do not create snapshots. Snapshot or retention
+failure prevents migrations. The private `scoplen.sqlite.migration.lock` file remains in the data
+volume and serializes startup. Do not remove it while a server or recovery process may be active.
+A second startup waits up to five seconds, then stops if the lock is still held; let the active
+startup finish before retrying.
+
+A failed migration stops startup and retains its pre-upgrade snapshot. Each migration is atomic,
+but earlier migrations in the same upgrade may already have committed. Recovery is an explicit
+offline operation with the matching old image and original keys/objects; never mix a recovered
+database with the newer database's WAL/SHM files. Interrupted `.partial` files and unrecognized
+entries are not retention candidates and remain for inspection. Snapshot files contain private
+database material and are not an encrypted, complete deployment archive.
+
+Single-archive encrypted backup, scheduled backups, `splctl backup` restoration, and reversible
+upgrades remain unimplemented. Keep this an explicit trial environment until those gates are
+complete; retain a consistent offline copy of the entire data volume and the matching image
+before an upgrade. SQLite-only snapshots omit the deployment, CA and audit keys and object files.
+Custom object/KMS paths and the external TLS directory also need their own complete backup.
 
 ## Repeatable container check
 

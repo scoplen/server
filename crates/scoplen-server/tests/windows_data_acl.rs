@@ -139,3 +139,40 @@ fn public_process_refuses_a_missing_acl_runtime_without_disclosing_a_path_or_cre
     assert!(output.stdout.is_empty(), "startup disclosed bootstrap output");
     assert!(!config.server.data_dir.exists());
 }
+
+#[tokio::test]
+async fn migration_snapshots_inherit_private_permissions_and_unsafe_existing_acl_blocks_startup() {
+    use scoplen_store::RelationalStore;
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let prepared = prepare_roles(&config, &[Role::Api]).await.expect("private initial startup");
+    let store = prepared.store.expect("SQLite store");
+    sqlx::query(
+        "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("owned fixture pending migration");
+    store.pool().close().await;
+    drop(store);
+    let prepared = prepare_roles(&config, &[Role::Api]).await.expect("private protected upgrade");
+    let store = prepared.store.expect("upgraded SQLite store");
+    store.pool().close().await;
+    drop(store);
+    let directory = config.server.data_dir.join("scoplen.sqlite.migration-snapshots");
+    let snapshots: Vec<_> = fs::read_dir(&directory)
+        .expect("snapshot directory")
+        .map(|entry| entry.expect("snapshot entry").path())
+        .collect();
+    assert_eq!(snapshots.len(), 1);
+    bootstrap(&config).expect("snapshot directory, file and migration lock pass native ACL checks");
+    let retained = fs::read(&snapshots[0]).expect("retained snapshot");
+    add_public_read(&snapshots[0], false);
+    let error = prepare_roles(&config, &[Role::Api])
+        .await
+        .err()
+        .expect("unsafe snapshot ACL blocks startup");
+    assert!(error.to_string().contains("permissions are unsafe or unsupported"));
+    assert!(!error.to_string().contains(directory.to_str().expect("fixture path")));
+    assert_eq!(fs::read(&snapshots[0]).expect("unchanged recovery point"), retained);
+}
