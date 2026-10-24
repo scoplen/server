@@ -59,7 +59,7 @@ fn wait_for_admission(mut child: Child, deadline: Duration) -> io::Result<()> {
             }
             Ok(Some(_)) => return Err(io::Error::other(UNAVAILABLE)),
             Ok(None) if started.elapsed() < deadline => {
-                std::thread::sleep(Duration::from_millis(20))
+                std::thread::sleep(Duration::from_millis(20));
             }
             result => {
                 let _ = child.kill();

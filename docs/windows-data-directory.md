@@ -20,8 +20,10 @@ ACEs and reparse points in the selected directory or its ancestry are refused. T
 policy can reject an otherwise intentionally restricted custom ACL; provision the documented
 policy rather than weakening or bypassing admission.
 
-The selected paths must resolve to ordinary local-drive paths. UNC, device/verbatim prefixes,
-alternate data streams, reserved DOS device names and trailing-dot/space aliases are refused.
+The selected paths must resolve to ordinary local-drive paths. DriveInfo must confirm a ready
+local drive; mapped network drives and unavailable or unclassifiable roots are refused. UNC,
+device/verbatim prefixes, alternate data streams, reserved DOS device names and trailing-dot/space
+aliases are refused.
 Attribute lookup checks existing destinations, including dangling reparse points; an ordinary
 missing key is allowed only beneath an existing admitted parent.
 

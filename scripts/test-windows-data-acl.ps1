@@ -83,6 +83,13 @@ try {
         Assert ((Admission $unsupported) -eq 2) 'a special Windows data path was admitted'
     }
 
+    $driveRoots = @([System.IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name })
+    $absentRoot = @(90..65 | ForEach-Object { [string][char]$_ + ':\' } | Where-Object { $driveRoots -notcontains $_ })[0]
+    Assert ($null -ne $absentRoot) 'unavailable-drive test requires one unused drive letter'
+    $unavailablePath = $absentRoot + 'scoplen-windows-acl-test-' + $run
+    Assert ((Admission $absentRoot) -eq 2) 'an unavailable data-directory drive was admitted'
+    Assert ((Admission $private @($unavailablePath)) -eq 2) 'an unavailable key drive was admitted'
+
     $nullAclFile = Join-Path $private 'null-acl.key'
     [System.IO.File]::WriteAllText($nullAclFile, 'synthetic material')
     $original = [System.IO.File]::GetAccessControl($nullAclFile)
@@ -114,7 +121,7 @@ try {
     Assert ((Admission $literal) -eq 0) 'path data was interpreted as PowerShell source'
     Assert ([System.IO.Directory]::Exists($literal)) 'literal path was not preserved'
     Assert ((Security $root $true) -eq $parentSecurity) 'tests changed existing parent permissions'
-    Write-Output 'Windows ACL checks passed: private creation/inheritance, idempotence, unsafe directory/key/custom parent/NULL DACL refusal, missing parent refusal, special Windows path/dangling reparse refusal and literal path handling.'
+    Write-Output 'Windows ACL checks passed: private creation/inheritance, idempotence, unsafe directory/key/custom parent/NULL DACL refusal, missing parent/unavailable drive refusal, special Windows path/dangling reparse refusal and literal path handling.'
 } finally {
     # Remove only this marked, exact test root; unlink its known junction before recursion.
     Assert ([System.IO.Path]::GetDirectoryName($root) -eq $parent) 'test cleanup parent changed'

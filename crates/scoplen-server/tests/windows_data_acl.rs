@@ -136,6 +136,6 @@ fn public_process_refuses_a_missing_acl_runtime_without_disclosing_a_path_or_cre
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("Windows PowerShell 5.1"));
     assert!(!error.contains(fixture.0.to_str().expect("test path")));
-    assert!(output.stdout.is_empty());
+    assert!(output.stdout.is_empty(), "startup disclosed bootstrap output");
     assert!(!config.server.data_dir.exists());
 }

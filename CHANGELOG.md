@@ -9,6 +9,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   existing directories, custom key parents and private key files with unsafe or unsupported
   access controls are refused without permission repair. A fixed, hidden Windows PowerShell
   5.1/.NET check has a 15-second deadline, handles paths only as data and emits no raw diagnostics.
+  Drive admission rejects mapped network drives and roots that cannot be confirmed ready and local.
   Windows-native boundaries and public bootstrap/startup regressions cover creation,
   inherited file protection, broad/NULL ACLs, reparse points and unavailable checking support.
   Operators still control parent-directory safety and existing-material recovery.

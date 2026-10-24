@@ -18,6 +18,11 @@ try {
         }
         try { $path = [System.IO.Path]::GetFullPath($value) } catch { exit 2 }
         if ($path -notmatch '^[A-Za-z]:\\' -or $path.Substring(2).Contains(':')) { exit 2 }
+        try {
+            # A mapped network drive also has drive-letter syntax.
+            $drive = [System.IO.DriveInfo]::new([System.IO.Path]::GetPathRoot($path))
+            if ($drive.DriveType -notin @([System.IO.DriveType]::Fixed, [System.IO.DriveType]::Removable, [System.IO.DriveType]::CDRom, [System.IO.DriveType]::Ram) -or -not $drive.IsReady) { exit 2 }
+        } catch { exit 2 }
         foreach ($component in $path.Substring(3).Split('\')) {
             if ($component.Length -eq 0) { continue }
             if ($component.EndsWith('.') -or $component.EndsWith(' ') -or $component.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { exit 2 }
