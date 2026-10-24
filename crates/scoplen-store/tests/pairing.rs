@@ -110,6 +110,7 @@ fn principal(request: &PersonalEnrollmentRequest) -> CurrentPrincipal {
         device_id: request.device_certificate.device_id.into_bytes(),
         signing_public_key: device_key(1).public_key_sec1(),
         jkt: dpop_jwk_thumbprint(&device_key(1).public_key_sec1()).expect("thumbprint"),
+        certificate: request.device_certificate.encode().expect("certificate"),
     }
 }
 

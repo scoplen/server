@@ -26,6 +26,8 @@ use crate::runtime::{ListenerDatabase, api_router};
 mod account_devices;
 #[path = "account_profile_tests.rs"]
 mod account_profile;
+#[path = "personal_key_tests.rs"]
+mod key_publication;
 #[path = "personal_notify_tests.rs"]
 mod notifications;
 #[path = "pairing_http_tests.rs"]

@@ -54,6 +54,36 @@ pub struct AccountKeyBundleUpdate {
     pub signature: [u8; 64],
 }
 
+impl TryFrom<&scoplen_api::sync::SyncAccountKeyBundleUpdate> for AccountKeyBundleUpdate {
+    type Error = AccountKeyStoreError;
+
+    fn try_from(
+        update: &scoplen_api::sync::SyncAccountKeyBundleUpdate,
+    ) -> Result<Self, Self::Error> {
+        let result = Self {
+            revision: update.revision,
+            device_wraps: update
+                .device_wraps
+                .iter()
+                .map(|wrap| DeviceWrap {
+                    device_id: wrap.device_id.into_bytes(),
+                    wrapped_ark: wrap.wrapped_ark.clone(),
+                })
+                .collect(),
+            account_signing_key: update.account_signing_key.clone(),
+            account_kem_key: update.account_kem_key.clone(),
+            recovery_blob: update.recovery_blob.clone(),
+            signature: update
+                .signature
+                .as_slice()
+                .try_into()
+                .map_err(|_| AccountKeyStoreError::InvalidSignature)?,
+        };
+        validate_update(&result)?;
+        Ok(result)
+    }
+}
+
 /// The current bundle returned to one authenticated device.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AccountKeyBundle {
@@ -95,6 +125,12 @@ pub enum AccountKeyBundlePreflight {
 /// Persistence failures for account key bundles.
 #[derive(Debug, Error)]
 pub enum AccountKeyStoreError {
+    /// The originally authenticated device or proof binding is no longer current.
+    #[error("current account key authorization denied")]
+    AuthenticationDenied,
+    /// A new bundle may have committed without a confirmed acknowledgement.
+    #[error("account key commit outcome is unknown")]
+    CommitOutcomeUnknown,
     /// No bundle exists for the account, or the requested device has no wrap.  The service maps
     /// both cases to the same not-found response so one device cannot enumerate another device.
     #[error("account key bundle does not exist")]
@@ -342,7 +378,7 @@ impl SqliteStore {
             .map_err(map_write_error)?;
         }
         check_sqlite_key_response_capacity(&mut transaction, account_id).await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| AccountKeyStoreError::CommitOutcomeUnknown)?;
         Ok(AccountKeyBundlePut::Applied { revision: update.revision })
     }
 
@@ -614,7 +650,7 @@ impl PostgresStore {
             .map_err(map_write_error)?;
         }
         check_postgres_key_response_capacity(&mut transaction, account_id).await?;
-        transaction.commit().await?;
+        transaction.commit().await.map_err(|_| AccountKeyStoreError::CommitOutcomeUnknown)?;
         Ok(AccountKeyBundlePut::Applied { revision: update.revision })
     }
 
@@ -725,7 +761,7 @@ fn validate_artifact(bytes: Vec<u8>, field: &'static str) -> Result<Vec<u8>, Acc
     Ok(bytes)
 }
 
-async fn update_matches_current(
+pub(crate) async fn update_matches_current(
     transaction: &mut Transaction<'_, Sqlite>,
     account_id: AccountId,
     update: &AccountKeyBundleUpdate,
@@ -759,7 +795,7 @@ async fn update_matches_current(
     Ok(true)
 }
 
-async fn update_matches_current_postgres(
+pub(crate) async fn update_matches_current_postgres(
     transaction: &mut Transaction<'_, Postgres>,
     account_id: AccountId,
     update: &AccountKeyBundleUpdate,

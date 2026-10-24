@@ -15,8 +15,8 @@ use scoplen_store::{
     sync::{ObjectWrite, PersonalMutation, PersonalSigner, SyncStoreError, WriteReceipt},
 };
 use scoplen_sync::http::{
-    AuthFailure, AuthenticatedDevice, AuthenticatedNotification, SyncAuthenticator, SyncBackend,
-    SyncKeysOperation, SyncOperation,
+    AuthFailure, AuthenticatedDevice, AuthenticatedNotification, KeyUpdateError, SyncAuthenticator,
+    SyncBackend, SyncKeysOperation, SyncOperation,
 };
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -28,6 +28,11 @@ pub(crate) struct PersonalSyncAuthenticator {
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
     trusted_origin: String,
+}
+
+pub(crate) struct KeyUpdateAuthorization {
+    principal: CurrentPrincipal,
+    expires_at: u64,
 }
 
 impl PersonalSyncAuthenticator {
@@ -95,6 +100,18 @@ impl PersonalSyncAuthenticator {
         uri: &Uri,
         headers: &HeaderMap,
     ) -> Result<CurrentPrincipal, AuthFailure> {
+        self.authenticate_request(operation, method, uri, headers)
+            .await
+            .map(|(principal, _)| principal)
+    }
+
+    async fn authenticate_request(
+        &self,
+        operation: DeviceAccessOperation,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(CurrentPrincipal, u64), AuthFailure> {
         let raw_token = single_header(headers, AUTHORIZATION.as_str(), 4_101)?
             .strip_prefix("DPoP ")
             .ok_or_else(authentication_required)?;
@@ -106,7 +123,6 @@ impl PersonalSyncAuthenticator {
             single_header(headers, "dpop", 8_192)?,
         )
         .await
-        .map(|(principal, _)| principal)
     }
 
     async fn authenticate_credentials(
@@ -152,6 +168,24 @@ impl PersonalSyncAuthenticator {
 
 #[async_trait::async_trait]
 impl SyncAuthenticator for PersonalSyncAuthenticator {
+    type KeyUpdateAuthorization = KeyUpdateAuthorization;
+
+    async fn authenticate_key_update(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(AuthenticatedDevice, Self::KeyUpdateAuthorization), AuthFailure> {
+        let (principal, expires_at) = self
+            .authenticate_request(DeviceAccessOperation::AccountKeysWrite, method, uri, headers)
+            .await?;
+        let identity = AuthenticatedDevice {
+            account_id: principal.account_id,
+            device_id: principal.device_id,
+        };
+        Ok((identity, KeyUpdateAuthorization { principal, expires_at }))
+    }
+
     async fn authenticate_notification(
         &self,
         method: &Method,
@@ -331,21 +365,48 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         &self,
         identity: AuthenticatedDevice,
         account_id: [u8; 16],
-        operation: SyncKeysOperation,
+        _operation: SyncKeysOperation,
     ) -> Result<(), AuthFailure> {
-        if operation != SyncKeysOperation::Read || identity.account_id != account_id {
+        if identity.account_id != account_id {
             return Err(policy_denied());
         }
         self.current(identity).await.map(|_| ())
     }
 
-    async fn validate_key_bundle_update(
+    async fn commit_key_update(
         &self,
-        _identity: AuthenticatedDevice,
-        _account_id: [u8; 16],
-        _update: &scoplen_api::sync::SyncAccountKeyBundleUpdate,
-    ) -> Result<(), AuthFailure> {
-        Err(policy_denied())
+        identity: AuthenticatedDevice,
+        account_id: [u8; 16],
+        authorization: &Self::KeyUpdateAuthorization,
+        update: &scoplen_api::sync::SyncAccountKeyBundleUpdate,
+        store: &SyncBackend,
+    ) -> Result<scoplen_store::account_keys::AccountKeyBundlePut, KeyUpdateError> {
+        if authorization.principal.account_id != account_id
+            || identity.account_id != account_id
+            || authorization.principal.device_id != identity.device_id
+        {
+            return Err(authentication_required().into());
+        }
+        Ok(match store {
+            SyncBackend::Sqlite(store) => {
+                store
+                    .publish_account_key_bundle(
+                        &authorization.principal,
+                        authorization.expires_at,
+                        update,
+                    )
+                    .await?
+            }
+            SyncBackend::Postgres(store) => {
+                store
+                    .publish_account_key_bundle(
+                        &authorization.principal,
+                        authorization.expires_at,
+                        update,
+                    )
+                    .await?
+            }
+        })
     }
 }
 
@@ -730,7 +791,7 @@ mod tests {
     async fn reject_unmounted_routes(address: SocketAddr) {
         assert_eq!(http(address, "POST", "/sync/v1/vaults", &[], &[]).await.status, 404);
         assert_eq!(http(address, "GET", "/sync/v1/notify", &[], &[]).await.status, 400);
-        assert_eq!(http(address, "PUT", "/sync/v1/keys", &[], &[]).await.status, 405);
+        assert_eq!(http(address, "PUT", "/sync/v1/keys", &[], &[]).await.status, 400);
     }
 
     async fn reject_read_only_write(address: SocketAddr, token: &str, path: &str, body: &[u8]) {

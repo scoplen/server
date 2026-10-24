@@ -260,6 +260,25 @@ pub struct AuthenticatedNotification {
     pub expires_at: u64,
 }
 
+/// Failure from the account transaction, preserving authentication and commit uncertainty.
+#[derive(Debug)]
+pub enum KeyUpdateError {
+    Authentication(AuthFailure),
+    Store(key_storage::AccountKeyStoreError),
+}
+
+impl From<AuthFailure> for KeyUpdateError {
+    fn from(value: AuthFailure) -> Self {
+        Self::Authentication(value)
+    }
+}
+
+impl From<key_storage::AccountKeyStoreError> for KeyUpdateError {
+    fn from(value: key_storage::AccountKeyStoreError) -> Self {
+        Self::Store(value)
+    }
+}
+
 /// A problem returned by an authenticator at the request boundary.
 #[derive(Clone, Debug)]
 pub struct AuthFailure {
@@ -309,6 +328,19 @@ impl AuthFailure {
 /// accidentally ship an unauthenticated endpoint.
 #[async_trait::async_trait]
 pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
+    /// Request-local original identity/proof binding retained while the key body streams.
+    type KeyUpdateAuthorization: Send + Sync;
+
+    /// Authenticate a key publication once and retain its original binding until commit.
+    ///
+    /// # Errors
+    /// Rejects invalid credentials, proof replay, or missing current key-write permission.
+    async fn authenticate_key_update(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(AuthenticatedDevice, Self::KeyUpdateAuthorization), AuthFailure>;
     /// Authenticate one request as an enrolled device, including its `DPoP` method and URI binding.
     ///
     /// # Errors
@@ -405,24 +437,24 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         operation: SyncKeysOperation,
     ) -> Result<(), AuthFailure>;
 
-    /// Validate a new account-key revision before storage.
-    ///
-    /// Implementations MUST verify the signature over `update.signature_input()` with the
-    /// current account signing key and require exactly one wrap for every enrolled, unrevoked
-    /// device. The storage layer only enforces opaque bounds and revision replay semantics.
-    /// An authenticated and authorized exact replay of the persisted revision bypasses this
-    /// callback, since its original signature may use the key replaced by that rotation.
+    /// Commit the complete key publication in one account transaction. Recheck the original
+    /// binding, current authorization (including token validity after lock waits), revision,
+    /// signature, complete certified-unrevoked
+    /// recipients, projected response capacity and business audit under that transaction's
+    /// serialization boundary. Exact replay still reauthorizes but skips old-key verification
+    /// and adds no mutation/audit. A preflight result cannot authorize this commit.
     ///
     /// # Errors
     ///
-    /// Returns an authentication or request failure when the signature or active-device set is
-    /// invalid.
-    async fn validate_key_bundle_update(
+    /// Returns a current authorization, validation, conflict, storage or unknown-commit error.
+    async fn commit_key_update(
         &self,
         identity: AuthenticatedDevice,
         account_id: key_storage::AccountId,
+        authorization: &Self::KeyUpdateAuthorization,
         update: &api::SyncAccountKeyBundleUpdate,
-    ) -> Result<(), AuthFailure>;
+        store: &SyncBackend,
+    ) -> Result<key_storage::AccountKeyBundlePut, KeyUpdateError>;
 
     /// Authenticate the first binary message on a notification WebSocket.
     ///
@@ -567,24 +599,6 @@ impl SyncBackend {
         >
     );
     backend_async!(
-        preflight_account_key_bundle_update(
-            account_id: key_storage::AccountId,
-            update: &key_storage::AccountKeyBundleUpdate,
-        ) -> Result<
-            key_storage::AccountKeyBundlePreflight,
-            key_storage::AccountKeyStoreError,
-        >
-    );
-    backend_async!(
-        put_account_key_bundle(
-            account_id: key_storage::AccountId,
-            update: &key_storage::AccountKeyBundleUpdate,
-        ) -> Result<
-            key_storage::AccountKeyBundlePut,
-            key_storage::AccountKeyStoreError,
-        >
-    );
-    backend_async!(
         sync_changes(
             vault_id: storage::VaultId,
             after: u64,
@@ -628,7 +642,7 @@ pub fn router<A: SyncAuthenticator>(store: impl Into<SyncBackend>, authenticator
 }
 
 /// Mount only the Personal routes whose production authorization is available.
-/// Shared-vault mutation and account-key rotation remain closed.
+/// Shared-vault mutation and public account-root rotation remain closed.
 pub fn personal_router<A: SyncAuthenticator>(
     store: impl Into<SyncBackend>,
     authenticator: A,
@@ -674,7 +688,7 @@ pub fn personal_router_with_notifications<A: SyncAuthenticator>(
     };
     Router::new()
         .route("/sync/v1/session", post(session::<A>))
-        .route("/sync/v1/keys", get(keys_get::<A>))
+        .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
         .route("/sync/v1/notify", get(notification::notify::<A>).connect(notification::notify::<A>))
         .route("/sync/v1/vaults/{vault}/keys", get(vault_keys::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
@@ -1224,9 +1238,9 @@ async fn keys_put<A: SyncAuthenticator>(
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
-    let identity = state
+    let (identity, authorization) = state
         .authenticator
-        .authenticate(&method, &uri, &headers)
+        .authenticate_key_update(&method, &uri, &headers)
         .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let account_id = state
@@ -1245,24 +1259,16 @@ async fn keys_put<A: SyncAuthenticator>(
     let update = api::SyncAccountKeyBundleUpdate::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid account key bundle: {error}"))
     })?;
-    let stored_update = account_key_update_to_storage(update.clone(), &instance)?;
-    let preflight = state
-        .store
-        .preflight_account_key_bundle_update(account_id, &stored_update)
-        .await
-        .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
-    if preflight == key_storage::AccountKeyBundlePreflight::New {
-        state
-            .authenticator
-            .validate_key_bundle_update(identity, account_id, &update)
-            .await
-            .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    }
     let result = state
-        .store
-        .put_account_key_bundle(account_id, &stored_update)
+        .authenticator
+        .commit_key_update(identity, account_id, &authorization, &update, &state.store)
         .await
-        .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
+        .map_err(|error| match error {
+            KeyUpdateError::Authentication(error) => SyncHttpError::from_auth(error, &instance),
+            KeyUpdateError::Store(error) => {
+                SyncHttpError::from_account_key_store(&error, &instance)
+            }
+        })?;
     let revision = match result {
         key_storage::AccountKeyBundlePut::Applied { revision }
         | key_storage::AccountKeyBundlePut::Replay { revision } => revision,
@@ -1636,31 +1642,6 @@ fn change_to_api(change: storage::SyncChange) -> api::SyncChange {
     }
 }
 
-fn account_key_update_to_storage(
-    update: api::SyncAccountKeyBundleUpdate,
-    instance: &str,
-) -> SyncResult<key_storage::AccountKeyBundleUpdate> {
-    let signature: [u8; api::SYNC_KEY_SIGNATURE_BYTES] =
-        update.signature.try_into().map_err(|_| {
-            SyncHttpError::invalid(instance, "account key signature must be exactly 64 bytes")
-        })?;
-    Ok(key_storage::AccountKeyBundleUpdate {
-        revision: update.revision,
-        device_wraps: update
-            .device_wraps
-            .into_iter()
-            .map(|wrap| key_storage::DeviceWrap {
-                device_id: wrap.device_id.into_bytes(),
-                wrapped_ark: wrap.wrapped_ark,
-            })
-            .collect(),
-        account_signing_key: update.account_signing_key,
-        account_kem_key: update.account_kem_key,
-        recovery_blob: update.recovery_blob,
-        signature,
-    })
-}
-
 fn request_id(headers: &HeaderMap) -> String {
     headers
         .get("x-request-id")
@@ -1675,7 +1656,17 @@ fn request_id(headers: &HeaderMap) -> String {
 
 fn cbor_response(body: Vec<u8>) -> Response {
     let content_type = HeaderValue::from_static("application/cbor");
-    (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response()
+    let mut response =
+        (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response();
+    private_response(&mut response);
+    response
+}
+
+fn private_response(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
 }
 
 type SyncResult<T> = Result<T, Box<SyncHttpError>>;
@@ -1929,6 +1920,24 @@ impl SyncHttpError {
         instance: &str,
     ) -> Box<Self> {
         match error {
+            key_storage::AccountKeyStoreError::AuthenticationDenied => Self::known(
+                instance,
+                StatusCode::UNAUTHORIZED,
+                "auth.authentication_required",
+                "Authentication required",
+                "The originally authenticated device is no longer authorized; no account key data changed. Authenticate again before another request.",
+                false,
+                false,
+            ),
+            key_storage::AccountKeyStoreError::CommitOutcomeUnknown => Self::known(
+                instance,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sync.storage_unavailable",
+                "Account key publication outcome unknown",
+                "The complete account key update may have committed. Retain the exact signed request and keys, verify the current bundle, and use explicit recovery with fresh authentication; do not automatically replay.",
+                true,
+                false,
+            ),
             key_storage::AccountKeyStoreError::BundleNotFound => Self::known(
                 instance,
                 StatusCode::NOT_FOUND,
@@ -2092,6 +2101,7 @@ impl IntoResponse for Box<SyncHttpError> {
         if let Some(retry_after) = retry_after {
             response.headers_mut().insert(header::RETRY_AFTER, retry_after);
         }
+        private_response(&mut response);
         response
     }
 }
@@ -2162,6 +2172,17 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SyncAuthenticator for TestAuthenticator {
+        type KeyUpdateAuthorization = ();
+
+        async fn authenticate_key_update(
+            &self,
+            method: &Method,
+            uri: &Uri,
+            headers: &HeaderMap,
+        ) -> Result<(AuthenticatedDevice, ()), AuthFailure> {
+            self.authenticate(method, uri, headers).await.map(|identity| (identity, ()))
+        }
+
         async fn authenticate(
             &self,
             method: &Method,
@@ -2277,16 +2298,28 @@ mod tests {
             }
         }
 
-        async fn validate_key_bundle_update(
+        async fn commit_key_update(
             &self,
             _identity: AuthenticatedDevice,
-            _account_id: key_storage::AccountId,
+            account_id: key_storage::AccountId,
+            _authorization: &(),
             update: &api::SyncAccountKeyBundleUpdate,
-        ) -> Result<(), AuthFailure> {
-            if self.reject_writes
-                || self.expected_key_signature.as_ref().is_some_and(|expected| {
-                    update.signature.first().copied() != Some(expected.load(Ordering::SeqCst))
-                })
+            store: &SyncBackend,
+        ) -> Result<key_storage::AccountKeyBundlePut, KeyUpdateError> {
+            let stored = key_storage::AccountKeyBundleUpdate::try_from(update)?;
+            let preflight = match store {
+                SyncBackend::Sqlite(store) => {
+                    store.preflight_account_key_bundle_update(account_id, &stored).await?
+                }
+                SyncBackend::Postgres(store) => {
+                    store.preflight_account_key_bundle_update(account_id, &stored).await?
+                }
+            };
+            if preflight == key_storage::AccountKeyBundlePreflight::New
+                && (self.reject_writes
+                    || self.expected_key_signature.as_ref().is_some_and(|expected| {
+                        update.signature.first().copied() != Some(expected.load(Ordering::SeqCst))
+                    }))
             {
                 Err(AuthFailure::new(
                     StatusCode::BAD_REQUEST,
@@ -2295,9 +2328,16 @@ mod tests {
                     "The injected account key validator rejected this update; no data changed and retrying will not help.",
                     false,
                 )
-                .expect("test key validation failure"))
+                .expect("test key validation failure").into())
             } else {
-                Ok(())
+                Ok(match store {
+                    SyncBackend::Sqlite(store) => {
+                        store.put_account_key_bundle(account_id, &stored).await?
+                    }
+                    SyncBackend::Postgres(store) => {
+                        store.put_account_key_bundle(account_id, &stored).await?
+                    }
+                })
             }
         }
 

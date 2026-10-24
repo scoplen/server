@@ -42,10 +42,11 @@ for both local and remote delivery. Rolled-back transactions emit no hint. The r
 requires an injected authenticator that binds DPoP proofs to the request method and
 URI, authorizes vault, account-key, and notification operations, records the creator's initial
 shared-vault membership and opaque epoch-1 key wrap, adds and removes members with historical
-opaque wraps, validates account-key signatures and active-device wraps, and validates encrypted
+opaque wraps, commits account-key signatures and the complete certified, unrevoked recipient set,
+and validates encrypted
 envelopes before storage. The caller selects a SQLite or PostgreSQL store for the entire
 authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR against PostgreSQL
-17. The API listener now mounts only the Personal session, account-key read, vault-key read,
+17. The API listener now mounts only the Personal session, account-key read and publication, vault-key read,
 changes, snapshot, version read, signed object write, ACK, and notification routes. It verifies the enrolled
 device token, exact method/path/ath DPoP proof, durable replay claim, current device certificate,
 required scope, and Personal vault ownership. Writes verify the envelope signature and current
@@ -62,7 +63,7 @@ database deadlines and capped 100 ms to five-second backoff. Hints carry no obje
 are validated before dispatch and remain best effort: reconnect and pull changes, or poll every
 60 seconds while unavailable. A lost COMMIT reply can still accompany a committed hint; the HTTP
 result remains uncertain and must never trigger automatic batch replay. Shared-vault mutations
-and account-key updates remain unmounted. The
+remain unmounted. The
 `scoplen-identity` crate verifies a decoded D-101 first-device
 enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
 proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
@@ -198,7 +199,7 @@ The SQLite and PostgreSQL stores atomically provision one personal vault per acc
 ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
 vault and current shared memberships. The authenticated K-4 vault-key route delivers that key only
 to its owner using the shared `{keys}` response shape on either backend. Personal enrollment and
-device authentication use these primitives; personal-key rotation remains open.
+device authentication use these primitives; Personal vault-key rotation remains open.
 Both stores also atomically create a shared vault with its admin membership and epoch-one wrap,
 list current shared memberships in vault-id order, and return only a member's non-retired wraps.
 Both stores publish the next epoch for exactly the current member set, add members with every
@@ -233,10 +234,24 @@ the same check before it becomes visible.
 PostgreSQL account-key GET reads the bundle, device wrap, certificates, and revocations from one
 read-only repeatable-read snapshot, so concurrent rotations cannot splice separate versions into
 a response.
-Authenticated account-key PUTs classify an exact persisted replay before validating a new update
-with the current signing key. A rotation therefore does not reject a retry signed by the previous
-key. Changed bytes at the current revision return `409 sync.conflict`; the final write transaction
-rechecks revision and exact bytes, so a concurrent rotation cannot turn a replay into a mutation.
+The production Personal `PUT /sync/v1/keys` retains the initially authenticated account, device,
+exact certificate and DPoP key binding while receiving the bounded body. The SQLite write
+transaction or PostgreSQL account lock rechecks that binding and current authorization, verifies
+the current account-root signature and complete certified-minus-revoked recipient set (including
+inactive admission rows), and commits revision CAS, all wraps, projected responses and a deployment
+audit event together. It serializes with pairing completion and account identity/statement changes.
+The original token must remain valid after lock acquisition and before COMMIT, for new updates
+and exact replays alike; a slow body or lock wait cannot extend its authorization lifetime.
+Authenticated exact replay compares the complete stored signed request before checking a new
+signature. It makes no second mutation or audit, including after a later signing-root change.
+Changed bytes at the current revision return `409 sync.conflict`.
+A confirmed rollback returns `503 sync.storage_unavailable` with `changed: false` and
+`retryable: true`; an unconfirmed new-update COMMIT returns the same code with `changed: true`
+and `retryable: false`. A replay read transaction has no mutation even if its close fails.
+Retain the exact pending bytes and local keys, verify GET state first, and recover explicitly with
+fresh DPoP; only a successful response to those exact bytes confirms publication. GET's projection
+does not establish exact replay. Publication does not replace public signing/KEM roots or implement
+ARK rotation or device revocation workflows.
 
 ## Repository shape
 

@@ -66,6 +66,17 @@ current opaque object envelopes, retained version rows, per-device acknowledgeme
 account key-bundle tables, and per-organization audit events and signed checkpoints. Account key
 artifacts remain opaque at this boundary; the store
 scopes wrapped-ARK reads to the authenticated device and applies atomic revision replay rules.
+Personal account-key publication retains the original certificate and DPoP binding while receiving
+the body. Its required authenticator commit hook reauthorizes inside the account transaction,
+verifies the current root signature and complete certified-unrevoked recipients, and atomically
+applies the revision, all wraps, response bounds and business audit. SQLite uses BEGIN IMMEDIATE;
+PostgreSQL shares the exclusive account lock with pairing and statement replacement, and locks
+the identity rows against account/device changes. Exact replay reauthorizes and compares all
+signed bytes, without a new signature check or audit. New-update COMMIT uncertainty has
+`changed: true`, `retryable: false`; confirmed rollback and replay-close failures have no business
+mutation. There is no public-root replacement, ARK rotation or revocation workflow in this route.
+Both new publication and replay retain trusted token expiry and check its validity after lock
+acquisition/current identity loading and immediately before COMMIT.
 The SQLite sync store allocates a contiguous sequence range inside a write transaction, checks
 every compare-and-swap base before changing state, and exposes current change and
 full-reconciliation snapshot pages without interpreting envelope bytes. Both relational stores
