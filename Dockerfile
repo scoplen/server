@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=scoplen-server-cargo-registry,target=/usr/local/cargo/
     && find crates -type f -exec touch {} + \
     && cargo build --locked --release \
        -p scoplen-server --bin spl-server -p scoplen-ctl --bin splctl \
-    && install -d -m 0700 -o 65532 -g 65532 /container-data \
+    && install -d -m 0700 -o 65532 -g 65532 /container-data/spl \
     && install -D -m 0755 target/release/spl-server /out/spl-server \
     && install -D -m 0755 target/release/splctl /out/splctl
 
@@ -39,7 +39,7 @@ LABEL org.opencontainers.image.title="Scoplen server" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 COPY --from=server-build /out/spl-server /out/splctl /app/
 COPY --from=console-build /src/web/console/dist/ /app/console/
-COPY --from=server-build --chown=65532:65532 --chmod=0700 /container-data/ /var/lib/spl/
+COPY --from=server-build --chown=65532:65532 --chmod=0700 /container-data/ /var/lib/
 COPY deploy/personal.toml /etc/scoplen/personal.toml
 COPY LICENSE /app/LICENSE
 ENV SPL_CONFIG=/etc/scoplen/personal.toml

@@ -108,6 +108,66 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
   }
 });
 
+test("directory-mode diagnostics expose only bounded image permission bits", () => {
+  const secret = "synthetic-private-value";
+  const describe = (
+    actual,
+    expected,
+    message = "image data directory is not private",
+  ) =>
+    describeCheckFailure({
+      phase: "image data-directory validation",
+      error: { code: "ERR_ASSERTION", message, actual, expected },
+    });
+  const unchanged = {
+    phase: "image data-directory validation",
+    category: "validation",
+    reason: "directory-mode",
+    ioCode: null,
+    exitCode: null,
+    signal: null,
+  };
+  assert.deepEqual(describe(0o755, 0o700), {
+    ...unchanged,
+    actualMode: 0o755,
+    expectedMode: 0o700,
+  });
+  assert.deepEqual(describe(0, 0o7777), {
+    ...unchanged,
+    actualMode: 0,
+    expectedMode: 0o7777,
+  });
+  assert(
+    !JSON.stringify(
+      describe(0o755, 0o700, `image data directory is not private: ${secret}`),
+    ).includes(secret),
+  );
+  for (const [actual, expected] of [
+    [secret, 0o700],
+    [0o755, secret],
+    [-1, 0o700],
+    [0o755, -1],
+    [0o10000, 0o700],
+    [0o755, 0o10000],
+    [0.5, 0o700],
+    [0o755, null],
+    [Number.NaN, 0o700],
+    [0o755, Number.POSITIVE_INFINITY],
+    [{ secret }, 0o700],
+    [[0o755], 0o700],
+  ]) {
+    const description = describe(actual, expected);
+    assert.equal(JSON.stringify(description), JSON.stringify(unchanged));
+    assert(!JSON.stringify(description).includes(secret));
+  }
+  assert.equal(
+    JSON.stringify(
+      describe(0o755, 0o700, "image data directory has the wrong owner"),
+    ),
+    JSON.stringify({ ...unchanged, reason: "directory-owner" }),
+  );
+});
+
 test("a real private diagnostic write failure reports its phase without path or output disclosure", async () => {
   const parent = await realpath(tmpdir());
   const run = randomUUID();
@@ -194,6 +254,8 @@ test("actual image-directory metadata must prove private non-root ownership", ()
       });
       assert.equal(description.category, "validation");
       assert.equal(description.reason, "directory-mode");
+      assert.equal(description.actualMode, 0o755);
+      assert.equal(description.expectedMode, 0o700);
       return true;
     },
   );
