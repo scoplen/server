@@ -20,6 +20,12 @@ The trusted public HTTPS origin comes from canonical `server.public_host` and ex
 `server.public_port`, independently of the local `server.listen_port`. The shared K-3 origin
 validator rejects ambiguous hosts before startup. Bootstrap uses this origin for setup links;
 incoming Host and forwarding headers do not determine it.
+For every database-backed role, startup reads the retained Operator setup origin before creating
+object storage or local key and CA material. A mismatch with the effective public host and port
+stops startup without replacing the entitlement or disclosing the retained origin. The API role
+also rechecks the origin inside its setup initialization transaction. Explicit local reissue can
+replace only a pending entitlement; completed setup requires an identity-preserving migration
+procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
 `proto@e2b8817` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and

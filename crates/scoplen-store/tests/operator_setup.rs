@@ -41,6 +41,96 @@ async fn sqlite() -> (SqliteStore, std::path::PathBuf) {
     (store, dir)
 }
 
+macro_rules! retained_origin {
+    ($store:expr) => {{
+        let store = &$store;
+        let other = "https://other.example.com";
+        store.check_operator_setup_startup(ORIGIN, false).await.expect("no retained origin yet");
+        store
+            .initialize_operator_setup(ORIGIN, false)
+            .await
+            .expect("initial setup")
+            .expect("initial link");
+        store.check_operator_setup_startup(ORIGIN, false).await.expect("pending origin");
+        assert!(matches!(
+            store.check_operator_setup_startup(other, false).await,
+            Err(OperatorSetupError::OriginMismatch)
+        ));
+        store.check_operator_setup_startup(other, true).await.expect("pending reissue allowed");
+        let replacement = store
+            .initialize_operator_setup(other, true)
+            .await
+            .expect("explicit pending reissue")
+            .expect("replacement link");
+        assert!(replacement.expose_link().starts_with("https://other.example.com/setup#token="));
+        store.check_operator_setup_startup(other, false).await.expect("replacement origin");
+        sqlx::query("UPDATE operator_setup SET completed_at_s = issued_at_s")
+            .execute(store.pool())
+            .await
+            .expect("complete setup fixture");
+        let before: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("retained setup");
+        let audits_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("audit count");
+        assert!(store.check_operator_setup_startup(other, false).await.is_ok());
+        let mismatch =
+            store.check_operator_setup_startup(ORIGIN, false).await.expect_err("wrong origin");
+        let message = mismatch.to_string();
+        assert!(matches!(mismatch, OperatorSetupError::OriginMismatch));
+        assert!(message.contains("server.public_host"));
+        assert!(message.contains("server.public_port"));
+        assert!(!message.contains(other));
+        assert!(matches!(
+            store.check_operator_setup_startup(ORIGIN, true).await,
+            Err(OperatorSetupError::Denied { consumed: false })
+        ));
+        assert!(
+            store.initialize_operator_setup(other, false).await.expect("same origin").is_none()
+        );
+        assert!(matches!(
+            store.initialize_operator_setup(ORIGIN, false).await,
+            Err(OperatorSetupError::OriginMismatch)
+        ));
+        assert!(matches!(
+            store.initialize_operator_setup(ORIGIN, true).await,
+            Err(OperatorSetupError::Denied { consumed: false })
+        ));
+        let after: (Vec<u8>, String, Option<i64>) = sqlx::query_as(
+            "SELECT token_digest, trusted_origin, completed_at_s FROM operator_setup",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("unchanged setup");
+        let audits_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
+            .fetch_one(store.pool())
+            .await
+            .expect("unchanged audit count");
+        assert_eq!(before, after);
+        assert_eq!(audits_before, audits_after);
+        sqlx::query("UPDATE operator_setup SET trusted_origin = 'https://127.0.0.1'")
+            .execute(store.pool())
+            .await
+            .expect("fixture with completed IP origin");
+        store
+            .check_operator_setup_startup("https://127.0.0.1", false)
+            .await
+            .expect("exact completed IP origin");
+        assert!(
+            store
+                .initialize_operator_setup("https://127.0.0.1", false)
+                .await
+                .expect("restart with exact completed IP origin")
+                .is_none()
+        );
+    }};
+}
+
 macro_rules! lifecycle {
     ($store:expr) => {{
         let store = &$store;
@@ -201,6 +291,14 @@ macro_rules! lifecycle {
 async fn sqlite_real_passkey_setup_and_assertion() {
     let (store, dir) = sqlite().await;
     lifecycle!(store);
+    store.pool().close().await;
+    support::remove_test_directory(dir).await;
+}
+
+#[tokio::test]
+async fn sqlite_completed_setup_rejects_changed_origin_without_mutation() {
+    let (store, dir) = sqlite().await;
+    retained_origin!(store);
     store.pool().close().await;
     support::remove_test_directory(dir).await;
 }
@@ -575,6 +673,15 @@ async fn sqlite_attempted_finish_commit_failure_preserves_unknown_outcome() {
 async fn postgres_real_passkey_setup_and_assertion() {
     let (store, pool, schema, _) = postgres_fixture().await;
     lifecycle!(store);
+    store.pool().close().await;
+    remove_schema(pool, &schema).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_completed_setup_rejects_changed_origin_without_mutation() {
+    let (store, pool, schema, _) = postgres_fixture().await;
+    retained_origin!(store);
     store.pool().close().await;
     remove_schema(pool, &schema).await;
 }

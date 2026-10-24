@@ -38,6 +38,10 @@ pub enum OperatorSetupError {
     InvalidRequest,
     #[error("server.public_host must be a DNS name with valid HTTPS for operator setup")]
     Configuration,
+    #[error(
+        "server.public_host and server.public_port do not match the retained operator setup origin; restore the original configuration"
+    )]
+    OriginMismatch,
     #[error("operator setup storage unavailable")]
     Storage(#[from] sqlx::Error),
     #[error("operator setup audit unavailable")]
@@ -133,6 +137,29 @@ fn audit_time(now: i64) -> Result<i64, OperatorSetupError> {
 macro_rules! setup_store {
     ($store:ty, $db:ty, $begin:expr, $lock:expr, $append:path, $admission_lock:path, $outcome:path) => {
         impl $store {
+            /// Check the configured origin against an existing setup without changing stored state.
+            /// Explicit local reissue may replace a pending origin but cannot reopen completed setup.
+            /// A deployment without an entitlement has no retained origin yet.
+            ///
+            /// # Errors
+            /// Rejects an origin mismatch, completed reissue, or unavailable setup storage.
+            pub async fn check_operator_setup_startup(&self, origin: &str, reissue: bool) -> Result<(), OperatorSetupError> {
+                let row = sqlx::query::<$db>(
+                    "SELECT completed_at_s, trusted_origin FROM operator_setup WHERE singleton = 1",
+                )
+                .fetch_optional(self.pool())
+                .await?;
+                if let Some(row) = row {
+                    let complete: Option<i64> = row.try_get("completed_at_s")?;
+                    if reissue {
+                        if complete.is_some() { return Err(OperatorSetupError::Denied { consumed: false }); }
+                    } else if row.try_get::<String,_>("trusted_origin")? != origin {
+                        return Err(OperatorSetupError::OriginMismatch);
+                    }
+                }
+                Ok(())
+            }
+
             /// Initialize once, or explicitly replace an uncompleted local entitlement.
             ///
             /// Call `reissue` only from the server-host CLI after loading its configured KMS.
@@ -148,12 +175,13 @@ macro_rules! setup_store {
                     let complete: Option<i64> = row.try_get("completed_at_s")?;
                     if complete.is_some() {
                         if reissue { return Err(OperatorSetupError::Denied { consumed: false }); }
+                        if row.try_get::<String,_>("trusted_origin")? != origin { return Err(OperatorSetupError::OriginMismatch); }
                         tx.commit().await?;
                         return Ok(None);
                     }
                     OperatorPasskeyVerifier::new(origin).map_err(|_| OperatorSetupError::Configuration)?;
                     if !reissue {
-                        if row.try_get::<String,_>("trusted_origin")? != origin { return Err(OperatorSetupError::Configuration); }
+                        if row.try_get::<String,_>("trusted_origin")? != origin { return Err(OperatorSetupError::OriginMismatch); }
                         tx.commit().await?;
                         return Ok(None);
                     }
