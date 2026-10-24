@@ -20,6 +20,80 @@ import { fileURLToPath } from "node:url";
 const repository = fileURLToPath(new URL("../", import.meta.url));
 const ownerLabel = "com.scoplen.personal-container-check";
 const fixturePrefix = "scoplen-personal-container-";
+const failurePhases = new Set([
+  "preflight",
+  "production image build",
+  "production image metadata",
+  "image data-directory validation",
+  "probe image pull",
+  "TLS fixture preparation",
+  "non-root Compose startup and trusted HTTPS",
+  "bundled console assets",
+  "single public setup, fresh Passkey login and invitation",
+  "restart and persistent setup/key verification",
+  "owned-resource cleanup",
+  "failed-check cleanup",
+]);
+
+export function describeCheckFailure({
+  phase,
+  error,
+  diagnosticWrite = false,
+}) {
+  const cause = error?.cause ?? error;
+  const { exitCode, signal } = describeImageBuildFailure({ error: cause });
+  const assertion = error?.code === "ERR_ASSERTION";
+  const reasons = [
+    ["resource belongs to another check", "resource-owner"],
+    ["resource belongs to another project", "resource-project"],
+    ["runtime must be non-root", "runtime-user"],
+    ["runtime must use the supervisor's shutdown signal", "runtime-signal"],
+    ["invalid directory archive", "directory-archive"],
+    ["unexpected image directory entry", "directory-entry"],
+    ["image data directory is not private", "directory-mode"],
+    ["image data directory has the wrong owner", "directory-owner"],
+    ["image data directory has the wrong group", "directory-group"],
+    ["image data directory missing", "directory-missing"],
+  ];
+  return {
+    phase: failurePhases.has(phase) ? phase : "unknown",
+    category: diagnosticWrite
+      ? "private-diagnostic-write"
+      : assertion
+        ? "validation"
+        : exitCode !== null || signal !== null
+          ? "command"
+          : "operation",
+    reason:
+      (assertion && typeof error.message === "string"
+        ? reasons.find(([message]) => error.message.startsWith(message))?.[1]
+        : null) ?? null,
+    ioCode: [
+      "ENOSPC",
+      "EDQUOT",
+      "EACCES",
+      "EPERM",
+      "ENOENT",
+      "EEXIST",
+      "EISDIR",
+    ].includes(cause?.code)
+      ? cause.code
+      : null,
+    exitCode,
+    signal,
+  };
+}
+
+export async function writePrivateDiagnostic(path, value, phase) {
+  try {
+    await writeFile(path, value, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    console.error(
+      `Personal container check failure: ${JSON.stringify(describeCheckFailure({ phase, error, diagnosticWrite: true }))}`,
+    );
+    throw new Error("private diagnostic write failed", { cause: error });
+  }
+}
 
 export function describeImageBuildFailure({ error, stdout, stderr }) {
   const output = `${stdout ?? ""}\n${stderr ?? ""}`;
@@ -250,16 +324,12 @@ export async function checkPersonalContainer(driverPath) {
         (error, stdout, stderr) => accept({ error, stdout, stderr }),
       );
     });
-    await writeFile(`${log}.stdout`, result.stdout, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    await writeFile(`${log}.stderr`, result.stderr, {
-      flag: "wx",
-      mode: 0o600,
-    });
+    await writePrivateDiagnostic(`${log}.stdout`, result.stdout, phase);
+    await writePrivateDiagnostic(`${log}.stderr`, result.stderr, phase);
     if (result.error && !allowFailure)
-      throw new Error(`${basename(program)} failed during ${phase}`);
+      throw new Error(`${basename(program)} failed during ${phase}`, {
+        cause: result.error,
+      });
     return result;
   }
   const docker = async (args, options) =>
@@ -386,6 +456,7 @@ export async function checkPersonalContainer(driverPath) {
         "production image build failed; inspect private build output",
       );
     }
+    progress("production image metadata");
     const built = await inspect("image", image);
     assertOwnedResource(built.Config.Labels, run);
     imageId = built.Id;
@@ -395,6 +466,7 @@ export async function checkPersonalContainer(driverPath) {
       "SIGINT",
       "runtime must use the supervisor's shutdown signal",
     );
+    progress("image data-directory validation");
     await docker([
       "create",
       "--name",
@@ -409,11 +481,13 @@ export async function checkPersonalContainer(driverPath) {
       (await docker(["cp", `${inspector}:/var/lib/spl`, "-"], { binary: true }))
         .stdout,
     );
+    progress("probe image pull");
     await docker(["pull", probeImage], { timeout: 300_000 });
     const fixtureMount = [
       "--mount",
       `type=bind,source=${directory},target=/check`,
     ];
+    progress("TLS fixture preparation");
     await nodeProbe("prepare-tls", fixtureMount);
     certificatePrepared = true;
 
@@ -518,7 +592,7 @@ export async function checkPersonalContainer(driverPath) {
     progress("single public setup, fresh Passkey login and invitation");
     const logs = await docker(["logs", container]);
     const serverLog = join(fixture, "server.log");
-    await writeFile(serverLog, logs.stdout, { flag: "wx", mode: 0o600 });
+    await writePrivateDiagnostic(serverLog, logs.stdout, phase);
     await command(driver, ["bootstrap", fixture, "--server-log", serverLog]);
     const descriptorPath = join(fixture, "descriptor.json");
     const descriptorBytes = await readFile(descriptorPath);
@@ -591,18 +665,17 @@ export async function checkPersonalContainer(driverPath) {
     );
     succeeded = true;
   } catch (error) {
-    await writeFile(
+    console.error(
+      `Personal container check failure: ${JSON.stringify(describeCheckFailure({ phase, error }))}`,
+    );
+    await writePrivateDiagnostic(
       join(directory, "failure.txt"),
       `${phase}\n${error.stack}\n`,
-      { flag: "wx", mode: 0o600 },
+      phase,
     );
     throw error;
   } finally {
-    progress(
-      succeeded
-        ? "owned-resource cleanup"
-        : `stopping failed check after ${phase}`,
-    );
+    progress(succeeded ? "owned-resource cleanup" : "failed-check cleanup");
     try {
       const containers = (
         await docker([
@@ -660,10 +733,13 @@ export async function checkPersonalContainer(driverPath) {
         );
       }
     } catch (error) {
-      await writeFile(
+      console.error(
+        `Personal container check failure: ${JSON.stringify(describeCheckFailure({ phase, error }))}`,
+      );
+      await writePrivateDiagnostic(
         join(directory, "cleanup-failure.txt"),
         `${error.stack}\n`,
-        { flag: "wx", mode: 0o600 },
+        phase,
       );
       console.error(
         `Cleanup stopped; private diagnostics and remaining test resources retained: ${directory}`,

@@ -160,5 +160,13 @@ The check never prunes Docker caches or touches earlier failed fixtures.
 Image-build failures report a fixed failure category, the last observed build stage, and bounded
 exit metadata; detailed command output remains in the private check directory. The CI job retains
 the native bootstrap executable separately and removes its intermediate Cargo outputs before
-building the independent production image. Use the fixed summary to select the next investigation;
-the retained detailed output is required to establish a cause.
+building the independent production image. After building, separate static stages identify image
+metadata, directory validation, probe-image retrieval and TLS fixture preparation. Failures expose
+only fixed categories/reasons and bounded I/O or exit metadata; private diagnostic-write failures
+report that stage before attempting to retain further output. Unknown messages, paths, command
+arguments and captured output never enter these summaries.
+
+Use the fixed summary to select the next investigation. A missing image-build failure summary
+alone does not prove that building succeeded: retaining its private output can fail first.
+Summaries identify observed failure points; an unobserved underlying cause remains unknown.
+Detailed private output must remain local; an ephemeral CI runner does not retain it as an artifact.
