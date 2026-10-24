@@ -29,6 +29,9 @@ pub enum ServerError {
     /// A database-backed role was started without initialized key management.
     #[error("api, worker, and edge roles require initialized key management")]
     MissingKeyManagement,
+    /// A database-backed role was started without deployment admission.
+    #[error("api, worker, and edge roles require a deployment lease")]
+    MissingDeploymentLease,
     /// The data directory could not be initialized.
     #[error("could not initialize data directory {path}: {source}")]
     DataDirectory {
@@ -41,6 +44,14 @@ pub enum ServerError {
     #[cfg(windows)]
     #[error("private deployment storage is unavailable: {0}")]
     PrivateMaterialAccess(#[source] std::io::Error),
+    /// A server or offline operation holds an incompatible deployment lease.
+    #[error("deployment state is in use; stop the active server or local operation and retry")]
+    DeploymentLeaseOccupied,
+    /// The lease file cannot be safely opened or locked.
+    #[error(
+        "deployment lease is unsafe or unavailable; check the private data directory and retry"
+    )]
+    DeploymentLeaseUnavailable(#[source] std::io::Error),
     /// A generated deployment material file could not be written.
     #[error("could not write deployment material {path}: {source}")]
     Material {
@@ -52,6 +63,11 @@ pub enum ServerError {
     /// A listener or request-serving task failed.
     #[error("runtime error: {0}")]
     Runtime(#[from] std::io::Error),
+    /// Shutdown could not prove local deployment state is quiescent within the deadline.
+    #[error(
+        "server shutdown exceeded 10 seconds; the deployment lease remains held until this process exits. Exit this process before an offline backup or restore"
+    )]
+    ShutdownTimedOut,
     /// TLS configuration could not be created.
     #[error("TLS error: {0}")]
     Tls(String),

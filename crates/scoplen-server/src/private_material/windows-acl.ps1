@@ -52,6 +52,7 @@ try {
         $attributes = [System.IO.File]::GetAttributes($path)
         if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 2 }
         if ($directory -ne (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0)) { exit 2 }
+        if (-not $directory -and (Get-Item -LiteralPath $path -Force).LinkType -eq 'HardLink') { exit 2 }
         $security = if ($directory) { [System.IO.Directory]::GetAccessControl($path) } else { [System.IO.File]::GetAccessControl($path) }
         if ($trusted -notcontains $security.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) { exit 2 }
         $descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($security.GetSecurityDescriptorBinaryForm(), 0)

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! `spl-server` command-line entry point.
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{path::PathBuf, process::ExitCode, sync::OnceLock};
 
 use clap::{Parser, ValueEnum};
 use scoplen_server::{Config, Role, ServerError, VERSION, prepare_roles, resolve_roles};
 use tracing_subscriber::EnvFilter;
+
+static PROCESS_LEASE: OnceLock<scoplen_server::deployment_lease::DeploymentLease> = OnceLock::new();
 
 #[derive(Debug, Parser)]
 #[command(name = "spl-server", version = VERSION, about = "Scoplen self-hosted server")]
@@ -78,20 +80,15 @@ async fn run() -> Result<(), ServerError> {
         return Ok(());
     }
 
+    if roles.iter().any(|role| role.requires_store()) {
+        let lease = scoplen_server::admit_local_deployment(&config)?;
+        PROCESS_LEASE.get_or_init(|| lease);
+    }
     let prepared = prepare_roles(&config, &roles).await?;
-    if let Some(link) = prepared.setup_link {
+    if let Some(link) = prepared.setup_link.as_ref() {
         println!("one-time operator setup link (keep private): {}", link.expose_link().as_str());
     }
-    scoplen_server::run_roles(
-        config,
-        roles,
-        prepared.store,
-        prepared.postgres_store,
-        prepared.object_storage,
-        prepared.key_management,
-        prepared.audit_signer,
-    )
-    .await
+    scoplen_server::run_roles(config, roles, prepared).await
 }
 
 // Keep the public role names visible to rustdoc and downstream CLI tooling.

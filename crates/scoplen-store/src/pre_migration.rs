@@ -5,6 +5,7 @@ use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions, TryLockError},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,12 +18,17 @@ use crate::{SQLITE_MIGRATIONS, StoreError};
 
 const KEEP_SNAPSHOTS: usize = 3;
 
-pub(super) async fn migrate(pool: &SqlitePool, path: &Path) -> Result<(), StoreError> {
+pub(super) async fn migrate(
+    pool: &SqlitePool,
+    path: &Path,
+    deployment_lease: Option<Arc<File>>,
+) -> Result<(), StoreError> {
     let pool = pool.clone();
     let path = path.to_path_buf();
     // Keep the file lock and SQLite worker alive until migration finishes, even if the
     // startup caller is cancelled while SQLite is executing a statement.
     tokio::spawn(async move {
+        let _deployment_lease = deployment_lease;
         let path = fs::canonicalize(path).map_err(|_| failed("database path"))?;
         let _lock = migration_lock(&path).await?;
         let mut connection = pool.acquire().await?;

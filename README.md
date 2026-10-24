@@ -484,6 +484,15 @@ available to another request, any remaining tracked transaction is rolled back; 
 discards the connection. A deterministic cancellation test covers SQLx's acknowledged custom-BEGIN
 validation window, subsequent source admission and rollback failure. This separate cancellation
 defect does not establish the cause of the unresolved native post-reopen refresh failure.
+The server and local `splctl` mutations retain a shared lock on the private
+`server.data_dir/deployment.lease` file through their process lifetime. An offline operation must
+first obtain an exclusive lock, so stop every server and local mutation process before copying
+deployment state. Do not delete or replace the lease file to bypass an occupied lock. On shutdown,
+the server fences notification connections and allows up to 10 seconds for requests, role tasks and
+database pools to drain. If that deadline expires, it cancels remaining tasks and reports a fatal
+error while retaining the lease until the host process exits. A caller embedding the server library
+must exit its process after this error before attempting an offline operation. A raw SQLx pool
+obtained outside the server's admission path does not participate in this lease protocol.
 API, edge, and worker roles may instead use
 PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or
 `SPL_STORAGE_DATABASE_URL`). Object storage is initialized alongside the database for

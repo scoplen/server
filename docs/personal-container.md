@@ -120,6 +120,11 @@ retains the original setup state, accounts, keys, invitations and objects. After
 files, restart the container to load them. After changing source/assets, rebuild the image and
 recreate the service. `down` removes the service while retaining its named volume; `down --volumes`
 deletes the database and keys and must not be used for a deployment you intend to keep.
+Shutdown fences notification connections and allows up to 10 seconds for requests, role tasks and
+database pools to drain. If it times out, the server cancels remaining tasks and reports an error;
+its deployment lease remains held until the container process exits. Wait for the container to stop
+before any offline copy. Do not delete `deployment.lease` from the data volume to bypass an
+occupied lock.
 
 Before upgrading an existing SQLite schema, the server creates and verifies a standalone
 `pre-migration-<UUIDv7>.sqlite` snapshot in `/var/lib/spl/scoplen.sqlite.migration-snapshots/`.

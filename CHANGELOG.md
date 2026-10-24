@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added a private, stable deployment lease for server and local `splctl` state access. Running
+  processes hold shared admission; offline operations require exclusive admission. Shutdown first
+  fences notification streams and drains role tasks and pools for up to 10 seconds. A timed-out
+  drain cancels remaining tasks with bounded cleanup, reports a fatal error and retains the lease
+  until the host process exits. Real process, incomplete-request, TLS, notification, SQLite
+  transaction and Windows permission regressions cover the admission boundary. Encrypted archive
+  creation and restoration remain separate roadmap work.
+
 - Added verified, standalone SQLite snapshots before upgrading existing schemas, including
   committed WAL pages. Empty/current databases skip snapshots; snapshot failures stop migration.
   Private snapshots retain the three newest completed recovery points, including after a failed

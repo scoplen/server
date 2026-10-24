@@ -2,6 +2,8 @@
 
 use std::{fs, process::Command};
 
+use scoplen_server::{Config, ServerError, bootstrap, deployment_lease::DeploymentLease};
+
 #[test]
 fn local_pending_reissue_requires_explicit_flag_and_discloses_only_stdout() {
     let directory = std::env::temp_dir().join(format!(
@@ -37,6 +39,52 @@ fn local_pending_reissue_requires_explicit_flag_and_discloses_only_stdout() {
     for file in ["deployment.key", "audit-signing.key", "scoplen.sqlite"] {
         assert!(data.join(file).is_file(), "configured deployment material exists");
     }
+    fs::remove_dir_all(directory).expect("remove owned CLI fixture");
+}
+
+#[test]
+fn exclusive_deployment_lease_rejects_local_reissue_without_creating_storage() {
+    let directory = std::env::temp_dir().join(format!(
+        "scoplen-ctl-lease-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).expect("owned fixture directory");
+    let config_file = directory.join("server.toml");
+    let mut config = Config::default();
+    config.server.public_host = "setup.example.com".into();
+    config.server.data_dir = directory.join("data");
+    fs::write(
+        &config_file,
+        format!(
+            "[server]\npublic_host = 'setup.example.com'\ndata_dir = '{}'\n",
+            config.server.data_dir.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .expect("local fixture configuration");
+    bootstrap(&config).expect("private fixture material");
+    let exclusive = DeploymentLease::try_exclusive(&config.server.data_dir)
+        .expect("offline operation owns deployment");
+    let output = Command::new(env!("CARGO_BIN_EXE_splctl"))
+        .args(["bootstrap", "--reissue-pending", "--config"])
+        .arg(&config_file)
+        .output()
+        .expect("run local reissue while occupied");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "occupied state cannot disclose a setup link");
+    assert!(
+        matches!(
+            DeploymentLease::try_shared(&config.server.data_dir),
+            Err(ServerError::DeploymentLeaseOccupied)
+        ),
+        "exclusive holder remains intact after rejected command"
+    );
+    assert!(!config.server.data_dir.join("scoplen.sqlite").exists());
+    drop(exclusive);
+    reissue(&config_file);
     fs::remove_dir_all(directory).expect("remove owned CLI fixture");
 }
 

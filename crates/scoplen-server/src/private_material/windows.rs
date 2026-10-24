@@ -20,7 +20,7 @@ struct AdmissionInput<'a> {
     files: &'a [PathBuf],
 }
 
-pub(super) fn prepare_directory(directory: &Path, files: &[PathBuf]) -> io::Result<()> {
+pub(crate) fn prepare_directory(directory: &Path, files: &[PathBuf]) -> io::Result<()> {
     let system_root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
