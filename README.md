@@ -435,6 +435,11 @@ Personal session/key reads, encrypted signed host write, download verification/d
 durable ACK. They use the production API router and verify its deployment audit chain. Native
 desktop and two-device acceptance remain separate roadmap work.
 
+PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The device-token
+keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.
+Run Personal sync authentication and certified-signature limit tests in a separate database,
+as CI does; both Personal suites use the same test deployment key and may share that database.
+
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. API, edge, and worker roles may instead use
 PostgreSQL by setting `storage.backend = "postgres"` and `storage.database_url` (or
