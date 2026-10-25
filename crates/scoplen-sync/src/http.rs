@@ -1947,6 +1947,15 @@ impl SyncHttpError {
                 false,
                 false,
             ),
+            key_storage::AccountKeyStoreError::UnsupportedTransition => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Account key transition unsupported",
+                "This password Account requires an authorized atomic bootstrap transition; no data changed. Fetching or re-signing another revision cannot enable this operation.",
+                false,
+                false,
+            ),
             key_storage::AccountKeyStoreError::Conflict { current_revision } => Self::known(
                 instance,
                 StatusCode::CONFLICT,
@@ -4743,6 +4752,24 @@ mod tests {
             ProblemDetails::from_cbor(&body).expect("missing bundle problem").code.as_str(),
             "sync.object_not_found"
         );
+    }
+
+    #[tokio::test]
+    async fn account_key_unsupported_password_transition_is_a_nonretryable_conflict() {
+        for (error, retryable) in [
+            (key_storage::AccountKeyStoreError::UnsupportedTransition, false),
+            (key_storage::AccountKeyStoreError::Conflict { current_revision: 1 }, true),
+        ] {
+            let response =
+                SyncHttpError::from_account_key_store(&error, "/sync/v1/keys").into_response();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body =
+                to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("conflict body");
+            let problem = ProblemDetails::from_cbor(&body).expect("conflict problem");
+            assert_eq!(problem.code.as_str(), "sync.conflict");
+            assert!(!problem.changed);
+            assert_eq!(problem.retryable, retryable);
+        }
     }
 
     #[tokio::test]

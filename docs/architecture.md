@@ -81,7 +81,7 @@ The UI uses local Inter, Lora and JetBrains Mono fonts without third-party reque
 `scoplen-identity` exposes the maintained Operator passkey verifier. Retired Personal
 invitation/enrollment and pairing modules, routes, privileges and worker cleanup are absent.
 Historical schema and data remain intact and unused by runtime. Existing Devices continue to
-use public authentication and Personal sync. Account password registration/sign-in, bootstrap
+use public authentication and Personal sync. Account password registration/sign-in
 and new Device admission remain incomplete; consuming their published contracts does not mount
 those endpoints. Tests directly seed real signed artifacts only into owned fixture databases.
 
@@ -237,3 +237,46 @@ deletion cannot cascade into the retained set. Maintenance quiesces new registra
 audited ceiling increases preserve every digest. These storage methods grant no operator
 authorization and expose no new HTTP route. Mounted registration, configuration/admission wiring,
 operator warning delivery and complete backup/restore acceptance remain separate roadmap work.
+
+Initial password Account persistence is a transaction-local storage prerequisite. The caller
+passes a validated public registration payload and trusted origin/time to the backend helper.
+It reserves the D-129 digest before Account/vault locks, then inserts the new Account, active
+Device, Personal epoch-one projection, original signed certificate, exact signed K-4 PUT and
+generation-one credential. Every required insert must affect one row. Only the authentication
+verifier, public metadata and encrypted artifacts are stored; no raw AuthSecret, login capability,
+receipt or session is created. Existing legacy Accounts are never converted or upserted.
+
+`identity_accounts.password_owned` is fixed at creation: migration defaults existing Accounts
+to false and the new helper explicitly inserts true. Guards reject later conversion or rollback;
+SQLite replacement also cannot replace an existing password Account or convert a legacy Account.
+The credential row is immutable apart from same-value locking updates, cannot attach to a legacy
+Account and cannot be removed while its parent exists. Parent Account deletion cascades this
+ordinary-lifetime state, independently of the permanent used-id digest. A missing password row
+under a true ownership marker is an integrity/storage failure, never a legacy fallback.
+
+The current reader obtains the shared PostgreSQL seed-0 account-key lock, versions the password
+row before reading mutable artifacts, and uses bounded SQL projection and complete signed
+statement readers. Stale repeatable-read/serializable snapshots fail at the row version fence.
+It requires exact accepted PUT/projection agreement, all signatures and recipients, the original
+public roots and Personal ownership anchors, generation/profile one, Personal epoch one and no
+pending rotation. Other states have no complete supported historical-key representation and
+fail closed. The shared snapshot encoder applies the full aggregate and encoded bounds. It
+validates public bindings and artifact formats; it cannot decrypt opaque wraps to prove equal
+plaintext ARKs. Clients still perform the published password opening and freshness checks.
+
+Production K-4 publication classifies authorized exact replay before unsupported-transition
+checks. A new revision on a password Account validates its full current bootstrap and keeps
+encrypted Account roots, recovery material and the complete Device-wrap set byte-for-byte
+unchanged. Its accepted PUT and audit remain atomic. Unsupported changes map to the existing
+`409 sync.conflict` with `changed:false` and `retryable:false`; ordinary revision conflict remains
+retryable. Lower-level new revisions cannot clear password acceptance evidence, independent
+statement replacement is rejected, and the Personal provisioning helper cannot repair missing
+password ownership with an arbitrary replacement wrap. Legacy Accounts retain ordinary behavior.
+
+These helpers never COMMIT or authorize registration/login. Their caller must verify the live
+challenge and Account/Device possession proofs, enforce durable admission and deployment-wide
+Device/key freshness, preflight the complete protocol response, add its immutable receipt,
+consume the relevant protocol state and append mandatory audit in the same transaction.
+Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
+confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
+HTTP entry routes, capabilities, Device admission and full V3 acceptance remain incomplete.

@@ -483,9 +483,10 @@ impl SqliteStore {
 
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
     ///
-    /// The identity enrollment service supplies the authenticated account and a client-generated
+    /// Legacy Account provisioning supplies the authenticated account and a client-generated
     /// `UUIDv7` vault id after validating the opaque key wrap. The unique account constraint makes
     /// concurrent enrollment safe; a second attempt never creates another personal vault.
+    /// Password Accounts must use the atomic bootstrap lifecycle, including when state is missing.
     ///
     /// # Errors
     ///
@@ -504,6 +505,9 @@ impl SqliteStore {
             return Err(SyncStoreError::VaultKeyTooLarge);
         }
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        if crate::account_bootstrap::sqlite_password_account(&mut transaction, &account_id).await? {
+            return Err(SyncStoreError::VaultAlreadyExists);
+        }
         let exists =
             sqlx::query_scalar::<_, i64>("SELECT 1 FROM sync_personal_vaults WHERE account_id = ?")
                 .bind(account_id.as_slice())
@@ -2374,8 +2378,9 @@ impl PostgresStore {
 
     /// Atomically provision one personal vault and its ARK-wrapped epoch-one key for an account.
     ///
-    /// The account and client-generated vault id must be validated by the enrollment service.
+    /// The account and client-generated vault id must be validated by legacy Account provisioning.
     /// A duplicate account or vault id leaves no partial vault row.
+    /// Password Accounts must use the atomic bootstrap lifecycle, including when state is missing.
     ///
     /// # Errors
     ///
@@ -2394,6 +2399,15 @@ impl PostgresStore {
             return Err(SyncStoreError::VaultKeyTooLarge);
         }
         let mut transaction = self.pool().begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 0))")
+            .bind(account_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+        if crate::account_bootstrap::postgres_password_account(&mut transaction, &account_id)
+            .await?
+        {
+            return Err(SyncStoreError::VaultAlreadyExists);
+        }
         sqlx::query("INSERT INTO sync_vaults (vault_id, kind) VALUES ($1, 'personal')")
             .bind(vault_id.as_slice())
             .execute(&mut *transaction)

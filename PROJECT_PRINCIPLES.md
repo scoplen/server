@@ -68,7 +68,12 @@ self-hosted server, host agent, administration CLI, and web console.
   The Account password probe-key storage boundary separately persists one random Kprobe under
   KMS protection. Database-serialized initialization and same-value rewrapping are audit-atomic;
   unknown commits return no key, and damaged/missing state never triggers silent replacement.
-  This storage boundary does not yet provide Account password HTTP or credential/bootstrap state.
+  A separate transaction-local boundary creates only new password Account aggregates and reads
+  their complete verified public/encrypted bootstrap. Creation-only ownership prevents missing
+  credentials from becoming legacy state. Existing key writers reject unsupported password
+  transitions and preserve legitimate exact replay. Caller-owned challenge/proof verification,
+  admission, receipts, protocol consumption and audit remain required in the same transaction;
+  these helpers never commit or issue authority. Mounted password HTTP and Device admission remain open.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
@@ -81,7 +86,7 @@ self-hosted server, host agent, administration CLI, and web console.
   attestations or server observation timestamps. Retired Personal invitation/enrollment and
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
-  and Personal sync continue; new Account password registration, bootstrap and device admission
+  and Personal sync continue; new Account password registration/login and device admission
   remain incomplete. The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

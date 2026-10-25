@@ -132,6 +132,8 @@ jobs:
         run: cargo test --locked -p scoplen-store --test accepted_account_key_put --features postgres-integration postgres_ -- --test-threads=1
       - name: Check permanent Account-id retention and capacity
         run: cargo test --locked -p scoplen-store --test account_used_ids --features postgres-integration
+      - name: Check complete initial password Account storage and protected key transitions
+        run: cargo test --locked -p scoplen-store --test account_bootstrap --features postgres-integration -- --test-threads=1
       - name: Check PostgreSQL operator setup, passkeys, and uncertain commits
         run: cargo test -p scoplen-store --test operator_setup --features postgres-integration postgres_
       - name: Check PostgreSQL Operator access-token keyring
