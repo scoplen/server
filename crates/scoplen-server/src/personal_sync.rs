@@ -514,6 +514,7 @@ fn storage_unavailable() -> AuthFailure {
 
 #[cfg(test)]
 mod tests {
+    mod interactive_credential;
     mod limits;
     mod write_admission;
     use super::*;

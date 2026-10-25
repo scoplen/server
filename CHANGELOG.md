@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Updated Rust protocol dependencies and the generated console API source to `proto@b1748dd`,
+  including D-123's secretless interactive Credential descriptor. Older readers reject this
+  pre-Stable K-1 registry extension; HTTP/API and K-2 artifacts are unchanged. Sync preserves
+  encrypted envelopes without inspecting Credential fields.
+
 - Made per-device object-write admission durable across API instances and restarts on SQLite
   and PostgreSQL. Admission commits before body collection; malformed and oversized attempts
   retain their charge. Exact unsigned fixed-point balances, database time, stored-policy

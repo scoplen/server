@@ -11,7 +11,7 @@ workspace = true
 
 [dependencies]
 cedar-policy = "=4.4.0"
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e2b881771e23923b602ceace1f15870cd7ec2144" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "b1748dd92478cf1451ce468ff1f1c2ead7c0b32c" }
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

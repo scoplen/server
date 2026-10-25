@@ -28,10 +28,13 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@e2b8817` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
-`scoplen-model`; their source and public API artifact are unchanged from the prior pin.
-The revision's D-116 asynchronous agent signing belongs to `scoplen-ssh`. Server SSH
-execution and host-agent integration remain separate roadmap work.
+`proto@b1748dd` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
+`scoplen-model`. D-123 adds the secretless interactive Credential descriptor, a breaking
+pre-Stable K-1 extension rejected by older readers. HTTP/API and K-2 artifacts are unchanged.
+The server stores encrypted object envelopes
+without inspecting Credential fields. D-121 interactive SSH authentication belongs to
+`scoplen-ssh`, which this workspace does not consume. Server SSH execution and host-agent
+integration remain separate roadmap work.
 
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request

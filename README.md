@@ -115,16 +115,19 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Remaining console administration and
 control-plane authorization remain roadmap work. All server Rust proto dependencies and
-the console's generated public API types are pinned to `proto@e2b8817` for shared
+the console's generated public API types are pinned to `proto@b1748dd` for shared
 authentication, Operator token, scope,
 object-signature, complete account-device statement, D-114 pairing and notification scope lookup
 contracts, D-115 account-key problem vectors and RUSTSEC-2026-0387 dependency fixes.
-The pinned source also includes D-116 asynchronous agent signing in `scoplen-ssh`.
-The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`; those crates and
-the OpenAPI artifact are unchanged by this revision. Server-hosted SSH and agent execution
-remain separate roadmap work.
+The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`. D-123 adds the
+secretless keyboard-interactive Credential descriptor to the model, a breaking pre-Stable
+K-1 extension rejected by older readers. HTTP/API and K-2 artifacts are unchanged. The sync
+service retains encrypted object envelopes without reading
+their Credential fields. The source also includes D-121 asynchronous interactive authentication
+in `scoplen-ssh`, which the server does not consume. Server-hosted SSH and agent execution remain
+separate roadmap work.
 The server lock also resolves patched `crypto-bigint` 0.7.6 and `ctutils` 0.4.5;
-published K-2 formats and shared public APIs remain unchanged.
+those dependency fixes preserve published K-2 formats.
 The stores also provide independent durable pairing admission for each method/route:
 30 mutation attempts or 120 reads per actual source, 30 mutations or 60 reads per verified
 capability, and 30 mutations or 120 reads per current authenticated account per 60 seconds.
