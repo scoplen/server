@@ -190,9 +190,10 @@ macro_rules! publication {
                         let certificates = $statements(&mut tx, account, StatementKind::Certificate, &mut total).await.map_err(|error| identity_error(&error))?;
                         let revocations = $statements(&mut tx, account, StatementKind::Revocation, &mut total).await.map_err(|error| identity_error(&error))?;
                         verify(expected.account_id, &key, &certificates, &revocations, update)?;
+                        let accepted_put = update.to_cbor().map_err(|_| AccountKeyStoreError::InvalidSignature)?;
                         let now = now_ms()?;
-                        sqlx::query(&sql("UPDATE sync_account_key_bundles SET revision=?,account_signing_key=?,account_kem_key=?,recovery_blob=?,signature=?,updated_at_ms=? WHERE account_id=?"))
-                            .bind(revision).bind(&update.account_signing_key).bind(&update.account_kem_key).bind(&update.recovery_blob).bind(&update.signature).bind(now).bind(account).execute(&mut *tx).await?;
+                        sqlx::query(&sql("UPDATE sync_account_key_bundles SET revision=?,account_signing_key=?,account_kem_key=?,recovery_blob=?,signature=?,updated_at_ms=?,accepted_put_cbor=? WHERE account_id=?"))
+                            .bind(revision).bind(&update.account_signing_key).bind(&update.account_kem_key).bind(&update.recovery_blob).bind(&update.signature).bind(now).bind(accepted_put).bind(account).execute(&mut *tx).await?;
                         sqlx::query(&sql("DELETE FROM sync_account_key_device_wraps WHERE account_id=?")).bind(account).execute(&mut *tx).await?;
                         for wrap in &update.device_wraps {
                             sqlx::query(&sql("INSERT INTO sync_account_key_device_wraps (account_id,device_id,wrapped_ark) VALUES (?,?,?)"))

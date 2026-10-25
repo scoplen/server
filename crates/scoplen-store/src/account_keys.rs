@@ -8,6 +8,8 @@
 
 #![forbid(unsafe_code)]
 
+mod accepted_put;
+
 use sqlx::{Postgres, Row, Sqlite, Transaction, postgres::PgRow};
 use thiserror::Error;
 
@@ -348,7 +350,8 @@ impl SqliteStore {
                account_kem_key = excluded.account_kem_key,
                recovery_blob = excluded.recovery_blob,
                signature = excluded.signature,
-               updated_at_ms = excluded.updated_at_ms",
+               updated_at_ms = excluded.updated_at_ms,
+               accepted_put_cbor = NULL",
         )
         .bind(account_id.as_slice())
         .bind(revision_to_sql(update.revision)?)
@@ -620,7 +623,8 @@ impl PostgresStore {
                account_kem_key = EXCLUDED.account_kem_key,
                recovery_blob = EXCLUDED.recovery_blob,
                signature = EXCLUDED.signature,
-               updated_at_ms = EXCLUDED.updated_at_ms",
+               updated_at_ms = EXCLUDED.updated_at_ms,
+               accepted_put_cbor = NULL",
         )
         .bind(account_id.as_slice())
         .bind(revision_to_sql(update.revision)?)

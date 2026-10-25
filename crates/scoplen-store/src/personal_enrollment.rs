@@ -757,10 +757,11 @@ async fn insert_sqlite_enrollment(
     .await
     .map_err(map_unique_to_denied)?;
     sqlx::query("INSERT INTO sync_account_key_bundles
-        (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms)
-        VALUES (?, 1, ?, ?, ?, ?, ?)")
+        (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms, accepted_put_cbor)
+        VALUES (?, 1, ?, ?, ?, ?, ?, ?)")
         .bind(account).bind(&update.account_signing_key).bind(&update.account_kem_key)
         .bind(&update.recovery_blob).bind(signature.as_slice()).bind(now)
+        .bind(verified.key_bundle_update_cbor())
         .execute(&mut **transaction).await.map_err(map_unique_to_denied)?;
     sqlx::query(
         "INSERT INTO sync_account_key_device_wraps (account_id, device_id, wrapped_ark)
@@ -860,10 +861,11 @@ async fn insert_postgres_enrollment(
     .await
     .map_err(map_unique_to_denied)?;
     sqlx::query("INSERT INTO sync_account_key_bundles
-        (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms)
-        VALUES ($1, 1, $2, $3, $4, $5, $6)")
+        (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms, accepted_put_cbor)
+        VALUES ($1, 1, $2, $3, $4, $5, $6, $7)")
         .bind(account).bind(&update.account_signing_key).bind(&update.account_kem_key)
         .bind(&update.recovery_blob).bind(signature.as_slice()).bind(now)
+        .bind(verified.key_bundle_update_cbor())
         .execute(&mut **transaction).await.map_err(map_unique_to_denied)?;
     sqlx::query(
         "INSERT INTO sync_account_key_device_wraps (account_id, device_id, wrapped_ark)

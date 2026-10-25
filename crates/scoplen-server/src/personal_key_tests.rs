@@ -15,6 +15,15 @@ use tokio::net::TcpStream;
 const PATH: &str = "/sync/v1/keys";
 type Tls = tokio_rustls::client::TlsStream<TcpStream>;
 
+async fn accepted_put(f: &Fixture, identity: &PersonalBootstrap) -> Option<Vec<u8>> {
+    let account = identity.receipt.account_id.into_bytes();
+    match &f.backend {
+        AuthBackend::Sqlite(store) => store.read_accepted_account_key_put(account).await,
+        AuthBackend::Postgres(store) => store.read_accepted_account_key_put(account).await,
+    }
+    .expect("consistent accepted key PUT")
+}
+
 fn signing() -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[7; 32]).expect("account signing key")
 }
@@ -273,6 +282,7 @@ async fn contract(mut f: Fixture) {
     let mut candidate = update(&identity, 2);
     let before = f.count("SELECT COUNT(*) FROM deployment_audit_events").await;
     success(&put(&listener, &identity, &candidate).await, 2);
+    assert_eq!(accepted_put(&f, &identity).await, Some(candidate.to_cbor().expect("accepted PUT")));
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before + 1);
     success(&put(&listener, &identity, &candidate).await, 2);
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before + 1);
@@ -480,6 +490,7 @@ async fn pairing_race(mut f: Fixture) {
 
 async fn rollback(mut f: Fixture) {
     let identity = bootstrap_personal(&mut f).await;
+    let original_put = accepted_put(&f, &identity).await.expect("accepted enrollment PUT");
     let listener = Listener::start(&mut f).await;
     let candidate = update(&identity, 2);
     let before = f.count("SELECT COUNT(*) FROM deployment_audit_events").await;
@@ -503,6 +514,7 @@ async fn rollback(mut f: Fixture) {
     );
     f.execute(remove).await;
     assert_eq!(f.count("SELECT revision FROM sync_account_key_bundles").await, 1);
+    assert_eq!(accepted_put(&f, &identity).await, Some(original_put.clone()));
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before);
     let mut certificates = vec![own(&f, &identity).await];
     let mut candidate = candidate;
@@ -521,6 +533,7 @@ async fn rollback(mut f: Fixture) {
     denied(&put(&listener, &identity, &candidate).await, 413, "sync.quota_exceeded", false, false);
     assert_eq!(f.count("SELECT revision FROM sync_account_key_bundles").await, 1);
     assert_eq!(f.count("SELECT COUNT(*) FROM sync_account_key_device_wraps").await, 1);
+    assert_eq!(accepted_put(&f, &identity).await, Some(original_put));
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before);
     drop(listener);
     f.cleanup().await;
@@ -717,6 +730,7 @@ async fn postgres_https_personal_key_lost_commit_ack_and_explicit_replay() {
     proxy.armed.store(true, Ordering::SeqCst);
     denied(&release(tls, &body).await, 503, "sync.storage_unavailable", true, false);
     assert_eq!(proxy.dropped.load(Ordering::SeqCst), 1);
+    assert_eq!(accepted_put(&f, &identity).await, Some(body.clone()));
     assert_eq!(f.count("SELECT revision FROM sync_account_key_bundles").await, 2);
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before + 1);
     let projection = request(&listener, &identity, "GET", &[], &identity.token).await;
@@ -732,6 +746,7 @@ async fn postgres_https_personal_key_lost_commit_ack_and_explicit_replay() {
     proxy.armed.store(true, Ordering::SeqCst);
     denied(&release(tls, &body).await, 503, "sync.storage_unavailable", false, true);
     assert_eq!(proxy.dropped.load(Ordering::SeqCst), 2);
+    assert_eq!(accepted_put(&f, &identity).await, Some(body));
     assert_eq!(f.count("SELECT COUNT(*) FROM deployment_audit_events").await, before + 1);
     success(&put(&listener, &identity, &candidate).await, 2);
     let mut altered = candidate;

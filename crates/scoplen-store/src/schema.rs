@@ -708,6 +708,12 @@ const ACCOUNT_KEY_BUNDLES: TableSpec = TableSpec {
             nullable: false,
             primary_key: false,
         },
+        ColumnSpec {
+            name: "accepted_put_cbor",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
     ],
     foreign_keys: &[],
     indexes: &[],
@@ -2403,6 +2409,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025020000_account_password_probe_key.sql");
     const POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY: &str =
         include_str!("../migrations/postgres/20261025020000_account_password_probe_key.sql");
+    const SQLITE_ACCEPTED_ACCOUNT_KEY_PUT: &str =
+        include_str!("../migrations/sqlite/20261025030000_accepted_account_key_put.sql");
+    const POSTGRES_ACCEPTED_ACCOUNT_KEY_PUT: &str =
+        include_str!("../migrations/postgres/20261025030000_accepted_account_key_put.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2447,6 +2457,7 @@ mod tests {
             SQLITE_PAIRING_SESSIONS,
             SQLITE_SYNC_WRITE_ADMISSION,
             SQLITE_ACCOUNT_PASSWORD_PROBE_KEY,
+            SQLITE_ACCEPTED_ACCOUNT_KEY_PUT,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2471,6 +2482,7 @@ mod tests {
             POSTGRES_PAIRING_SESSIONS,
             POSTGRES_SYNC_WRITE_ADMISSION,
             POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY,
+            POSTGRES_ACCEPTED_ACCOUNT_KEY_PUT,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2520,7 +2532,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 24);
+        assert_eq!(migration_count, 25);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2529,7 +2541,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 24);
+        assert_eq!(replay_count, 25);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

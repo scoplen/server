@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#[path = "personal_enrollment/accepted_put.rs"]
+mod accepted_put;
 mod support;
 use support::remove_test_directory;
 
