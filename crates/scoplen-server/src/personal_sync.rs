@@ -251,13 +251,13 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         let owned_vault =
             self.backend.personal_vault(identity.account_id).await.map_err(|error| {
                 if matches!(error, SyncStoreError::VaultNotFound) {
-                    policy_denied()
+                    vault_not_found()
                 } else {
                     storage_unavailable()
                 }
             })?;
         if owned_vault != vault {
-            return Err(policy_denied());
+            return Err(vault_not_found());
         }
         Ok(())
     }
@@ -490,6 +490,17 @@ fn policy_denied() -> AuthFailure {
     .expect("static authorization problem")
 }
 
+fn vault_not_found() -> AuthFailure {
+    AuthFailure::new(
+        StatusCode::NOT_FOUND,
+        "sync.object_not_found",
+        "Sync object not found",
+        "The requested sync resource does not exist; no data changed and retrying will not help.",
+        false,
+    )
+    .expect("static not-found problem")
+}
+
 fn invalid_envelope() -> AuthFailure {
     AuthFailure::new(
         StatusCode::BAD_REQUEST,
@@ -644,6 +655,42 @@ mod tests {
         let decoded = ProblemDetails::from_cbor(&reply.body).expect("CBOR problem");
         assert_eq!(decoded.code.as_str(), code);
         assert!(!decoded.changed);
+    }
+
+    async fn reject_unavailable_vaults(
+        address: SocketAddr,
+        token: &str,
+        device: Uuid,
+        foreign_vault: Uuid,
+    ) {
+        let authorization = format!("DPoP {token}");
+        for vault in [Uuid::now_v7(), foreign_vault] {
+            let object = Uuid::now_v7();
+            let batch = SyncWriteBatch { writes: vec![signed_write(vault, device, object)] }
+                .to_cbor()
+                .expect("unavailable vault write");
+            let ack = SyncAckRequest { cursor: 0 }.to_cbor().expect("unavailable vault ACK");
+            for (method, path, body) in [
+                ("GET", format!("/sync/v1/vaults/{vault}/keys"), Vec::new()),
+                ("GET", format!("/sync/v1/vaults/{vault}/changes?after=0&limit=10"), Vec::new()),
+                ("GET", format!("/sync/v1/vaults/{vault}/snapshot?after=0&limit=10"), Vec::new()),
+                ("GET", format!("/sync/v1/vaults/{vault}/objects/{object}/versions"), Vec::new()),
+                ("POST", format!("/sync/v1/vaults/{vault}/objects"), batch),
+                ("POST", format!("/sync/v1/vaults/{vault}/ack"), ack),
+            ] {
+                let dpop = proof(method, path.split('?').next().expect("proof path"), token);
+                let headers = [
+                    ("Content-Type", "application/cbor"),
+                    ("Authorization", authorization.as_str()),
+                    ("DPoP", dpop.as_str()),
+                ];
+                let reply = http(address, method, &path, &body, &headers).await;
+                problem(&reply, 404, "sync.object_not_found");
+                assert!(
+                    !ProblemDetails::from_cbor(&reply.body).expect("not-found problem").retryable
+                );
+            }
+        }
     }
 
     fn auth_signature(device: Uuid, nonce: &str) -> String {
@@ -1086,15 +1133,7 @@ mod tests {
             400,
             "sync.invalid_request",
         );
-        let foreign_path = format!("/sync/v1/vaults/{foreign_vault}/keys");
-        let foreign_proof = proof("GET", &foreign_path, &token);
-        let foreign_headers =
-            [("Authorization", authorization.as_str()), ("DPoP", foreign_proof.as_str())];
-        problem(
-            &http(address, "GET", &foreign_path, &[], &foreign_headers).await,
-            403,
-            "policy.denied",
-        );
+        reject_unavailable_vaults(address, &token, device, foreign_vault).await;
         sqlx::query("UPDATE identity_devices SET active = 0 WHERE device_id = ?")
             .bind(device.as_bytes().as_slice())
             .execute(store.pool())
@@ -1485,22 +1524,7 @@ mod tests {
         let ack = http(address, "POST", &ack_path, &ack_body, &ack_headers).await;
         assert_eq!(ack.status, 200);
         assert_eq!(SyncAckResponse::from_cbor(&ack.body).expect("ack").cursor, 1);
-        let foreign_path = format!("/sync/v1/vaults/{foreign_vault}/snapshot");
-        let foreign_proof = proof("GET", &foreign_path, &token);
-        let foreign_headers =
-            [("Authorization", authorization.as_str()), ("DPoP", foreign_proof.as_str())];
-        problem(
-            &http(
-                address,
-                "GET",
-                &format!("{foreign_path}?after=0&limit=10"),
-                &[],
-                &foreign_headers,
-            )
-            .await,
-            403,
-            "policy.denied",
-        );
+        reject_unavailable_vaults(address, &token, device, foreign_vault).await;
         sqlx::query("UPDATE identity_devices SET active = false WHERE device_id = $1")
             .bind(device.as_bytes().as_slice())
             .execute(store.pool())

@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Return `404 sync.object_not_found` for absent and foreign Personal vault ids after enrolled
+  Device authentication and route-scope checks. SQLite/PostgreSQL HTTP regressions exercise
+  vault keys, changes, snapshots, versions, object writes and ACKs with real tokens and DPoP.
+
 - Mount native independent Device admission on SQLite and PostgreSQL with strict source/metadata
   admission, bounded zeroizing input and the shared nonwaiting proof limit. Confirmed admission
   returns 201; exact historical confirmation returns 200 without current authority. Preparation

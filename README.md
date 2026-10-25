@@ -56,8 +56,10 @@ authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR a
 17. The API listener now mounts only the Personal session, account-key read and publication, vault-key read,
 changes, snapshot, version read, signed object write, ACK, and notification routes. It verifies the enrolled
 device token, exact method/path/ath DPoP proof, durable replay claim, current device certificate,
-required scope, and Personal vault ownership. Writes verify the envelope signature and current
-key epoch; writes and ACKs recheck authorization inside the storage transaction. Notifications
+required scope, and Personal vault ownership. After authentication and scope checks, absent and
+foreign Personal vault ids return the same `404 sync.object_not_found` without exposing resource
+metadata. Writes verify the envelope signature and current key epoch; writes and ACKs recheck
+authorization inside the storage transaction. Notifications
 require `sync:read`, close at token expiry, and recheck current device/account authorization every
 second and before sending events. State checks and event sends have bounded deadlines so stalled
 storage or a non-reading peer cannot retain a subscription until token expiry. The listener and
