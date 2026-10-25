@@ -73,16 +73,22 @@ self-hosted server, host agent, administration CLI, and web console.
   credentials from becoming legacy state. Existing key writers reject unsupported password
   transitions and preserve legitimate exact replay. Caller-owned challenge/proof verification,
   admission, receipts, protocol consumption and audit remain required in the same transaction;
-  these helpers never commit or issue authority. Mounted password HTTP and Device admission remain open.
+  these helpers never commit or issue authority. Protocol coordinators own their enclosing
+  audited transactions; new Device admission remains open.
   Independent bounded Account-entry admission and digest-only request challenges use durable
   database time and shared replica capacity. Transaction-local consumption requires mandatory
   audit with its owning mutation, while receipt-only confirmation adds no duplicate success
-  audit. Mounted registration, password login and their complete acceptance remain open.
+  audit. New Device admission and complete Account-entry acceptance remain open.
   The separate registration coordinator verifies fresh possession and owns one complete business
   transaction, mandatory audit and immutable bounded receipts. Explicit historical confirmation
   survives later revocation or registration closure, but supplies no current authority or negative
   receipt. New-business commit uncertainty remains explicit; global Device freshness includes
   legacy and retained receipt state, without an unbounded side cache.
+  Native registration HTTP enforces source admission before body collection, strict transport,
+  bounded zeroizing input and 16 nonwaiting proof jobs. Known creation and historical confirmation
+  have separate responses; unacknowledged business COMMIT retains exact-confirmation recovery.
+  API-only startup initializes retained probe/id state and rejects KMS or ceiling drift before
+  listener admission. Closing registration preserves historical confirmation and existing access.
 
   Password options/login now compose strict shared DTO decoding, retained-key synthetic probes,
   fixed-size verifier comparison, complete bootstrap validation, transient capability insertion
@@ -90,7 +96,10 @@ self-hosted server, host agent, administration CLI, and web console.
   debt. Preparation cancellation explicitly rolls back before bounded fixed failure audit;
   COMMIT is never cancelled and an unknown commit returns no capability. Digest-only capability
   consumption stays transaction-local and Account deletion leaves permanent used-id retention.
-  Mounted HTTP, cross-surface inactive Account enforcement and complete V3 acceptance remain open.
+  Native password HTTP composes these coordinators with strict metadata, zeroizing bounded bodies,
+  source admission and the same nonwaiting proof semaphore as registration. Unconfirmed options
+  or login transactions disclose no attempt, token or bootstrap. Cross-surface inactive Account
+  enforcement, new Device admission and complete V3 acceptance remain open.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
@@ -103,7 +112,7 @@ self-hosted server, host agent, administration CLI, and web console.
   attestations or server observation timestamps. Retired Personal invitation/enrollment and
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
-  and Personal sync continue; new Account password registration/login and device admission
+  and Personal sync continue. New Device admission and complete password-account acceptance
   remain incomplete. The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

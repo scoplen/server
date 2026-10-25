@@ -19,6 +19,10 @@ assets_dir = "/app/console"
 [storage]
 backend = "sqlite"
 
+[accounts]
+registration_enabled = true
+used_account_id_limit = 1048576
+
 [storage.kms]
 backend = "local"
 

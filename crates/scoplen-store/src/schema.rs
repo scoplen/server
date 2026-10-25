@@ -2397,7 +2397,6 @@ const ACCOUNT_ADMISSION_CAPABILITIES: TableSpec = TableSpec {
 
 const TABLES: &[TableSpec] = &[
     ACCOUNT_OPERATION_RECEIPTS,
-
     ACCOUNT_PASSWORD_ATTEMPTS,
     ACCOUNT_ADMISSION_CAPABILITIES,
     ACCOUNT_PASSWORD_BOOTSTRAP,
@@ -2966,7 +2965,6 @@ mod tests {
             SQLITE_ACCOUNT_PASSWORD_BOOTSTRAP,
             SQLITE_ACCOUNT_ENTRY_STATE,
             SQLITE_ACCOUNT_OPERATION_RECEIPTS,
-
             SQLITE_ACCOUNT_PASSWORD_LOGIN,
         ];
         let postgres = [
@@ -2997,7 +2995,6 @@ mod tests {
             POSTGRES_ACCOUNT_PASSWORD_BOOTSTRAP,
             POSTGRES_ACCOUNT_ENTRY_STATE,
             POSTGRES_ACCOUNT_OPERATION_RECEIPTS,
-
             POSTGRES_ACCOUNT_PASSWORD_LOGIN,
         ];
         validate_migration_source(&sqlite.join("\n"), false)

@@ -4,12 +4,26 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mount native password options/login on SQLite and PostgreSQL using the durable coordinators.
+  Source admission precedes body collection; proof/bootstrap validation shares the registration
+  concurrency bound. Native metadata, bounded secret buffers, strict errors and audited failures
+  reject alternative credentials. Only confirmed transactions disclose attempts or encrypted
+  bootstrap/capabilities. Password authentication alone creates no Device or ordinary session.
+  Decoded field overages retain their 413 classification even inside a small encoded body.
+
+- Mount native Account registration and exact historical confirmation on both relational
+  backends, with strict metadata, zeroizing bounded body collection and immediate 16-job
+  proof-work admission. Precommit deadlines preserve unknown business COMMIT outcomes.
+  Add registration policy and retained identity-capacity configuration, API-only probe/id
+  initialization, fail-closed startup checks and aggregate capacity warnings. Closing new
+  registration preserves receipt confirmation; new Device admission remains a separate outcome.
+
 - Mount the native Account request-challenge route with independent durable pre-body source
   admission, strict shared metadata/JSON validation, private Device quotas and audited failures.
   Challenge secrets are returned only after confirmed commit; browser credentials and CORS
   alternatives are rejected. Worker maintenance retires expired challenges and idle debt in
-  indexed bounded batches. This endpoint grants no Account, Device or sync authority; the
-  remaining registration, password login and Device admission routes stay incomplete.
+  indexed bounded batches. This endpoint grants no Account, Device or sync authority; separate
+  registration and password handlers own their audited protocol transactions.
 
 - Add atomic SQLite/PostgreSQL Account registration and explicit immutable-receipt confirmation.
   Fresh proofs, complete aggregate, D-129 reservation, receipts, challenge consumption and audit

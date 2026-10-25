@@ -382,6 +382,17 @@ async fn prepare_roles_guarded(
             config.storage.kms_audit_key_file(&config.server.data_dir)?,
         )?);
         let setup_link = if roles.contains(&Role::Api) {
+            let backend = match (&store, &postgres_store) {
+                (Some(store), _) => device_auth::AuthBackend::Sqlite(Arc::new(store.clone())),
+                (_, Some(store)) => device_auth::AuthBackend::Postgres(Arc::new(store.clone())),
+                _ => return Err(ServerError::MissingStore),
+            };
+            crate::account_entry::prepare(
+                &backend,
+                key_management.as_ref().ok_or(ServerError::MissingStore)?,
+                config.accounts,
+            )
+            .await?;
             if let Some(store) = &store {
                 store.initialize_operator_setup(&origin, reissue).await?
             } else if let Some(store) = &postgres_store {
@@ -905,6 +916,8 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 role = "worker",
                 removed_account_admission_rows = report.admission_rows,
                 removed_account_challenges = report.challenge_rows,
+                removed_account_password_attempts = report.password_attempt_rows,
+                removed_account_admission_capabilities = report.admission_capability_rows,
                 "Account entry retention pass"
             );
         } else {
@@ -1254,6 +1267,7 @@ pub(crate) fn api_router_with_limits(
         write_body_limits,
         read_body_limits,
         NotificationHub::default(),
+        crate::AccountSettings::default(),
     )
 }
 
@@ -1268,6 +1282,7 @@ pub(crate) fn api_router_with_notifications(
     write_body_limits: WriteBodyLimits,
     read_body_limits: ReadBodyLimits,
     notifications: NotificationHub,
+    accounts: crate::AccountSettings,
 ) -> Router {
     let auth_backend = match &database {
         ListenerDatabase::Sqlite(store) => device_auth::AuthBackend::Sqlite(store.clone()),
@@ -1314,7 +1329,12 @@ pub(crate) fn api_router_with_notifications(
         }));
     if api_enabled {
         router
-            .merge(crate::account_entry::router(trusted_origin.clone(), auth_backend.clone()))
+            .merge(crate::account_entry::router(
+                trusted_origin.clone(),
+                auth_backend.clone(),
+                accounts,
+                key_management.clone(),
+            ))
             .merge(crate::account_devices::router(
                 trusted_origin.clone(),
                 auth_backend.clone(),
@@ -1388,6 +1408,7 @@ pub(crate) async fn run_public_listener(
         write_body_limits,
         read_body_limits,
         notifications.clone(),
+        config.accounts,
     )
     .merge(crate::console::router(&config.console.assets_dir, api_enabled).await)
     .layer(Extension(deployment_lease));
@@ -2418,6 +2439,7 @@ mod tests {
                     WriteBodyLimits::default(),
                     ReadBodyLimits::default(),
                     server_notifications,
+                    crate::AccountSettings::default(),
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )

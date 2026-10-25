@@ -16,21 +16,21 @@ use super::*;
 const ORIGIN: &str = "https://example.com";
 const ROUTE: &str = "/api/v1/auth/accounts/requests/challenge";
 
-struct Reply {
-    status: u16,
-    headers: String,
-    body: Vec<u8>,
+pub(super) struct Reply {
+    pub(super) status: u16,
+    pub(super) headers: String,
+    pub(super) body: Vec<u8>,
 }
 
 impl Reply {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .lines()
             .filter_map(|line| line.split_once(':'))
             .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
     }
 
-    fn private(&self) {
+    pub(super) fn private(&self) {
         assert_eq!(self.header("cache-control"), Some("no-store"));
         assert_eq!(self.header("pragma"), Some("no-cache"));
         for forbidden in
@@ -40,7 +40,7 @@ impl Reply {
         }
     }
 
-    fn problem(&self, status: u16, code: &str, retryable: bool) {
+    pub(super) fn problem(&self, status: u16, code: &str, retryable: bool) {
         assert_eq!(self.status, status);
         self.private();
         assert_eq!(self.header("content-type"), Some("application/problem+json"));
@@ -54,7 +54,7 @@ impl Reply {
     }
 }
 
-fn directory() -> PathBuf {
+pub(super) fn directory() -> PathBuf {
     let directory =
         std::env::temp_dir().join(format!("scoplen-account-entry-http-{}", Uuid::new_v4()));
     std::fs::create_dir(&directory).expect("owned test directory");
@@ -71,24 +71,49 @@ fn request() -> AccountRequestChallengeRequest {
 }
 
 async fn serve(backend: AuthBackend) -> (SocketAddr, JoinHandle<()>) {
+    serve_with_settings(backend, AccountSettings::default()).await
+}
+
+async fn serve_with_settings(
+    backend: AuthBackend,
+    settings: AccountSettings,
+) -> (SocketAddr, JoinHandle<()>) {
+    serve_router(router(ORIGIN.into(), backend, settings, test_kms())).await
+}
+
+fn test_kms() -> Arc<scoplen_store::kms::LocalKeyFile> {
+    let directory = directory();
+    let path = directory.join("kms.key");
+    std::fs::write(&path, "07".repeat(32)).expect("owned test KMS file");
+    let kms = scoplen_store::kms::LocalKeyFile::load(&path).expect("test KMS");
+    std::fs::remove_file(path).expect("remove owned test KMS file");
+    std::fs::remove_dir(directory).expect("remove empty KMS fixture");
+    Arc::new(kms)
+}
+
+pub(super) async fn serve_router(app: Router) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");
     let address = listener.local_addr().expect("bound address");
     let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router(ORIGIN.into(), backend).into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .expect("Account HTTP server");
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .expect("Account HTTP server");
     });
     (address, server)
 }
 
-async fn exchange(address: SocketAddr, bytes: &[u8]) -> Reply {
+mod registration;
+mod startup;
+
+pub(super) async fn exchange(address: SocketAddr, bytes: &[u8]) -> Reply {
+    exchange_with_budget(address, bytes, Duration::from_secs(5)).await
+}
+
+async fn exchange_with_budget(address: SocketAddr, bytes: &[u8], budget: Duration) -> Reply {
     let mut stream = TcpStream::connect(address).await.expect("HTTP connection");
     stream.write_all(bytes).await.expect("HTTP request");
     let mut bytes = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+    tokio::time::timeout(budget, stream.read_to_end(&mut bytes))
         .await
         .expect("bounded HTTP response")
         .expect("HTTP response read");
@@ -106,7 +131,7 @@ async fn exchange(address: SocketAddr, bytes: &[u8]) -> Reply {
     Reply { status, headers, body: bytes[split + 4..].to_vec() }
 }
 
-async fn http(
+pub(super) async fn http(
     address: SocketAddr,
     method: &str,
     path: &str,
@@ -126,7 +151,7 @@ async fn http(
     exchange(address, &wire).await
 }
 
-async fn stop(server: JoinHandle<()>) {
+pub(super) async fn stop(server: JoinHandle<()>) {
     server.abort();
     assert!(server.await.expect_err("cancel owned server").is_cancelled());
 }
@@ -406,7 +431,8 @@ async fn sqlite_mandatory_audit_failure_overrides_metadata_denial() {
 }
 
 #[cfg(feature = "postgres-integration")]
-async fn postgres_fixture() -> (scoplen_store::PostgresStore, sqlx::PgPool, String, url::Url) {
+pub(super) async fn postgres_fixture()
+-> (scoplen_store::PostgresStore, sqlx::PgPool, String, url::Url) {
     let database =
         std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("PostgreSQL fixture is required");
     let admin = sqlx::PgPool::connect(&database).await.expect("owned fixture admin pool");
@@ -420,7 +446,7 @@ async fn postgres_fixture() -> (scoplen_store::PostgresStore, sqlx::PgPool, Stri
 }
 
 #[cfg(feature = "postgres-integration")]
-async fn postgres_cleanup(admin: sqlx::PgPool, schema: String) {
+pub(super) async fn postgres_cleanup(admin: sqlx::PgPool, schema: String) {
     assert!(
         schema.starts_with("account_entry_http_")
             && schema.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')

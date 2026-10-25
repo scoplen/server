@@ -26,6 +26,11 @@ names = ["all"]
 # Installed packages must ship this directory and configure its installed path.
 assets_dir = "web/console/dist"
 
+[accounts]
+registration_enabled = true
+# Deployment-lifetime capacity; startup must match its already admitted durable value.
+used_account_id_limit = 1048576
+
 [sync]
 # Positive platform-representable write bounds may be raised or lowered from these defaults.
 max_envelope_bytes = 266240
