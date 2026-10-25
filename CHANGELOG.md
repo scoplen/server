@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Fixed disposable Personal fixture preparation on Windows to write ordinary canonical
+  local-drive paths accepted by production admission. Bootstrap and restart checks use the
+  same normalization and retain exact owned-path checks; Windows ACL and alias restrictions
+  remain enforced by the existing server admission.
+
 - Updated Rust protocol dependencies and the generated console API source to `proto@b1748dd`,
   including D-123's secretless interactive Credential descriptor. Older readers reject this
   pre-Stable K-1 registry extension; HTTP/API and K-2 artifacts are unchanged. Sync preserves
