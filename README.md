@@ -124,6 +124,15 @@ without acceptance evidence; historical accepted evidence is preserved. Lower-le
 invalidate prior evidence, and exact replay does not backfill it. This storage prerequisite adds
 no Account password route or credentials to existing Accounts.
 
+Account-id retention has a separate SQLite/PostgreSQL storage boundary. Explicit initialization
+reserves existing Account ids before enabling registration and durably admits a ceiling (default
+1,048,576). Each retained row contains only the shared domain-separated digest. Database guards
+preserve it after ordinary Account deletion. The registration transaction helper serializes a
+new digest with the caller's business state, receipt and audit; it does not commit independently.
+Explicit audited maintenance can raise the ceiling without eviction. Capacity pressure is returned
+as non-identifying counters, and exhaustion does not change database readiness. This boundary is
+not yet mounted as registration, an operator maintenance API or a warning-delivery mechanism.
+
 The worker retires expired device and Operator refresh credentials in one atomic transaction
 per 30-second heartbeat, independently of later authentication requests. For each kind it
 locks at most 16 expired families, removes at most 256 digests and removes only empty expired

@@ -219,3 +219,21 @@ Ed25519 `audit-signing.key`; the worker writes hourly idempotent checkpoints for
 heads. `storage.kms.backend`,
 `storage.kms.key_file`, and `storage.kms.audit_key_file` are also available through the documented
 TOML and environment configuration. Audit retention/export integration remains open.
+
+Account-id retention is independent of Account rows and normal device authorization. A forward
+migration creates a digest-only table and an uninitialized deployment guard. Before registration
+can use the storage helper, explicit initialization reserves every current Account id in pages
+of at most 256 rows, under a database writer/guard lock, and admits one durable ceiling with its
+audit. PostgreSQL also locks the legacy Account table during that initial reservation. A failure
+rolls back the entire reservation; unsupported legacy ids require recovery rather than omission.
+Repeated initialization requires the same ceiling and preserves an explicit maintenance state.
+Guard writes serialize final-slot admission and reject stale PostgreSQL repeatable-read snapshots
+before a retained-count decision. SQLite checks byte storage explicitly and scans the first
+legacy-id page without a type-dependent lower sentinel.
+The helper must be called before Account/vault locks in the same transaction as verified
+registration, its receipt and audit. It uses the published shared digest, adds no permanent
+Device, vault or operation-id collection, and never commits independently. Ordinary Account
+deletion cannot cascade into the retained set. Maintenance quiesces new registration writers;
+audited ceiling increases preserve every digest. These storage methods grant no operator
+authorization and expose no new HTTP route. Mounted registration, configuration/admission wiring,
+operator warning delivery and complete backup/restore acceptance remain separate roadmap work.
