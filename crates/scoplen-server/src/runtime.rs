@@ -1004,11 +1004,21 @@ pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
     }
 
     let mut processed = 0_u64;
-    while let Some(job) = store
-        .claim_job_kind(RETENTION_JOB_KIND, RETENTION_WORKER_OWNER, now, RETENTION_JOB_LEASE_MS)
-        .await
-        .map_err(|error| ServerError::Task(error.to_string()))?
-    {
+    loop {
+        // Keep the purge cutoff fixed without backdating leases after a slow scheduling sweep.
+        let claim_now = worker_now_ms()?.max(now);
+        let Some(job) = store
+            .claim_job_kind(
+                RETENTION_JOB_KIND,
+                RETENTION_WORKER_OWNER,
+                claim_now,
+                RETENTION_JOB_LEASE_MS,
+            )
+            .await
+            .map_err(|error| ServerError::Task(error.to_string()))?
+        else {
+            break;
+        };
         let result = job
             .payload
             .as_slice()
@@ -1018,7 +1028,7 @@ pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
             Ok(purge) => purge.await,
             Err(_) => Err(SyncStoreError::CorruptRow("retention payload")),
         };
-        let transition_now = now.max(job.created_at_ms);
+        let transition_now = worker_now_ms()?.max(claim_now).max(job.created_at_ms);
         match result {
             Ok(_) => store
                 .complete_job(job.id, RETENTION_WORKER_OWNER, transition_now)
@@ -3488,6 +3498,67 @@ mod tests {
         drop(store);
         cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
+    }
+
+    macro_rules! assert_retention_lease_clock_after_scheduling {
+        ($store:expr) => {{
+            let store = &$store;
+            let vault = [65; 16];
+            store.create_personal_sync_vault(vault, vault, &[1]).await.expect("owned vault");
+            let pass_started_at = worker_now_ms().expect("clock") - RETENTION_JOB_LEASE_MS - 1;
+            let valid = uuid::Uuid::new_v4().into_bytes();
+            let malformed = uuid::Uuid::new_v4().into_bytes();
+            store
+                .enqueue_job(valid, RETENTION_JOB_KIND, &vault, pass_started_at)
+                .await
+                .expect("job created after a long scheduling sweep");
+            store
+                .enqueue_job(malformed, RETENTION_JOB_KIND, &[1], pass_started_at)
+                .await
+                .expect("malformed job created after the same sweep");
+            assert_eq!(
+                worker_retention_pass_at(store, pass_started_at).await.expect("fresh claim leases"),
+                (0, 2)
+            );
+            let completed = store.get_job(valid).await.expect("completed job");
+            assert!(completed.created_at_ms > pass_started_at + RETENTION_JOB_LEASE_MS);
+            assert!(
+                completed.finished_at_ms.expect("confirmed completion") >= completed.created_at_ms
+            );
+            assert_eq!(completed.attempts, 1);
+            assert!(completed.lease_owner.is_none());
+            let failed = store.get_job(malformed).await.expect("retry job");
+            assert!(failed.available_at_ms >= failed.created_at_ms + RETENTION_RETRY_MS);
+            assert_eq!(failed.attempts, 1);
+            assert!(failed.finished_at_ms.is_none());
+            assert!(failed.lease_owner.is_none());
+            assert!(
+                failed
+                    .last_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("retention payload"))
+            );
+        }};
+    }
+
+    #[tokio::test]
+    async fn worker_retention_lease_clock_advances_after_scheduling() {
+        let directory =
+            std::env::temp_dir().join(format!("scoplen-retention-clock-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("owned store");
+        assert_retention_lease_clock_after_scheduling!(store);
+        store.pool().close().await;
+        remove_test_directory(&directory).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_retention_lease_clock_advances_after_scheduling() {
+        let (url, pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(url.as_str()).await.expect("owned store");
+        assert_retention_lease_clock_after_scheduling!(store);
+        store.pool().close().await;
+        cleanup_postgres_fixture(pool, schema).await;
     }
 
     #[tokio::test]

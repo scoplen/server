@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Refresh retention-job claim and transition clocks after scheduling while retaining the fixed
+  purge cutoff. A long scheduling sweep can no longer backdate a newly claimed lease before its
+  job was created. Deterministic SQLite/PostgreSQL regressions cover completion and retry clocks.
+
 - Keep probe-key fault-injection trigger creation and removal on one owned connection, so
   SQLite pool schema caches cannot reject a repeated failure fixture as already existing.
 
