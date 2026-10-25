@@ -680,10 +680,11 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
         payload: &[u8],
         available_at_ms: i64,
     ) -> impl Future<Output = Result<bool, JobQueueError>> + Send;
-    fn claim_job_kind(
+    fn claim_job_kind_available_through(
         &self,
         kind: &str,
         owner: &str,
+        available_through_ms: i64,
         now_ms: i64,
         lease_ms: i64,
     ) -> impl Future<Output = Result<Option<scoplen_store::Job>, JobQueueError>> + Send;
@@ -781,14 +782,17 @@ macro_rules! impl_worker_store_backend {
                 <$store>::enqueue_job_if_absent(self, id, kind, payload, available_at_ms)
             }
 
-            fn claim_job_kind(
+            fn claim_job_kind_available_through(
                 &self,
                 kind: &str,
                 owner: &str,
+                available_through_ms: i64,
                 now_ms: i64,
                 lease_ms: i64,
             ) -> impl Future<Output = Result<Option<scoplen_store::Job>, JobQueueError>> + Send {
-                <$store>::claim_job_kind(self, kind, owner, now_ms, lease_ms)
+                <$store>::claim_job_kind_available_through(
+                    self, kind, owner, available_through_ms, now_ms, lease_ms,
+                )
             }
 
             fn purge_sync_history_for_worker(
@@ -972,6 +976,14 @@ pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
     store: &S,
     now: i64,
 ) -> Result<(u64, u64), ServerError> {
+    worker_retention_pass_with_clock(store, now, worker_now_ms).await
+}
+
+async fn worker_retention_pass_with_clock<S: WorkerStoreBackend>(
+    store: &S,
+    now: i64,
+    mut clock: impl FnMut() -> Result<i64, ServerError>,
+) -> Result<(u64, u64), ServerError> {
     let mut scheduled = 0_u64;
     // Fix the end before paging so newly appended ids cannot prolong this sweep. A new
     // heartbeat starts from the beginning, including ids inserted behind this sweep's cursor.
@@ -1006,11 +1018,12 @@ pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
     let mut processed = 0_u64;
     loop {
         // Keep the purge cutoff fixed without backdating leases after a slow scheduling sweep.
-        let claim_now = worker_now_ms()?.max(now);
+        let claim_now = clock()?.max(now);
         let Some(job) = store
-            .claim_job_kind(
+            .claim_job_kind_available_through(
                 RETENTION_JOB_KIND,
                 RETENTION_WORKER_OWNER,
+                now,
                 claim_now,
                 RETENTION_JOB_LEASE_MS,
             )
@@ -1028,7 +1041,7 @@ pub(crate) async fn worker_retention_pass_at<S: WorkerStoreBackend>(
             Ok(purge) => purge.await,
             Err(_) => Err(SyncStoreError::CorruptRow("retention payload")),
         };
-        let transition_now = worker_now_ms()?.max(claim_now).max(job.created_at_ms);
+        let transition_now = clock()?.max(claim_now).max(job.created_at_ms);
         match result {
             Ok(_) => store
                 .complete_job(job.id, RETENTION_WORKER_OWNER, transition_now)
@@ -3509,17 +3522,27 @@ mod tests {
             let valid = uuid::Uuid::new_v4().into_bytes();
             let malformed = uuid::Uuid::new_v4().into_bytes();
             store
-                .enqueue_job(valid, RETENTION_JOB_KIND, &vault, pass_started_at)
+                .enqueue_job(valid, RETENTION_JOB_KIND, &vault, pass_started_at - 1)
                 .await
                 .expect("job created after a long scheduling sweep");
             store
                 .enqueue_job(malformed, RETENTION_JOB_KIND, &[1], pass_started_at)
                 .await
                 .expect("malformed job created after the same sweep");
+            let lease_clock = worker_now_ms().expect("current lease clock");
+            let next_sweep_clock = lease_clock + 2 * RETENTION_JOB_LEASE_MS;
+            let mut clocks =
+                [lease_clock, lease_clock + 1, lease_clock + 2, lease_clock + 3, next_sweep_clock]
+                    .into_iter();
             assert_eq!(
-                worker_retention_pass_at(store, pass_started_at).await.expect("fresh claim leases"),
+                worker_retention_pass_with_clock(store, pass_started_at, || {
+                    Ok(clocks.next().expect("a deferred retry must not run again in this sweep"))
+                })
+                .await
+                .expect("fresh claim leases"),
                 (0, 2)
             );
+            assert!(clocks.next().is_none(), "both claims and transitions use the current clock");
             let completed = store.get_job(valid).await.expect("completed job");
             assert!(completed.created_at_ms > pass_started_at + RETENTION_JOB_LEASE_MS);
             assert!(
@@ -3529,6 +3552,7 @@ mod tests {
             assert!(completed.lease_owner.is_none());
             let failed = store.get_job(malformed).await.expect("retry job");
             assert!(failed.available_at_ms >= failed.created_at_ms + RETENTION_RETRY_MS);
+            assert!(failed.available_at_ms < next_sweep_clock);
             assert_eq!(failed.attempts, 1);
             assert!(failed.finished_at_ms.is_none());
             assert!(failed.lease_owner.is_none());
@@ -3538,6 +3562,24 @@ mod tests {
                     .as_deref()
                     .is_some_and(|error| error.contains("retention payload"))
             );
+            let retry = store
+                .claim_job_kind_available_through(
+                    RETENTION_JOB_KIND,
+                    RETENTION_WORKER_OWNER,
+                    failed.available_at_ms,
+                    next_sweep_clock,
+                    RETENTION_JOB_LEASE_MS,
+                )
+                .await
+                .expect("next sweep claim")
+                .expect("deferred retry becomes eligible");
+            assert_eq!(retry.id, malformed);
+            assert_eq!(retry.attempts, 2);
+            assert_eq!(retry.lease_until_ms, Some(next_sweep_clock + RETENTION_JOB_LEASE_MS));
+            store
+                .complete_job(retry.id, RETENTION_WORKER_OWNER, next_sweep_clock + 1)
+                .await
+                .expect("fresh next-sweep lease");
         }};
     }
 
