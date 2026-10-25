@@ -60,9 +60,6 @@ self-hosted server, host agent, administration CLI, and web console.
   databases, with current credential/key validation, post-wait expiry checks, atomic revocation
   audit and fresh-proof terminal confirmation. It preserves other families and unexpired
   digests. The public HTTP route and console use the same current-family boundary.
-  Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
-  independent database quotas, and transaction-local session authorization; one-time URLs are
-  disclosed only after an audited confirmed commit.
   Current-family Operator logout uses the independent access token and a fresh token-bound
   proof, ignores refresh cookies and serializes revocation with its audit. Confirmed terminal
   retry cannot authorize other operations. Uncertain logout outcomes preserve the original
@@ -81,15 +78,12 @@ self-hosted server, host agent, administration CLI, and web console.
   admission checked in the same account transaction. Every statement is verified before
   disclosure; inactive peer rows do not silently filter the signed set, and invalid or
   oversized collections fail without partial results. Signed device claims are not hardware
-  attestations or server observation timestamps. Durable pairing storage now serializes bounded
-  relay retention, current-device authorization and atomic second-device membership publication
-  with its deployment audit on both databases. Exact completion recovery retains its receipt
-  without reversing later revocation; uncertain commits disclose no success body. All six native
-  pairing HTTP operations now enforce current-device DPoP, exact scope, verified role admission,
-  bounded shared codecs and noncacheable responses. The public link landing requests no password
-  and runs no script. Remaining device lifecycle mutations remain open.
-  The Personal React console connects setup, fresh passkey sign-in, invitation
-  requests and explicit server sign out through the generated public API contract. Its proof key
+  attestations or server observation timestamps. Retired Personal invitation/enrollment and
+  pairing production modules, routes, privileges and worker cleanup are removed. Their historical
+  migrations and tables remain untouched and unused by runtime. Existing Device authentication
+  and Personal sync continue; new Account password registration, bootstrap and device admission
+  remain incomplete. The Operator React console connects setup, fresh passkey sign-in and
+  explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of
   API readiness. Physical passkey/browser interoperability, remaining console administration,
   complete identity and policy workflows, Shared/organization membership-aware purging,
@@ -99,12 +93,13 @@ self-hosted server, host agent, administration CLI, and web console.
   reading every device's ACK and deleting tombstones in one transaction. Missing ACKs count as
   zero; incomplete/empty admission state keeps the 180-day policy. Corrupt identity or ACK state
   fails without partial deletion. SQLite takes the writer lock before reading membership;
-  PostgreSQL takes the shared account-key and identity locks before locking the vault, so pairing,
+  PostgreSQL takes the shared account-key and identity locks before locking the vault, so
   key publication, ACKs and retention keep a consistent order.
 - A source-built Personal Compose entry bundles the console, uses externally provisioned HTTPS
   certificates, and retains SQLite and keys in a private volume under a non-root distroless
-  runtime. Its public-API container check covers setup, fresh software-passkey login, invitation
-  issuance and restart state. Complete deployment, backup/restore, upgrade, physical Passkey
+  runtime. Its public-API container check covers setup, fresh software-passkey login/logout,
+  retired-route absence and persisted restart state. Device/sync fixtures directly seed valid
+  signed legacy artifacts into owned test databases; production registration is not simulated. Complete deployment, backup/restore, upgrade, physical Passkey
   interoperability and release artifacts still require their own validated gates.
 
 ## Review

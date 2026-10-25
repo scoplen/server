@@ -5,7 +5,6 @@ import type {
   OperatorLoginOptionsResponse,
   OperatorRequestOptions,
   OperatorSetupOptionsResponse,
-  PersonalInvitationResponse,
   OperatorLogoutResponse,
 } from "./generated/api.ts";
 
@@ -240,18 +239,4 @@ export function requestOptions(
     expires_at: timestamp(input.expires_at),
     public_key: publicKey as unknown as OperatorRequestOptions,
   };
-}
-
-export function invitationResponse(
-  value: unknown,
-  origin: string,
-): PersonalInvitationResponse {
-  const input = object(value),
-    invitation_url = text(input.invitation_url),
-    expires_at = timestamp(input.expires_at);
-  const prefix = `${origin}/invite#token=`;
-  if (!invitation_url.startsWith(prefix))
-    throw new Error("Invalid invitation origin.");
-  bytes(invitation_url.slice(prefix.length), 32);
-  return { invitation_url, expires_at };
 }

@@ -24,7 +24,7 @@ fn decode(reply: &Reply) -> AccountDeviceStatements {
     .expect("complete bounded signed snapshot");
     let json: serde_json::Value = serde_json::from_slice(&reply.body).expect("JSON");
     assert_eq!(json.as_object().expect("snapshot object").len(), 3);
-    assert!(!format!("{result:?}").contains("Personal device"));
+    assert!(!format!("{result:?}").contains("Legacy test device"));
     result
 }
 
@@ -90,7 +90,7 @@ async fn store_read(
     }
 }
 
-async fn roundtrip(f: &Fixture, identity: &PersonalBootstrap) -> Vec<u8> {
+async fn roundtrip(f: &Fixture, identity: &LegacyDeviceSession) -> Vec<u8> {
     let initial = decode(&protected(f, "GET", PATH, &[], &identity.token, &identity.client).await);
     assert_eq!(initial.account_id, identity.receipt.account_id);
     assert_eq!(initial.certificates.len(), 1);
@@ -150,7 +150,7 @@ async fn roundtrip(f: &Fixture, identity: &PersonalBootstrap) -> Vec<u8> {
     own
 }
 
-async fn rejected_requests(f: &Fixture, identity: &PersonalBootstrap) {
+async fn rejected_requests(f: &Fixture, identity: &LegacyDeviceSession) {
     denied(
         &http_method(f.address, "GET", PATH, &[], &[]).await,
         401,
@@ -251,7 +251,7 @@ async fn rejected_requests(f: &Fixture, identity: &PersonalBootstrap) {
     );
 }
 
-async fn invalid_statements(f: &Fixture, identity: &PersonalBootstrap, own: &[u8]) {
+async fn invalid_statements(f: &Fixture, identity: &LegacyDeviceSession, own: &[u8]) {
     let peer = Uuid::now_v7();
     let good = certificate(identity.receipt.account_id, peer, "private device");
     let mut signature = good.clone();
@@ -310,7 +310,7 @@ async fn invalid_statements(f: &Fixture, identity: &PersonalBootstrap, own: &[u8
     replace(f, identity.receipt.account_id, &[own.to_vec()], &[]).await;
 }
 
-async fn stale_identity(f: &Fixture, identity: &PersonalBootstrap, own: &[u8]) {
+async fn stale_identity(f: &Fixture, identity: &LegacyDeviceSession, own: &[u8]) {
     let mut principal = f
         .backend
         .current_principal(identity.receipt.device_id.into_bytes())
@@ -375,7 +375,7 @@ async fn stale_identity(f: &Fixture, identity: &PersonalBootstrap, own: &[u8]) {
     replace(f, identity.receipt.account_id, &[own.to_vec()], &[]).await;
 }
 
-async fn admission_changes_during_request(f: &Fixture, identity: &PersonalBootstrap) {
+async fn admission_changes_during_request(f: &Fixture, identity: &LegacyDeviceSession) {
     let mut stream = tokio::net::TcpStream::connect(f.address).await.expect("TCP");
     let proof = proof_for(identity, "GET", PATH, &identity.token);
     let request = format!(
@@ -409,7 +409,7 @@ async fn admission_changes_during_request(f: &Fixture, identity: &PersonalBootst
 }
 
 async fn contract(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let own = roundtrip(&f, &identity).await;
     rejected_requests(&f, &identity).await;
     invalid_statements(&f, &identity, &own).await;
@@ -434,7 +434,7 @@ async fn contract(mut f: Fixture) {
 }
 
 async fn concurrent_snapshots(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let initial = decode(&protected(&f, "GET", PATH, &[], &identity.token, &identity.client).await);
     let own = initial.certificates[0].clone();
     let account = identity.receipt.account_id;
@@ -536,7 +536,7 @@ async fn insert_certificate(f: &Fixture, account: Uuid, bytes: &[u8]) {
 }
 
 async fn bounds(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let initial = decode(&protected(&f, "GET", PATH, &[], &identity.token, &identity.client).await);
     let account = identity.receipt.account_id;
     let large = sized_certificate(account, MAX_ACCOUNT_DEVICE_ARTIFACT_BYTES);

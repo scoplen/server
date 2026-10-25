@@ -3,9 +3,6 @@
 use super::*;
 use scoplen_api::{
     auth::{AuthChallengeRequest, AuthChallengeResponse, AuthDeviceRequest, AuthTokenResponse},
-    personal_enrollment::{
-        PersonalEnrollmentRequest, PersonalEnrollmentResponse, PersonalInvitationResponse,
-    },
     sync::{
         SyncAccountDeviceWrap, SyncAccountKeyBundle, SyncAccountKeyBundleUpdate, SyncAckRequest,
         SyncAckResponse, SyncChangesResponse, SyncSessionRequest, SyncSessionResponse,
@@ -14,7 +11,7 @@ use scoplen_api::{
 };
 use scoplen_crypto::{
     DeviceAuthContext, DeviceCertificate, DeviceKemKeyPair, Ed25519SigningKey, ObjectEnvelope,
-    PersonalEnrollmentArtifacts, PersonalEnrollmentContext, SecretBytes,
+    SecretBytes,
 };
 use scoplen_model::{FieldEntry, FieldPath, Hlc, Object, ObjectType, cbor};
 use scoplen_store::{ObjectStorage, ObjectStorageConfig};
@@ -30,8 +27,6 @@ mod account_profile;
 mod key_publication;
 #[path = "personal_notify_tests.rs"]
 pub(super) mod notifications;
-#[path = "pairing_http_tests.rs"]
-mod pairing;
 #[path = "personal_retention_tests.rs"]
 mod retention;
 
@@ -94,61 +89,32 @@ async fn protected(
     .await
 }
 
-pub(super) fn enrollment(token: [u8; 32], client: &P256SigningKey) -> PersonalEnrollmentRequest {
-    let account = Uuid::now_v7();
-    let device = Uuid::now_v7();
-    let signing = Ed25519SigningKey::from_bytes(&[7; 32]).expect("account signing key");
-    let kem = DeviceKemKeyPair::from_private_bytes(&[3; 32]).expect("device KEM");
-    let mut request = PersonalEnrollmentRequest {
-        invitation_token: token,
-        account_id: account,
-        personal_vault_id: Uuid::now_v7(),
-        account_signing_public_key: signing.public_key(),
-        account_kem_public_key: [4; 32],
-        key_bundle_update: SyncAccountKeyBundleUpdate {
-            revision: 1,
-            device_wraps: vec![SyncAccountDeviceWrap { device_id: device, wrapped_ark: vec![5] }],
-            account_signing_key: vec![6],
-            account_kem_key: vec![7],
-            recovery_blob: vec![8],
-            signature: vec![0; 64],
-        },
-        device_certificate: DeviceCertificate::issue(
-            &signing,
-            device,
-            account,
-            client.public_key_sec1(),
-            kem.public_key().to_vec(),
-            "first Personal device".into(),
-            "windows".into(),
-            1,
-        )
-        .expect("account-signed device certificate"),
-        wrapped_personal_vault_key: vec![9],
-        device_signature: [0; 64],
-    };
-    request.key_bundle_update.signature = signing
-        .sign(&request.key_bundle_update.signature_input().expect("K-4 signing input"))
-        .to_vec();
-    let bundle = request.key_bundle_update.to_cbor().expect("canonical K-4 bundle");
-    let certificate = request.device_certificate.encode().expect("canonical K-2 certificate");
-    request.device_signature = PersonalEnrollmentContext::new(
-        ORIGIN,
-        &token,
-        account,
-        request.personal_vault_id,
-        PersonalEnrollmentArtifacts {
-            account_signing_public_key: &request.account_signing_public_key,
-            account_kem_public_key: &request.account_kem_public_key,
-            key_bundle_update: &bundle,
-            device_certificate: &certificate,
-            wrapped_personal_vault_key: &request.wrapped_personal_vault_key,
-        },
-    )
-    .expect("enrollment possession context")
-    .sign(client)
-    .expect("device possession proof");
-    request
+#[expect(
+    clippy::struct_field_names,
+    reason = "Retained tests use explicit protocol identifier names"
+)]
+pub(super) struct LegacyReceipt {
+    pub account_id: Uuid,
+    pub device_id: Uuid,
+    pub personal_vault_id: Uuid,
+}
+
+pub(super) async fn seed_legacy_device(f: &Fixture, client: &P256SigningKey) -> LegacyReceipt {
+    let signing = Ed25519SigningKey::from_bytes(&[7; 32]).expect("Account signing key");
+    let identity = crate::test_legacy_identity::LegacyIdentity::new(&signing, client);
+    match &f.backend {
+        AuthBackend::Sqlite(store) => {
+            crate::test_legacy_identity::seed_sqlite(store.pool(), &identity, true).await;
+        }
+        AuthBackend::Postgres(store) => {
+            crate::test_legacy_identity::seed_postgres(store.pool(), &identity, true).await;
+        }
+    }
+    LegacyReceipt {
+        account_id: identity.account_id,
+        device_id: identity.device_certificate.device_id,
+        personal_vault_id: identity.personal_vault_id,
+    }
 }
 
 pub(super) async fn authenticate_device(
@@ -189,7 +155,7 @@ pub(super) async fn authenticate_device(
 
 async fn session_and_keys(
     f: &Fixture,
-    receipt: &PersonalEnrollmentResponse,
+    receipt: &LegacyReceipt,
     token: &str,
     client: &P256SigningKey,
 ) {
@@ -206,25 +172,18 @@ async fn session_and_keys(
     assert_eq!(session.vaults[0].id, vault);
     let reply = protected(f, "GET", "/sync/v1/keys", &[], token, client).await;
     assert_eq!(reply.status, 200);
-    assert_eq!(
-        SyncAccountKeyBundle::from_cbor(&reply.body).expect("persisted K-4").wrapped_ark,
-        vec![5]
-    );
+    let bundle = SyncAccountKeyBundle::from_cbor(&reply.body).expect("persisted K-4");
+    scoplen_crypto::DeviceArkWrap::decode(&bundle.wrapped_ark)
+        .expect("real legacy Device ARK wrap");
     let reply =
         protected(f, "GET", &format!("/sync/v1/vaults/{vault}/keys"), &[], token, client).await;
     assert_eq!(reply.status, 200);
-    assert_eq!(
-        SyncVaultKeysResponse::from_cbor(&reply.body).expect("vault key").keys[0].wrapped_vault_key,
-        vec![9]
-    );
+    let keys = SyncVaultKeysResponse::from_cbor(&reply.body).expect("vault key");
+    scoplen_crypto::PersonalVaultKeyWrap::decode(&keys.keys[0].wrapped_vault_key)
+        .expect("real legacy Personal key wrap");
 }
 
-async fn sync_object(
-    f: &Fixture,
-    receipt: &PersonalEnrollmentResponse,
-    token: &str,
-    client: &P256SigningKey,
-) {
+async fn sync_object(f: &Fixture, receipt: &LegacyReceipt, token: &str, client: &P256SigningKey) {
     let device = receipt.device_id;
     let vault = receipt.personal_vault_id;
     let id = Uuid::now_v7();
@@ -295,61 +254,23 @@ async fn sync_object(
     assert_eq!(f.count("SELECT cursor FROM sync_acks").await, 1);
 }
 
-struct PersonalBootstrap {
-    receipt: PersonalEnrollmentResponse,
+struct LegacyDeviceSession {
+    receipt: LegacyReceipt,
     token: String,
     client: P256SigningKey,
     operator_token: String,
     operator_key: P256SigningKey,
 }
 
-async fn bootstrap_personal(f: &mut Fixture) -> PersonalBootstrap {
+async fn legacy_device_session(f: &mut Fixture) -> LegacyDeviceSession {
     mount_complete_api(f).await;
     let browser = key(1);
     let (mut authenticator, _) = f.enroll(&browser).await;
     let session = f.login(&mut authenticator, &browser).await.session();
-    let reply = protected(
-        f,
-        "POST",
-        "/api/v1/admin/personal-invitations",
-        b"{}",
-        &session.access_token,
-        &browser,
-    )
-    .await;
-    assert_eq!(reply.status, 201);
-    reply.privacy();
-    let invitation =
-        PersonalInvitationResponse::from_json(&reply.body).expect("one-time invitation");
-    let token = URL_SAFE_NO_PAD
-        .decode(invitation.invitation_url.split("#token=").nth(1).expect("fragment"))
-        .expect("canonical token")
-        .try_into()
-        .expect("32-byte invitation");
     let client = key(2);
-    let request = enrollment(token, &client);
-    let body = request.to_json().expect("enrollment JSON");
-    let reply = http(
-        f.address,
-        "/api/v1/auth/personal-enroll",
-        &body,
-        &[("Content-Type", "application/json"), ("Origin", ORIGIN)],
-    )
-    .await;
-    assert_eq!(reply.status, 201);
-    assert!(reply.header("set-cookie").is_none());
-    let receipt = PersonalEnrollmentResponse::from_json(&reply.body).expect("enrollment result");
-    assert_eq!(receipt.account_id, request.account_id);
-    assert_eq!(receipt.device_id, request.device_certificate.device_id);
-    assert_eq!(receipt.personal_vault_id, request.personal_vault_id);
-    assert_eq!(f.count("SELECT COUNT(*) FROM identity_accounts").await, 1);
-    assert_eq!(f.count("SELECT COUNT(*) FROM identity_devices").await, 1);
-    assert_eq!(
-        f.count("SELECT COUNT(*) FROM personal_invitations WHERE consumed_at_ms IS NOT NULL").await,
-        1
-    );
+    let receipt = seed_legacy_device(f, &client).await;
     let token = authenticate_device(f, receipt.device_id, &client).await;
-    PersonalBootstrap {
+    LegacyDeviceSession {
         receipt,
         token,
         client,
@@ -359,7 +280,7 @@ async fn bootstrap_personal(f: &mut Fixture) -> PersonalBootstrap {
 }
 
 async fn complete_flow(mut f: Fixture) {
-    let PersonalBootstrap { receipt, token, client, .. } = bootstrap_personal(&mut f).await;
+    let LegacyDeviceSession { receipt, token, client, .. } = legacy_device_session(&mut f).await;
     let reply = protected(&f, "GET", "/api/v1/accounts/me", &[], &token, &client).await;
     assert_eq!(reply.status, 200);
     let profile = scoplen_api::account_profile::AccountProfile::from_http_json(
@@ -399,12 +320,12 @@ async fn complete_flow(mut f: Fixture) {
 }
 
 #[tokio::test]
-async fn sqlite_public_personal_bootstrap_and_sync() {
+async fn sqlite_existing_device_public_authentication_and_sync() {
     complete_flow(Fixture::sqlite().await).await;
 }
 
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
-async fn postgres_public_personal_bootstrap_and_sync() {
+async fn postgres_existing_device_public_authentication_and_sync() {
     complete_flow(Fixture::postgres().await).await;
 }

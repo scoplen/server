@@ -37,10 +37,8 @@ const failurePhases = new Set([
   "SQLite migration snapshot",
   "non-root Compose startup and trusted HTTPS",
   "bundled console assets",
-  "single public setup, fresh Passkey login and invitation",
-  "native enrollment and saved Host before restart",
+  "public Operator setup, Passkey login/logout and retired entry absence",
   "restart and persistent setup/key verification",
-  "native refresh, reuse denial and challenge recovery",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
@@ -68,8 +66,6 @@ export function describeCheckFailure({
     ["image data directory missing", "directory-missing"],
     ["committed WAL fixture exited before readiness", "wal-holder-exit"],
     ["committed WAL fixture timed out", "wal-holder-timeout"],
-    ["native restart driver exited before restart", "native-driver-exit"],
-    ["native restart driver readiness timed out", "native-driver-timeout"],
   ];
   const reason =
     (assertion && typeof error.message === "string"
@@ -368,62 +364,6 @@ async function request(origin, path, ca, servername = "localhost") {
     );
     outgoing.on("error", reject);
   });
-}
-
-export async function runNativeRestart({
-  fixture,
-  run,
-  restart,
-  timeout = 120_000,
-}) {
-  for (const name of ["native-restart.ready", "native-restart.resume"]) {
-    try {
-      await lstat(join(fixture, name));
-      assert.fail("native restart signal already exists");
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
-  const controller = new AbortController();
-  let settled = false;
-  const completed = run(controller.signal).finally(() => {
-    settled = true;
-  });
-  // The driver can fail while the controller is observing its readiness marker.
-  completed.catch(() => {});
-  try {
-    const deadline = Date.now() + timeout;
-    for (;;) {
-      if (settled) {
-        await completed;
-        assert.fail("native restart driver exited before restart");
-      }
-      try {
-        assert.equal(
-          await readFile(join(fixture, "native-restart.ready"), "utf8"),
-          "ready\n",
-        );
-        break;
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
-      assert(
-        Date.now() < deadline,
-        "native restart driver readiness timed out",
-      );
-      await new Promise((accept) => setTimeout(accept, 50));
-    }
-    await restart();
-    assert(!settled, "native restart driver exited before restart");
-    await writeFile(join(fixture, "native-restart.resume"), "resume\n", {
-      flag: "wx",
-      mode: 0o600,
-    });
-    await completed;
-  } finally {
-    controller.abort();
-    await completed.catch(() => {});
-  }
 }
 
 export async function checkPersonalContainer(driverPath) {
@@ -956,7 +896,7 @@ export async function checkPersonalContainer(driverPath) {
         (await readFile(join(directory, "licenses", `${name}.txt`))).length > 0,
       );
 
-    progress("single public setup, fresh Passkey login and invitation");
+    progress("public Operator setup, Passkey login/logout and retired entry absence");
     const logs = await docker(["logs", container]);
     await writePrivateDiagnostic(
       join(fixture, "current-server.log"),
@@ -969,7 +909,7 @@ export async function checkPersonalContainer(driverPath) {
     const descriptor = JSON.parse(descriptorBytes);
     assert.equal(descriptor.disposable, true);
     assert.equal(descriptor.origin, origin);
-    assert(descriptor.invitation_url.startsWith(`${origin}/invite#token=`));
+    assert.equal(descriptor.operator_lifecycle_verified, true);
     const repeat = await command(
       driver,
       ["bootstrap", fixture, "--server-log", serverLog],
@@ -989,69 +929,57 @@ export async function checkPersonalContainer(driverPath) {
       keys.push(response.body);
     }
 
-    progress("native enrollment and saved Host before restart");
-    await runNativeRestart({
-      fixture,
-      run: (signal) =>
-        command(driver, ["check-native-restart", fixture], {
-          signal,
-          timeout: 300_000,
-        }),
-      restart: async () => {
-        progress("restart and persistent setup/key verification");
-        await compose(["stop", "server"]);
-        assert.equal((await inspect("container", container)).State.ExitCode, 0);
-        await compose(["up", "--detach", "--no-build"]);
-        const restartDeadline = Date.now() + 60_000;
-        for (;;) {
-          try {
-            if ((await request(origin, "/readyz", ca)).status === 200) break;
-          } catch {}
-          assert(
-            Date.now() < restartDeadline,
-            "restarted production HTTPS readiness timed out",
-          );
-          await new Promise((accept) => setTimeout(accept, 500));
-        }
-        for (const [index, path] of paths.entries()) {
-          const response = await request(origin, path, ca);
-          assert.equal(response.status, 200);
-          assert.deepEqual(
-            response.body,
-            keys[index],
-            "restart changed a persisted token keyring",
-          );
-        }
-        const recovery = await compose(
-          [
-            "exec",
-            "-T",
-            "server",
-            "/app/splctl",
-            "bootstrap",
-            "--reissue-pending",
-          ],
-          { allowFailure: true },
-        );
-        assert(
-          recovery.error &&
-            recovery.stderr.trim() ===
-              "splctl: operator setup error: operator setup authentication denied",
-          "completed Operator setup must survive restart",
-        );
-        assert.equal(
-          recovery.stdout,
-          "",
-          "completed setup disclosed a replacement link",
-        );
-        assert.equal(
-          (await inspect("container", container)).RestartCount,
-          0,
-          "service restarted unexpectedly",
-        );
-        progress("native refresh, reuse denial and challenge recovery");
-      },
-    });
+    progress("restart and persistent setup/key verification");
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    await compose(["up", "--detach", "--no-build"]);
+    const restartDeadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        if ((await request(origin, "/readyz", ca)).status === 200) break;
+      } catch {}
+      assert(
+        Date.now() < restartDeadline,
+        "restarted production HTTPS readiness timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 500));
+    }
+    for (const [index, path] of paths.entries()) {
+      const response = await request(origin, path, ca);
+      assert.equal(response.status, 200);
+      assert.deepEqual(
+        response.body,
+        keys[index],
+        "restart changed a persisted token keyring",
+      );
+    }
+    const recovery = await compose(
+      [
+        "exec",
+        "-T",
+        "server",
+        "/app/splctl",
+        "bootstrap",
+        "--reissue-pending",
+      ],
+      { allowFailure: true },
+    );
+    assert(
+      recovery.error &&
+        recovery.stderr.trim() ===
+          "splctl: operator setup error: operator setup authentication denied",
+      "completed Operator setup must survive restart",
+    );
+    assert.equal(
+      recovery.stdout,
+      "",
+      "completed setup disclosed a replacement link",
+    );
+    assert.equal(
+      (await inspect("container", container)).RestartCount,
+      0,
+      "service restarted unexpectedly",
+    );
 
     progress("offline snapshot restore");
     await compose(["stop", "server"]);
@@ -1236,7 +1164,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public bootstrap, native refresh and Host synchronization across restart, reuse denial and challenge recovery, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

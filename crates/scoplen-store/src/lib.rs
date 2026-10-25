@@ -16,14 +16,9 @@ pub mod jobs;
 pub mod kms;
 pub mod object_storage;
 pub mod operator_admission;
-pub mod operator_invitations;
 pub mod operator_sessions;
 pub mod operator_setup;
 pub mod operator_token_keys;
-pub mod pairing;
-pub mod pairing_admission;
-pub mod personal_admission;
-pub mod personal_enrollment;
 mod pre_migration;
 pub mod refresh_retention;
 #[cfg(test)]
@@ -51,11 +46,6 @@ pub use jobs::{Job, JobId, JobQueueError};
 pub use object_storage::{
     ObjectStorage, ObjectStorageConfig, ObjectStorageError, S3ObjectStorageConfig,
 };
-pub use personal_enrollment::{
-    EnrolledPersonalDevice, IssuedPersonalInvitation, PersonalEnrollmentReceipt,
-    PersonalInvitationStoreError,
-};
-
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 
 use sqlx::{

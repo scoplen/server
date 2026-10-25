@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { BrowserProofKey } from "../src/operator.ts";
 
 const origin = "https://operator.example";
-const path = "/api/v1/admin/personal-invitations";
+const path = "/api/v1/auth/operator/logout";
 const access_token = "public-fixture-access-token";
 const now = Math.floor(Date.now() / 1000);
 const key = await BrowserProofKey.create();

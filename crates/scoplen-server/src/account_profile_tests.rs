@@ -40,7 +40,7 @@ fn denied(reply: &Reply, status: u16, code: &str) {
 
 pub(super) async fn signed_token(
     f: &Fixture,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     account: Uuid,
     device: Uuid,
     scope: &str,
@@ -76,7 +76,7 @@ pub(super) async fn signed_token(
 }
 
 pub(super) fn proof_for(
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     method: &str,
     path: &str,
     token: &str,
@@ -121,7 +121,7 @@ async fn store_read(
     }
 }
 
-async fn profile_roundtrip(f: &Fixture, identity: &PersonalBootstrap) {
+async fn profile_roundtrip(f: &Fixture, identity: &LegacyDeviceSession) {
     let first = protected(f, "GET", PATH, &[], &identity.token, &identity.client).await;
     let profile = decode(&first);
     assert_eq!(profile.id, identity.receipt.account_id);
@@ -155,7 +155,7 @@ async fn profile_roundtrip(f: &Fixture, identity: &PersonalBootstrap) {
     assert_eq!(decode(&reply).etag, profile.etag);
 }
 
-async fn rejected_credentials(f: &Fixture, identity: &PersonalBootstrap) {
+async fn rejected_credentials(f: &Fixture, identity: &LegacyDeviceSession) {
     denied(
         &http_method(f.address, "GET", PATH, &[], &[]).await,
         401,
@@ -234,7 +234,7 @@ async fn rejected_credentials(f: &Fixture, identity: &PersonalBootstrap) {
     );
 }
 
-async fn invalid_profile_data(f: &Fixture, identity: &PersonalBootstrap) {
+async fn invalid_profile_data(f: &Fixture, identity: &LegacyDeviceSession) {
     for invalid in [
         String::new(),
         "bad address@example.com".into(),
@@ -279,7 +279,7 @@ async fn invalid_profile_data(f: &Fixture, identity: &PersonalBootstrap) {
     f.execute("ALTER TABLE identity_accounts RENAME COLUMN unavailable_email TO email").await;
 }
 
-async fn stale_identity(f: &Fixture, identity: &PersonalBootstrap) {
+async fn stale_identity(f: &Fixture, identity: &LegacyDeviceSession) {
     let mut principal = f
         .backend
         .current_principal(identity.receipt.device_id.into_bytes())
@@ -373,7 +373,7 @@ async fn stale_identity(f: &Fixture, identity: &PersonalBootstrap) {
 }
 
 async fn profile_contract(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     profile_roundtrip(&f, &identity).await;
     rejected_credentials(&f, &identity).await;
     invalid_profile_data(&f, &identity).await;

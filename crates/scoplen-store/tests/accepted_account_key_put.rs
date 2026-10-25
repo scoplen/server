@@ -1,13 +1,39 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::*;
-use scoplen_store::account_keys::{
-    AccountKeyBundlePut, AccountKeyBundleUpdate, AccountKeyStoreError,
+#[path = "support/legacy_identity.rs"]
+mod legacy_identity;
+mod support;
+#[cfg(feature = "postgres-integration")]
+use legacy_identity::seed_postgres;
+use legacy_identity::{LegacyIdentity, seed_sqlite};
+use scoplen_api::sync::SyncAccountDeviceWrap;
+use scoplen_crypto::{Ed25519SigningKey, P256SigningKey};
+use scoplen_store::{
+    RelationalStore, SqliteStore,
+    account_keys::{AccountKeyBundlePut, AccountKeyBundleUpdate, AccountKeyStoreError},
 };
+use std::path::PathBuf;
+#[cfg(feature = "postgres-integration")]
+use std::time::Duration;
+use support::remove_test_directory;
+use uuid::Uuid;
 
-#[path = "../support/pool_close.rs"]
+#[path = "support/pool_close.rs"]
 mod pool_close;
 
+fn account_key() -> Ed25519SigningKey {
+    Ed25519SigningKey::from_bytes(&[1; 32]).expect("Account signing key")
+}
+fn fixture() -> LegacyIdentity {
+    let mut scalar = [0; 32];
+    scalar[31] = 1;
+    LegacyIdentity::new(&account_key(), &P256SigningKey::from_bytes(&scalar).expect("Device key"))
+}
+fn test_directory() -> PathBuf {
+    let path = std::env::temp_dir().join(format!("scoplen-accepted-put-{}", Uuid::new_v4()));
+    std::fs::create_dir(&path).expect("owned test directory");
+    path
+}
 fn sql(source: &str, postgres: bool) -> String {
     if !postgres {
         return source.to_owned();
@@ -27,17 +53,11 @@ fn sql(source: &str, postgres: bool) -> String {
 }
 
 macro_rules! contract {
-    ($store:expr, $postgres:literal) => {{
+    ($store:expr, $postgres:literal, $seed:ident) => {{
         let store = &$store;
-        let invitation = store
-            .issue_personal_invitation(Uuid::now_v7().into_bytes(), ORIGIN)
-            .await
-            .expect("invitation");
-        let request = enrollment(*invitation.token_bytes());
-        let verified = verify_personal_enrollment(ORIGIN, &request).expect("verified enrollment");
-        let receipt =
-            store.redeem_verified_personal_invitation(&verified).await.expect("atomic enrollment");
-        let account = receipt.account_id;
+        let request = fixture();
+        $seed(store.pool(), &request, true).await;
+        let account = request.account_id.into_bytes();
         let first = request.key_bundle_update.to_cbor().expect("exact first PUT");
         assert_eq!(
             store.read_accepted_account_key_put(account).await.expect("first evidence"),
@@ -54,7 +74,7 @@ macro_rules! contract {
         );
 
         let principal = store
-            .current_device_principal(receipt.device_id)
+            .current_device_principal(request.device_certificate.device_id.into_bytes())
             .await
             .expect("principal")
             .expect("current device");
@@ -157,21 +177,20 @@ macro_rules! contract {
 }
 
 macro_rules! corruption {
-    ($store:expr, $postgres:literal) => {{
+    ($store:expr, $postgres:literal, $seed:ident) => {{
         let store = &$store;
-        let invitation = store.issue_personal_invitation(Uuid::now_v7().into_bytes(), ORIGIN).await.expect("invitation");
-        let request = enrollment(*invitation.token_bytes());
-        let verified = verify_personal_enrollment(ORIGIN, &request).expect("verified enrollment");
-        let receipt = store.redeem_verified_personal_invitation(&verified).await.expect("enroll");
-        let account = receipt.account_id;
-        let original = verified.key_bundle_update_cbor();
+        let request = fixture();
+        $seed(store.pool(), &request, true).await;
+        let account = request.account_id.into_bytes();
+        let original_bytes = request.key_bundle_update.to_cbor().expect("exact evidence");
+        let original = original_bytes.as_slice();
         let revision = sql("UPDATE sync_account_key_bundles SET revision = ? WHERE account_id = ?", $postgres);
         sqlx::query(&revision).bind(2_i64).bind(account.as_slice()).execute(store.pool()).await.expect("damage revision");
         assert!(matches!(store.read_accepted_account_key_put(account).await, Err(AccountKeyStoreError::CorruptRow(_))));
         sqlx::query(&revision).bind(1_i64).bind(account.as_slice()).execute(store.pool()).await.expect("restore revision");
         for (field, original) in [
-            ("account_signing_key", vec![6]), ("account_kem_key", vec![7]),
-            ("recovery_blob", vec![8]), ("signature", request.key_bundle_update.signature.clone()),
+            ("account_signing_key", request.key_bundle_update.account_signing_key.clone()), ("account_kem_key", request.key_bundle_update.account_kem_key.clone()),
+            ("recovery_blob", request.key_bundle_update.recovery_blob.clone()), ("signature", request.key_bundle_update.signature.clone()),
         ] {
             let query = sql(&format!("UPDATE sync_account_key_bundles SET {field} = ? WHERE account_id = ?"), $postgres);
             sqlx::query(&query).bind(vec![99_u8; original.len()]).bind(account.as_slice()).execute(store.pool()).await.expect("damage projected field");
@@ -181,19 +200,19 @@ macro_rules! corruption {
         let wrap_query = sql("UPDATE sync_account_key_device_wraps SET wrapped_ark = ? WHERE account_id = ?", $postgres);
         sqlx::query(&wrap_query).bind(vec![66_u8]).bind(account.as_slice()).execute(store.pool()).await.expect("damage wrap");
         assert!(matches!(store.read_accepted_account_key_put(account).await, Err(AccountKeyStoreError::CorruptRow(_))));
-        sqlx::query(&wrap_query).bind(vec![5_u8]).bind(account.as_slice()).execute(store.pool()).await.expect("restore wrap");
+        sqlx::query(&wrap_query).bind(&request.key_bundle_update.device_wraps[0].wrapped_ark).bind(account.as_slice()).execute(store.pool()).await.expect("restore wrap");
         let insert = sql("INSERT INTO sync_account_key_device_wraps (account_id, device_id, wrapped_ark) VALUES (?, ?, ?)", $postgres);
         let extra = Uuid::now_v7();
         let recipient = sql("UPDATE sync_account_key_device_wraps SET device_id = ? WHERE account_id = ?", $postgres);
         sqlx::query(&recipient).bind(extra.as_bytes().as_slice()).bind(account.as_slice()).execute(store.pool()).await.expect("substitute recipient");
         assert!(matches!(store.read_accepted_account_key_put(account).await, Err(AccountKeyStoreError::CorruptRow(_))));
-        sqlx::query(&recipient).bind(receipt.device_id.as_slice()).bind(account.as_slice()).execute(store.pool()).await.expect("restore recipient");
+        sqlx::query(&recipient).bind(request.device_certificate.device_id.into_bytes().as_slice()).bind(account.as_slice()).execute(store.pool()).await.expect("restore recipient");
         sqlx::query(&insert).bind(account.as_slice()).bind(extra.as_bytes().as_slice()).bind(vec![5_u8]).execute(store.pool()).await.expect("extra wrap");
         assert!(matches!(store.read_accepted_account_key_put(account).await, Err(AccountKeyStoreError::CorruptRow(_))));
         let delete = sql("DELETE FROM sync_account_key_device_wraps WHERE account_id = ?", $postgres);
         sqlx::query(&delete).bind(account.as_slice()).execute(store.pool()).await.expect("missing wraps");
         assert!(matches!(store.read_accepted_account_key_put(account).await, Err(AccountKeyStoreError::CorruptRow(_))));
-        sqlx::query(&insert).bind(account.as_slice()).bind(receipt.device_id.as_slice()).bind(vec![5_u8]).execute(store.pool()).await.expect("restore recipient");
+        sqlx::query(&insert).bind(account.as_slice()).bind(request.device_certificate.device_id.as_bytes().as_slice()).bind(&request.key_bundle_update.device_wraps[0].wrapped_ark).execute(store.pool()).await.expect("restore recipient");
         let evidence = sql("UPDATE sync_account_key_bundles SET accepted_put_cbor = ? WHERE account_id = ?", $postgres);
         for invalid in [vec![0; original.len()], [original, &[0]].concat()] {
             sqlx::query(&evidence).bind(invalid).bind(account.as_slice()).execute(store.pool()).await.expect("damage evidence");
@@ -227,7 +246,7 @@ macro_rules! corruption {
 async fn sqlite_accepted_put_lifecycle_and_cas() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
-    contract!(store, false);
+    contract!(store, false, seed_sqlite);
     pool_close::close(store.pool()).await;
     remove_test_directory(directory).await;
 }
@@ -236,7 +255,7 @@ async fn sqlite_accepted_put_lifecycle_and_cas() {
 async fn sqlite_accepted_put_rejects_damaged_evidence_and_projection() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
-    corruption!(store, false);
+    corruption!(store, false, seed_sqlite);
     pool_close::close(store.pool()).await;
     remove_test_directory(directory).await;
 }
@@ -252,9 +271,11 @@ async fn sqlite_upgrade_preserves_projection_without_fabricating_acceptance() {
         .await
         .expect("old database");
     let mut migrations = sqlx::migrate!("./migrations/sqlite");
-    migrations.migrations.to_mut().pop().expect("pending acceptance migration");
+    let current_migration_count =
+        i64::try_from(migrations.migrations.len()).expect("migration count");
+    migrations.migrations.to_mut().retain(|migration| migration.version < 20_261_025_030_000);
     migrations.run(&pool).await.expect("previous schema");
-    let request = enrollment([7; 32]);
+    let request = fixture();
     let account = request.account_id.into_bytes();
     let update = &request.key_bundle_update;
     sqlx::query("INSERT INTO sync_account_key_bundles (account_id, revision, account_signing_key, account_kem_key, recovery_blob, signature, updated_at_ms) VALUES (?, 1, ?, ?, ?, ?, 1)")
@@ -288,14 +309,14 @@ async fn sqlite_upgrade_preserves_projection_without_fabricating_acceptance() {
         .fetch_one(store.pool())
         .await
         .expect("migration history");
-    assert_eq!(count, 25);
+    assert_eq!(count, current_migration_count);
     assert_eq!(
         store
             .get_account_key_bundle(account, update.device_wraps[0].device_id.into_bytes())
             .await
             .expect("legacy serving projection")
             .wrapped_ark,
-        vec![5]
+        update.device_wraps[0].wrapped_ark
     );
     pool_close::close(store.pool()).await;
     remove_test_directory(directory).await;
@@ -305,27 +326,22 @@ async fn sqlite_upgrade_preserves_projection_without_fabricating_acceptance() {
 async fn sqlite_accepted_put_rejects_oversized_metadata_before_loading_payloads() {
     let directory = test_directory();
     let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
-    let invitation = store
-        .issue_personal_invitation(Uuid::now_v7().into_bytes(), ORIGIN)
-        .await
-        .expect("invitation");
-    let request = enrollment(*invitation.token_bytes());
-    let verified = verify_personal_enrollment(ORIGIN, &request).expect("verified");
-    let receipt = store.redeem_verified_personal_invitation(&verified).await.expect("enroll");
+    let request = fixture();
+    seed_sqlite(store.pool(), &request, true).await;
     let mut damaged = store.pool().acquire().await.expect("owned corruption connection");
     sqlx::query("PRAGMA ignore_check_constraints = ON")
         .execute(&mut *damaged)
         .await
         .expect("allow owned corruption");
     sqlx::query("UPDATE sync_account_key_bundles SET account_signing_key = zeroblob(65537) WHERE account_id = ?")
-        .bind(receipt.account_id.as_slice()).execute(&mut *damaged).await.expect("oversized projection");
+        .bind(request.account_id.into_bytes().as_slice()).execute(&mut *damaged).await.expect("oversized projection");
     sqlx::query("PRAGMA ignore_check_constraints = OFF")
         .execute(&mut *damaged)
         .await
         .expect("restore constraints");
     drop(damaged);
     assert!(matches!(
-        store.read_accepted_account_key_put(receipt.account_id).await,
+        store.read_accepted_account_key_put(request.account_id.into_bytes()).await,
         Err(AccountKeyStoreError::CorruptRow(_))
     ));
     pool_close::close(store.pool()).await;
@@ -358,7 +374,7 @@ async fn cleanup_postgres(store: scoplen_store::PostgresStore, pool: sqlx::PgPoo
 #[tokio::test]
 async fn postgres_accepted_put_lifecycle_and_cas() {
     let (store, pool, schema) = postgres_fixture().await;
-    contract!(store, true);
+    contract!(store, true, seed_postgres);
     cleanup_postgres(store, pool, schema).await;
 }
 
@@ -366,7 +382,7 @@ async fn postgres_accepted_put_lifecycle_and_cas() {
 #[tokio::test]
 async fn postgres_accepted_put_rejects_damaged_evidence_and_projection() {
     let (store, pool, schema) = postgres_fixture().await;
-    corruption!(store, true);
+    corruption!(store, true, seed_postgres);
     cleanup_postgres(store, pool, schema).await;
 }
 
@@ -374,27 +390,22 @@ async fn postgres_accepted_put_rejects_damaged_evidence_and_projection() {
 #[tokio::test]
 async fn postgres_accepted_put_reads_projection_after_waiting_for_the_account_writer() {
     let (store, pool, schema) = postgres_fixture().await;
-    let invitation = store
-        .issue_personal_invitation(Uuid::now_v7().into_bytes(), ORIGIN)
-        .await
-        .expect("invitation");
-    let request = enrollment(*invitation.token_bytes());
-    let verified = verify_personal_enrollment(ORIGIN, &request).expect("verified");
-    let receipt = store.redeem_verified_personal_invitation(&verified).await.expect("enroll");
+    let request = fixture();
+    seed_postgres(store.pool(), &request, true).await;
     let mut writer = store.pool().begin().await.expect("writer");
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 0))")
-        .bind(receipt.account_id.as_slice())
+        .bind(request.account_id.into_bytes().as_slice())
         .execute(&mut *writer)
         .await
         .expect("account writer lock");
     sqlx::query(
         "UPDATE sync_account_key_bundles SET accepted_put_cbor = NULL WHERE account_id = $1",
     )
-    .bind(receipt.account_id.as_slice())
+    .bind(request.account_id.into_bytes().as_slice())
     .execute(&mut *writer)
     .await
     .expect("invalidate evidence");
-    let mut reader = Box::pin(store.read_accepted_account_key_put(receipt.account_id));
+    let mut reader = Box::pin(store.read_accepted_account_key_put(request.account_id.into_bytes()));
     assert!(tokio::time::timeout(Duration::from_millis(50), &mut reader).await.is_err());
     writer.commit().await.expect("committed invalidation");
     assert!(reader.await.expect("post-lock evidence read").is_none());
