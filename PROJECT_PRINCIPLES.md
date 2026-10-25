@@ -59,6 +59,11 @@ self-hosted server, host agent, administration CLI, and web console.
   commits. Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
   independent database quotas, and transaction-local session authorization; one-time URLs are
   disclosed only after an audited confirmed commit.
+  Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
+  at most 16 expired families per kind, removes at most 256 digests and deletes only empty
+  expired families. Family locks precede token deletion and expiry is rechecked after locking;
+  every unexpired family and spent digest, including revoked families, remains intact. Ordinary
+  shutdown can cancel blocked maintenance. Logs contain only confirmed counts and fixed errors.
   Enrolled devices can read their complete signed certificate/revocation snapshot with current
   admission checked in the same account transaction. Every statement is verified before
   disclosure; inactive peer rows do not silently filter the signed set, and invalid or

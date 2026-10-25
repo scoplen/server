@@ -24,6 +24,7 @@ pub mod pairing_admission;
 pub mod personal_admission;
 pub mod personal_enrollment;
 mod pre_migration;
+pub mod refresh_retention;
 #[cfg(test)]
 mod schema;
 pub mod sync;

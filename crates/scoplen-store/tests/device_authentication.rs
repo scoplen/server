@@ -369,6 +369,7 @@ async fn sqlite_device_exchange_refresh_and_spent_reuse_revoke_atomically() {
     .await
     .expect("spent digest");
     assert_eq!(used_digest, Sha256::digest(first.refresh_token.as_bytes()).to_vec());
+    store.cleanup_refresh_families().await.expect("maintenance preserves live spent digests");
     assert!(matches!(
         store
             .refresh_device(
@@ -388,6 +389,15 @@ async fn sqlite_device_exchange_refresh_and_spent_reuse_revoke_atomically() {
     .await
     .expect("revoked count");
     assert_eq!(revoked, 1);
+    store
+        .cleanup_refresh_families()
+        .await
+        .expect("maintenance preserves revoked-unexpired digests");
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_refresh_tokens")
+        .fetch_one(store.pool())
+        .await
+        .expect("retained reuse evidence");
+    assert_eq!(retained, 2);
     store.pool().close().await;
     drop(store);
     support::remove_test_directory(directory).await;
@@ -785,6 +795,7 @@ async fn postgres_device_exchange_refresh_and_reuse_are_serialized() {
         .await
         .expect("rotation");
     assert_ne!(first.refresh_token, second.refresh_token);
+    store.cleanup_refresh_families().await.expect("maintenance preserves live spent digests");
     assert!(matches!(
         store
             .refresh_device(

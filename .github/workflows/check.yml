@@ -141,6 +141,8 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::postgres_
       - name: Check PostgreSQL Operator sessions and authorization locks
         run: cargo test -p scoplen-store --test operator_sessions --features postgres-integration postgres_
+      - name: Check bounded PostgreSQL refresh retirement and uncertain commits
+        run: cargo test --locked -p scoplen-store --test refresh_retention --features postgres-integration postgres_
       - name: Check PostgreSQL Operator invitation issuance HTTP
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_invitation::tests::postgres_
       - name: Check PostgreSQL Operator login and browser refresh HTTP

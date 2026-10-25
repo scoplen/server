@@ -20,6 +20,7 @@ use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_audit::{checkpoint_payload, deployment_checkpoint_payload};
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
 use scoplen_store::pairing::{PairingCleanupReport, PairingStoreError};
+use scoplen_store::refresh_retention::{RefreshCleanupError, RefreshCleanupReport};
 use scoplen_store::sync::MAX_PAGE_SIZE;
 use scoplen_store::{
     AuditChainHead, AuditCheckpoint, AuditStoreError, DeploymentAuditChainHead,
@@ -654,6 +655,9 @@ const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
 pub(crate) trait WorkerStoreBackend: Send + Sync {
+    fn cleanup_refresh_families(
+        &self,
+    ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send;
     fn cleanup_pairings(
         &self,
     ) -> impl Future<Output = Result<PairingCleanupReport, PairingStoreError>> + Send;
@@ -734,6 +738,12 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
 macro_rules! impl_worker_store_backend {
     ($store:ty) => {
         impl WorkerStoreBackend for $store {
+            fn cleanup_refresh_families(
+                &self,
+            ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send {
+                <$store>::cleanup_refresh_families(self)
+            }
+
             fn cleanup_pairings(
                 &self,
             ) -> impl Future<Output = Result<PairingCleanupReport, PairingStoreError>> + Send {
@@ -895,6 +905,22 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 "pairing maintenance pass"
             ),
             Err(error) => error!(%error, role = "worker", "pairing maintenance pass failed"),
+        }
+        let refresh_cleanup = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.cleanup_refresh_families() => result,
+        };
+        match refresh_cleanup {
+            Ok(report) => info!(
+                role = "worker",
+                removed_device_refresh_tokens = report.device_tokens,
+                removed_device_refresh_families = report.device_families,
+                removed_operator_refresh_tokens = report.operator_tokens,
+                removed_operator_refresh_families = report.operator_families,
+                "refresh retention pass"
+            ),
+            Err(error) => error!(%error, role = "worker", "refresh retention pass failed"),
         }
         let retention = tokio::select! {
             biased;
@@ -3053,6 +3079,134 @@ mod tests {
         drop(store);
         cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
+    }
+
+    macro_rules! assert_worker_refresh_retention {
+        ($store:expr,$directory:expr,$active:expr) => {{
+            let store=Arc::new($store);
+            let id=uuid::Uuid::now_v7();
+            sqlx::query("INSERT INTO identity_accounts (account_id,account_signing_public_key,account_kem_public_key,created_at_ms) VALUES ($1,$2,$2,1)")
+                .bind(id.as_bytes().as_slice()).bind([1_u8;32].as_slice()).execute(store.pool()).await.expect("account");
+            sqlx::query("INSERT INTO identity_devices (device_id,account_id,certificate,active,created_at_ms) VALUES ($1,$1,$2,$3,1)")
+                .bind(id.as_bytes().as_slice()).bind([1_u8].as_slice()).bind($active)
+                .execute(store.pool()).await.expect("device");
+            sqlx::query("INSERT INTO deployment_operators (operator_id,active,created_at_s) VALUES ($1,1,1)")
+                .bind(id.as_bytes().as_slice()).execute(store.pool()).await.expect("operator");
+            sqlx::query("INSERT INTO operator_credentials (credential_id,operator_id,user_handle,trusted_origin,rp_id,credential_version,credential_state,active,created_at_s) VALUES ($1,$1,$1,'https://refresh.example.test','refresh.example.test',1,$2,1,1)")
+                .bind(id.as_bytes().as_slice()).bind([1_u8].as_slice()).execute(store.pool()).await.expect("credential");
+            let now=worker_now_ms().expect("clock");
+            for kind in ["device","operator"] {
+                for expires in [now-1,now+2_592_000_000_i64] {
+                    let family=uuid::Uuid::now_v7();
+                    let columns=if kind=="device" {"account_id,device_id"}else{"operator_id,credential_id"};
+                    let tail=if kind=="device" {""}else{",principal_kind,trusted_origin"};
+                    let values=if kind=="device" {""}else{",'operator','https://refresh.example.test'"};
+                    sqlx::query(&format!("INSERT INTO {kind}_refresh_families (family_id,{columns},dpop_jkt,audience,scope,created_at_ms,expires_at_ms{tail}) VALUES ($1,$2,$2,$3,$4,'test',$5,$6{values})"))
+                        .bind(family.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind("a".repeat(43))
+                        .bind(if kind=="device" {"spl-api/1"}else{"spl-admin/1"})
+                        .bind(expires-2_592_000_000_i64).bind(expires)
+                        .execute(store.pool()).await.expect("worker refresh family");
+                    let mut digest=[0_u8;32];digest[..16].copy_from_slice(family.as_bytes());
+                    sqlx::query(&format!("INSERT INTO {kind}_refresh_tokens (token_digest,family_id,issued_at_ms) VALUES ($1,$2,1)"))
+                        .bind(digest.as_slice()).bind(family.as_bytes().as_slice())
+                        .execute(store.pool()).await.expect("worker refresh digest");
+                }
+            }
+            let signer_path=$directory.join("audit-signing.key");
+            fs::write(&signer_path,"11".repeat(32)).expect("write signer");
+            let signer=LocalAuditSigner::load(&signer_path).expect("signer");
+            let (shutdown,receiver)=watch::channel(false);
+            let worker=tokio::spawn(run_worker_role(store.clone(),Arc::new(signer),receiver));
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let families:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM device_refresh_families)+(SELECT COUNT(*) FROM operator_refresh_families)")
+                        .fetch_one(store.pool()).await.expect("observe refresh cleanup");
+                    if families==2 {break;}
+                    assert!(!worker.is_finished(),"worker stays healthy");
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("worker removes expired refresh credentials without requests");
+            shutdown.send(true).expect("request shutdown");
+            tokio::time::timeout(Duration::from_secs(2),worker).await.expect("bounded shutdown").expect("worker task").expect("normal shutdown");
+            for kind in ["device","operator"] {
+                let tokens:i64=sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {kind}_refresh_tokens"))
+                    .fetch_one(store.pool()).await.expect("retained live digest");
+                assert_eq!(tokens,1);
+            }
+            store.pool().close().await;
+        }};
+    }
+
+    #[tokio::test]
+    async fn worker_refresh_retention_removes_expired_credentials_without_request_traffic() {
+        let directory =
+            std::env::temp_dir().join(format!("scoplen-refresh-worker-{}", uuid::Uuid::now_v7()));
+        let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
+        assert_worker_refresh_retention!(store, directory, 1_i64);
+        remove_test_directory(&directory).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_refresh_retention_removes_expired_credentials_without_request_traffic()
+    {
+        let (url, pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(url.as_str()).await.expect("store");
+        let directory =
+            std::env::temp_dir().join(format!("scoplen-refresh-worker-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&directory).expect("signer directory");
+        assert_worker_refresh_retention!(store, directory, true);
+        cleanup_postgres_fixture(pool, schema).await;
+        remove_test_directory(&directory).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_shutdown_interrupts_blocked_refresh_retention() {
+        let (mut url, pool, schema) = postgres_fixture().await;
+        let marker = format!("refresh_shutdown_{}", uuid::Uuid::now_v7().simple());
+        url.query_pairs_mut().append_pair("application_name", &marker);
+        let store = Arc::new(PostgresStore::connect(url.as_str()).await.expect("store"));
+        let mut blocker = store.pool().begin().await.expect("blocker transaction");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("blocker pid");
+        sqlx::query("SELECT pg_advisory_xact_lock(1396916048,1397052243)")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold Operator session lock");
+        let directory =
+            std::env::temp_dir().join(format!("scoplen-refresh-shutdown-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&directory).expect("signer directory");
+        let signer_path = directory.join("audit-signing.key");
+        fs::write(&signer_path, "11".repeat(32)).expect("signer file");
+        let signer = LocalAuditSigner::load(&signer_path).expect("signer");
+        let (shutdown, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_worker_role(store.clone(), Arc::new(signer), receiver));
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=$2 AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)))")
+                    .bind(blocker_pid).bind(&marker).fetch_one(store.pool()).await.expect("observe refresh cleanup waiter");
+                if waiting {break;}
+                assert!(!worker.is_finished(),"worker waits for refresh maintenance lock");
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("worker reached refresh maintenance");
+        shutdown.send(true).expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("shutdown bypasses blocked pass")
+            .expect("worker task")
+            .expect("normal shutdown");
+        blocker.rollback().await.expect("release blocker");
+        assert_eq!(
+            store.cleanup_refresh_families().await.expect("pool reusable after cancellation"),
+            RefreshCleanupReport::default()
+        );
+        store.pool().close().await;
+        cleanup_postgres_fixture(pool, schema).await;
+        remove_test_directory(&directory).await;
     }
 
     #[tokio::test]
