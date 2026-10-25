@@ -4,10 +4,25 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added durable current-family Operator logout on SQLite and PostgreSQL. Revocation and its
+  deployment audit commit atomically; eligible fresh-proof retries confirm an already revoked
+  family without another revocation event. Other families and all retained refresh digests stay
+  intact. Current identity, credential, binding and expiry checks also apply after lock waits;
+  corrupt stored passkey keys fail closed through the maintained verifier's public-key checks.
+  Forward migrations preserve existing authentication admission debt and add independent logout
+  quotas. The HTTP adapter and console adoption are separate outcomes.
+
 - Updated protocol dependencies and generated console types to `proto@439b956`, including
   the current Operator-family logout wire and explicit authenticated operation requirements.
   Existing protected invitation handling requires the business-scope variant explicitly;
   an intrinsic requirement cannot grant invitation authority. Mounting logout is separate.
+
+- Added current Operator-family sign out through the strict DPoP-protected logout HTTP route
+  and Personal console. It ignores refresh cookies, revokes and audits only the current family,
+  and confirms eligible already-revoked state with a fresh proof. Uncertain outcomes retain the
+  original browser credentials for explicit retry before expiry; local tab locking remains a
+  separate action. The console serializes session actions and rejects late responses after lock.
+  Route-contract CI checks the same published proto revision as the server dependency.
 
 - Added atomic worker retirement of expired device and Operator refresh credentials on SQLite
   and PostgreSQL. Each heartbeat examines at most 16 expired families per kind, removes at most

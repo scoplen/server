@@ -108,7 +108,8 @@ transaction. Complete token JSON and the scoped secure cookie are validated befo
 an uncertain commit returns no session secrets. The API listener mounts the strict Operator
 setup and login options/finish routes, and dispatches Operator browser refresh cookies to their
 independent verifier and family store. The Personal console connects setup, fresh Passkey login
-and Personal invitation issuance. A dedicated Operator keyring uses
+and Personal invitation issuance, with explicit current-session server sign out distinct from
+local tab locking. A dedicated Operator keyring uses
 independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encrypted envelopes,
 with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
@@ -124,7 +125,7 @@ remain intact until absolute expiry. Expiry is rechecked after family locks, shu
 a blocked pass, and logs contain only confirmed counts or fixed failures. This retirement
 reuses database pages; it does not vacuum or promise a smaller database file.
 All server Rust proto dependencies and
-the console's generated public API types are pinned to `proto@b1748dd` for shared
+the console's generated public API types are pinned to `proto@439b956` for shared
 authentication, Operator token, scope,
 object-signature, complete account-device statement, D-114 pairing and notification scope lookup
 contracts, D-115 account-key problem vectors and RUSTSEC-2026-0387 dependency fixes.
@@ -411,6 +412,17 @@ and discloses the replacement only after confirmed commit. Completed setup never
 including after operator revocation. A result with an unknown commit outcome discloses no link;
 use the deliberate local reissue action only if setup remains pending.
 
+The storage service supports current-family Operator logout through `logout_operator` on both
+databases. Its caller verifies the Operator access token, exact Origin and token-bound DPoP,
+durably claims the proof and charges source admission before invoking the mutation. The store
+serializes with refresh and other protected mutations, checks current credential/family state,
+the stored ES256/P-256 public key and time, and atomically revokes that family with one
+deployment audit. A fresh eligible retry
+can confirm an already revoked family without producing general authorization evidence. It
+retains all refresh digests until normal expiry maintenance and preserves every other family.
+An unconfirmed revocation commit requires explicit fresh-proof confirmation while the original
+access token remains valid. The public HTTP route and console behavior are described below.
+
 The storage service verifies real ES256 passkey registration and discoverable assertions with
 the maintained WebAuthn core under the configured exact origin/RP, required residency and UV,
 and `none` attestation policy. SQLite and PostgreSQL atomically persist the first operator,
@@ -439,7 +451,28 @@ login; it does not try an old refresh cookie with a new proof key. Refresh is se
 Web Locks. Unknown setup outcomes retain the passkey and offer sign-in; unknown login/refresh
 outcomes restart login; an unknown invitation outcome requires an explicit new invitation and
 cannot recover the earlier URL. Lock this tab clears its in-memory sign-in; it does not revoke
-the server session. The Personal enrollment route
+the server session.
+
+`POST /api/v1/auth/operator/logout` accepts exactly `{}` as complete UTF-8 JSON of at most
+256 bytes. It requires exactly one trusted HTTPS Origin, including its port, the retained
+unexpired Operator access token and a fresh token-bound ES256 DPoP proof. The route does not
+read or change refresh cookies; the console sends `credentials: "omit"`. Source admission
+allows 30 attempts per minute; only a transaction-current Operator/family binding selects the
+independent ten-per-minute Operator bucket. SQLite and PostgreSQL serialize current-state
+validation, family revocation and its deployment audit. Confirmed success returns exactly
+`{"revoked":true}`; an eligible fresh-proof retry can confirm the same already-revoked family
+without another revocation audit. Other browser sessions and completed invitations remain valid.
+All responses omit `Set-Cookie` and use no-store/no-cache/no-referrer headers.
+
+An unknown logout commit returns `503 auth.commit_outcome_unknown` with `changed: true` and
+`retryable: true`. A lost or invalid response has the same unresolved console state. The console
+retains the original proof key and access token for an explicit fresh-proof retry while that
+token remains unexpired. It never refreshes or replays logout automatically, and a later login
+does not settle the old family's outcome. Only strict server confirmation clears credentials;
+Lock this tab can discard them locally while clearly leaving server sign out unconfirmed.
+Same-tab operations are serialized and local locking fences late responses.
+
+The Personal enrollment route
 requires an already issued invitation and no existing session or cookie. It rejects
 `Authorization`, `DPoP`, and `Idempotency-Key` headers. It
 admits at most 30 attempts per peer address and five attempts per decoded invitation digest in

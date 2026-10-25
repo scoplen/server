@@ -31,7 +31,7 @@ use crate::{
     },
     operator_admission::{
         OperatorAdmissionDecision, OperatorAdmissionError, OperatorAuthEndpoint,
-        OperatorPrivateBucket,
+        OperatorAuthFailureReason, OperatorPrivateBucket,
     },
     operator_token_keys::OperatorTokenKeyring,
 };
@@ -132,6 +132,14 @@ pub struct CurrentOperatorSession {
     pub family_id: Uuid,
 }
 
+/// Confirms only termination of the request's eligible family. It grants no authority.
+#[derive(Debug)]
+pub struct OperatorLogoutConfirmation(());
+
+struct LogoutFamily {
+    revoked_at_ms: Option<i64>,
+}
+
 struct Credential {
     operator_id: Uuid,
     state: Vec<u8>,
@@ -177,6 +185,13 @@ fn event(class: u8, now: i64, operator: Option<Uuid>) -> Vec<u8> {
     if let Some(id) = operator {
         out.extend_from_slice(id.as_bytes());
     }
+    out
+}
+
+fn logout_event(now: i64, operator: Uuid, family: Uuid) -> Vec<u8> {
+    let mut out = event(7, now, Some(operator));
+    out.extend_from_slice(family.as_bytes());
+    out.push(1);
     out
 }
 fn trusted_keys(
@@ -255,7 +270,7 @@ fn sign_response(
 }
 
 macro_rules! session_store {
-    ($store:ty,$db:ty,$begin:ident,$lock:ident,$admission_lock:path,$outcome:path,$admit:path,$claim:path,$credential:ident,$family:ident,$denied:ident,$current:ident,$current_suffix:literal,$append:ident) => {
+    ($store:ty,$db:ty,$begin:ident,$lock:ident,$admission_lock:path,$outcome:path,$admit:path,$claim:path,$credential:ident,$family:ident,$denied:ident,$current:ident,$logout_check:ident,$current_suffix:literal,$append:ident) => {
         impl $store {
             /// Persist fresh discoverable state without looking up or disclosing any operator.
             /// # Errors
@@ -375,6 +390,89 @@ macro_rules! session_store {
                 Ok(principal)
             }
 
+            /// Revoke only the access token's current eligible browser family.
+            /// The caller must verify the independent token, exact Origin and token-bound `DPoP`,
+            /// durably claim that proof once, and charge the source bucket before this call.
+            /// No refresh credential is read, rotated, deleted or returned.
+            ///
+            /// # Errors
+            /// Denials and rate rejections include mandatory audit. Audit failure rolls back
+            /// revocation. An unconfirmed revocation commit returns `CommitOutcomeUnknown`.
+            pub async fn logout_operator(
+                &self,
+                source: IpAddr,
+                verified: &VerifiedOperatorAccessToken,
+                trusted_origin: &str,
+            ) -> Result<OperatorLogoutConfirmation, OperatorSessionError> {
+                let verifier = OperatorPasskeyVerifier::new(trusted_origin)
+                    .map_err(|_| OperatorSessionError::InvalidInput)?;
+                let mut tx = $begin(self).await?;
+                $lock(&mut tx).await?;
+                $admission_lock(&mut tx).await?;
+                let Some(family) = $logout_check(&mut tx, verified, &verifier).await? else {
+                    $outcome(&mut tx, OperatorAuthEndpoint::Logout, source, None, false).await?;
+                    let now = now_ms()?;
+                    let event = crate::operator_admission::failure_event(
+                        OperatorAuthEndpoint::Logout, OperatorAuthFailureReason::AuthenticationDenied, now,
+                    );
+                    $append(&mut tx, &event, now).await?;
+                    tx.commit().await?;
+                    return Err(OperatorSessionError::Denied { changed: false });
+                };
+                let claims = verified.claims();
+                let private = OperatorPrivateBucket::AuthenticatedOperator(claims.sub);
+                if let OperatorAdmissionDecision::RateLimited(wait) =
+                    $admit(&mut tx, OperatorAuthEndpoint::Logout, private).await?
+                {
+                    let now = now_ms()?;
+                    let event = crate::operator_admission::failure_event(
+                        OperatorAuthEndpoint::Logout, OperatorAuthFailureReason::RateLimited, now,
+                    );
+                    $append(&mut tx, &event, now).await?;
+                    tx.commit().await?;
+                    return Err(OperatorSessionError::RateLimited(wait));
+                }
+                let changed = family.revoked_at_ms.is_none();
+                sqlx::query::<$db>("SAVEPOINT operator_logout_mutation").execute(&mut *tx).await?;
+                $outcome(&mut tx, OperatorAuthEndpoint::Logout, source, Some(private), true).await?;
+                if changed {
+                    let now = now_ms()?;
+                    let updated = sqlx::query::<$db>(
+                        "UPDATE operator_refresh_families SET revoked_at_ms=$1 WHERE family_id=$2 AND revoked_at_ms IS NULL",
+                    )
+                    .bind(now)
+                    .bind(claims.sid.as_bytes().as_slice())
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                    if updated != 1 { return Err(OperatorSessionError::Integrity); }
+                    $append(&mut tx, &logout_event(now, claims.sub, claims.sid), now).await?;
+                }
+                // Audit-chain contention can outlive the original token or family. Neither
+                // branch may confirm using time captured before that wait.
+                if $logout_check(&mut tx, verified, &verifier).await?.is_none() {
+                    // Keep the admitted attempt and original locks while discarding the
+                    // revocation, success streak reset and its audit.
+                    sqlx::query::<$db>("ROLLBACK TO SAVEPOINT operator_logout_mutation")
+                        .execute(&mut *tx).await?;
+                    $outcome(&mut tx, OperatorAuthEndpoint::Logout, source, Some(private), false).await?;
+                    let now = now_ms()?;
+                    let event = crate::operator_admission::failure_event(
+                        OperatorAuthEndpoint::Logout, OperatorAuthFailureReason::AuthenticationDenied, now,
+                    );
+                    $append(&mut tx, &event, now).await?;
+                    tx.commit().await?;
+                    return Err(OperatorSessionError::Denied { changed: false });
+                }
+                let confirmation = OperatorLogoutConfirmation(());
+                if changed {
+                    tx.commit().await.map_err(|_| OperatorSessionError::CommitOutcomeUnknown)?;
+                } else {
+                    tx.commit().await?;
+                }
+                Ok(confirmation)
+            }
+
         }
 
         /// Check current Operator session inside a caller-owned mutation transaction. The
@@ -398,6 +496,48 @@ macro_rules! session_store {
                 locked_seconds<claims.exp&&claims.iat<=locked_seconds&&row.try_get::<i64,_>("expires_at_ms")?>locked_now&&row.try_get::<String,_>("scope")?==claims.scope&&claims.scope==INITIAL_OPERATOR_ACCESS_SCOPE&&row.try_get::<String,_>("dpop_jkt")?==claims.cnf_jkt&&row.try_get::<String,_>("trusted_origin")?==claims.iss
             }else{false};
             Ok(matches.then_some(CurrentOperatorSession {operator_id:claims.sub,family_id:claims.sid}))
+        }
+
+        async fn $logout_check(
+            tx: &mut sqlx::Transaction<'_, $db>,
+            verified: &VerifiedOperatorAccessToken,
+            verifier: &OperatorPasskeyVerifier,
+        ) -> Result<Option<LogoutFamily>, OperatorSessionError> {
+            let claims = verified.claims();
+            let row = sqlx::query::<$db>(concat!(
+                "SELECT f.scope,f.dpop_jkt,f.trusted_origin,f.created_at_ms,f.expires_at_ms,f.revoked_at_ms,c.credential_id,c.user_handle,c.credential_version,c.credential_state,c.rp_id FROM operator_refresh_families f JOIN deployment_operators o ON o.operator_id=f.operator_id JOIN operator_credentials c ON c.credential_id=f.credential_id AND c.operator_id=f.operator_id WHERE f.family_id=$1 AND f.operator_id=$2 AND f.principal_kind='operator' AND f.audience='spl-admin/1' AND o.active=1 AND c.active=1 AND c.trusted_origin=f.trusted_origin",
+                $current_suffix,
+            ))
+            .bind(claims.sid.as_bytes().as_slice())
+            .bind(claims.sub.as_bytes().as_slice())
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some(row) = row else { return Ok(None); };
+            let stored = (|| -> Result<_, sqlx::Error> {
+                let created: i64 = row.try_get("created_at_ms")?;
+                let expires: i64 = row.try_get("expires_at_ms")?;
+                let revoked: Option<i64> = row.try_get("revoked_at_ms")?;
+                let credential: Vec<u8> = row.try_get("credential_id")?;
+                let state: Vec<u8> = row.try_get("credential_state")?;
+                let bound = claims.iss == verifier.origin()
+                    && claims.scope == INITIAL_OPERATOR_ACCESS_SCOPE
+                    && row.try_get::<String, _>("scope")? == claims.scope
+                    && row.try_get::<String, _>("dpop_jkt")? == claims.cnf_jkt
+                    && row.try_get::<String, _>("trusted_origin")? == verifier.origin()
+                    && row.try_get::<String, _>("rp_id")? == verifier.rp_id()
+                    && row.try_get::<Vec<u8>, _>("user_handle")?.as_slice() == claims.sub.as_bytes()
+                    && row.try_get::<i64, _>("credential_version")? == 1
+                    && verifier.validate_stored_credential(&state, &credential).is_ok();
+                Ok((created, expires, revoked, bound))
+            })();
+            let Ok((created, expires, revoked, bound)) = stored else { return Ok(None); };
+            let now = now_ms()?;
+            let seconds = u64::try_from(now / 1000).map_err(|_| OperatorSessionError::Clock)?;
+            let valid = bound && claims.iat <= seconds && seconds < claims.exp
+                && created > 0 && created <= now
+                && expires.checked_sub(created) == Some(FAMILY_MS) && expires > now
+                && revoked.is_none_or(|revoked| created <= revoked && revoked <= now);
+            Ok(valid.then_some(LogoutFamily { revoked_at_ms: revoked }))
         }
 
         async fn $credential(tx:&mut sqlx::Transaction<'_,$db>,id:&[u8],origin:&str,rp_id:&str)->Result<Option<Credential>,OperatorSessionError> {
@@ -456,6 +596,7 @@ session_store!(
     sqlite_family,
     sqlite_denied,
     verify_operator_session_in_sqlite_transaction,
+    sqlite_logout_check,
     "",
     append_deployment_audit_event_in_transaction
 );
@@ -472,6 +613,7 @@ session_store!(
     postgres_family,
     postgres_denied,
     verify_operator_session_in_postgres_transaction,
+    postgres_logout_check,
     " FOR SHARE OF f,o,c",
     append_deployment_audit_event_in_postgres_transaction
 );

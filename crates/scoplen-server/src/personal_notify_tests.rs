@@ -32,7 +32,7 @@ use tokio_tungstenite::{
 const PATH: &str = "/sync/v1/notify";
 type Socket = WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-pub(super) struct Listener {
+pub(in crate::operator_auth::tests::sessions) struct Listener {
     address: SocketAddr,
     roots: RootCertStore,
     task: tokio::task::JoinHandle<()>,
@@ -50,7 +50,7 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    pub(super) async fn start(f: &mut Fixture) -> Self {
+    pub(in crate::operator_auth::tests::sessions) async fn start(f: &mut Fixture) -> Self {
         f.server.abort();
         let _ = (&mut f.server).await;
         let storage = ObjectStorage::from_config(&ObjectStorageConfig::Filesystem {
@@ -139,7 +139,10 @@ impl Listener {
         Self { address, roots, task, fanout, hub }
     }
 
-    pub(super) async fn tls(&self, protocol: &[u8]) -> tokio_rustls::client::TlsStream<TcpStream> {
+    pub(in crate::operator_auth::tests::sessions) async fn tls(
+        &self,
+        protocol: &[u8],
+    ) -> tokio_rustls::client::TlsStream<TcpStream> {
         let mut config = ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))

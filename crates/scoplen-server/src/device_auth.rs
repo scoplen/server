@@ -209,6 +209,8 @@ pub(crate) fn router(
         crate::operator_auth::router(trusted_origin.clone(), backend.clone(), kms.clone());
     let invitation_router =
         crate::operator_invitation::router(trusted_origin.clone(), backend.clone(), kms.clone());
+    let logout_router =
+        crate::operator_logout::router(trusted_origin.clone(), backend.clone(), kms.clone());
     let state = Arc::new(AuthState { trusted_origin, backend, kms });
     Router::new()
         .route("/api/v1/auth/challenge", post(challenge))
@@ -219,6 +221,7 @@ pub(crate) fn router(
         .with_state(state)
         .merge(operator_router)
         .merge(invitation_router)
+        .merge(logout_router)
 }
 
 #[allow(clippy::too_many_lines, clippy::manual_let_else)]

@@ -397,3 +397,263 @@ test("authentication denial clears access and malformed problem details stay unc
     failure("login", true),
   );
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+test("sign out omits cookies, binds a fresh proof and clears only confirmed tab credentials", async () => {
+  const paths: string[] = [];
+  let loginJwk: unknown;
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    paths.push(new URL(url).pathname);
+    if (url.endsWith("login/options")) return response(loginOptions);
+    const headers = new Headers(init.headers);
+    const [head, payload] = headers.get("DPoP")!.split(".");
+    const jwk = JSON.parse(new TextDecoder().decode(bytes(head, 1, 1024))).jwk;
+    if (url.endsWith("login/finish")) {
+      loginJwk = jwk;
+      return response(token);
+    }
+    assert.ok(url.endsWith("/auth/operator/logout"));
+    assert.equal(init.credentials, "omit");
+    assert.equal(init.body, "{}");
+    assert.equal(headers.get("Authorization"), "DPoP signed-access");
+    assert.deepEqual(jwk, loginJwk);
+    const proof = JSON.parse(new TextDecoder().decode(bytes(payload, 1, 2048)));
+    assert.equal(proof.htm, "POST");
+    assert.equal(proof.htu, origin + "/api/v1/auth/operator/logout");
+    assert.equal(
+      proof.ath,
+      encoded(
+        await crypto.subtle.digest(
+          "SHA-256",
+          new TextEncoder().encode(token.access_token),
+        ),
+      ),
+    );
+    return response({ revoked: true });
+  });
+  const client = new OperatorClient(origin);
+  await client.signIn();
+  await client.signOut();
+  assert.equal(client.logoutState, "idle");
+  await assert.rejects(client.invite(), failure("invitation", false));
+  assert.equal(paths.length, 3);
+});
+
+test("unknown, lost and malformed logout outcomes retain credentials for explicit fresh-proof retry only", async () => {
+  for (const rejected of [
+    () =>
+      response(
+        {
+          status: 503,
+          code: "auth.commit_outcome_unknown",
+          changed: true,
+          retryable: true,
+        },
+        503,
+      ),
+    () => {
+      throw new TypeError("response lost");
+    },
+    () => response({ revoked: false }),
+    () => response({ revoked: true, id: "unexpected" }),
+    () =>
+      new Response('{"revoked":true,"revoked":true}', {
+        headers: { "Content-Type": "application/json" },
+      }),
+    () =>
+      new Response(" ".repeat(242) + '{"revoked":true}', {
+        headers: { "Content-Type": "application/json" },
+      }),
+    () =>
+      response(
+        {
+          status: 503,
+          code: "auth.commit_outcome_unknown",
+          changed: true,
+          retryable: false,
+        },
+        503,
+      ),
+  ]) {
+    const attempts: { proof: string; token: string; key: unknown }[] = [];
+    let first = true;
+    mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+      if (url.endsWith("login/options")) return response(loginOptions);
+      if (url.endsWith("login/finish")) return response(token);
+      assert.ok(url.endsWith("/logout"));
+      assert.equal(init.credentials, "omit");
+      const headers = new Headers(init.headers);
+      const proof = headers.get("DPoP")!;
+      attempts.push({
+        proof,
+        token: headers.get("Authorization")!,
+        key: JSON.parse(
+          new TextDecoder().decode(bytes(proof.split(".")[0], 1, 1024)),
+        ).jwk,
+      });
+      if (first) {
+        first = false;
+        return rejected();
+      }
+      return response({ revoked: true });
+    });
+    const client = new OperatorClient(origin);
+    await client.signIn();
+    await assert.rejects(client.signOut(), failure("logout", true));
+    assert.equal(client.logoutState, "uncertain");
+    await assert.rejects(client.invite(), failure("invitation", false));
+    await assert.rejects(client.signIn(), failure("login", false));
+    assert.equal(attempts.length, 1);
+    await client.signOut();
+    assert.equal(attempts.length, 2);
+    assert.notEqual(attempts[0].proof, attempts[1].proof);
+    assert.equal(attempts[0].token, attempts[1].token);
+    assert.deepEqual(attempts[0].key, attempts[1].key);
+  }
+});
+
+test("known logout rollback and authentication denial never claim success or discard retry credentials", async () => {
+  for (const [status, code, retryable] of [
+    [503, "auth.storage_unavailable", true],
+    [401, "auth.authentication_required", false],
+    [400, "auth.invalid_dpop_proof", false],
+    [429, "auth.rate_limited", true],
+  ] as const) {
+    let count = 0;
+    mock.method(globalThis, "fetch", async (url: string) => {
+      if (url.endsWith("login/options")) return response(loginOptions);
+      if (url.endsWith("login/finish")) return response(token);
+      assert.ok(url.endsWith("/logout"));
+      count++;
+      return count === 1
+        ? response({ status, code, changed: false, retryable }, status)
+        : response({ revoked: true });
+    });
+    const client = new OperatorClient(origin);
+    await client.signIn();
+    await assert.rejects(client.signOut(), failure("logout", false));
+    assert.equal(client.logoutState, "failed");
+    await client.signOut();
+    assert.equal(count, 2);
+  }
+});
+
+test("expiry ends an uncertain logout retry without refresh or cookie fallback", async () => {
+  let now = 1_800_000_000_000;
+  mock.method(Date, "now", () => now);
+  let calls = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    calls++;
+    if (url.endsWith("login/options")) return response(loginOptions);
+    if (url.endsWith("login/finish")) return response(token);
+    assert.ok(url.endsWith("/logout"));
+    throw new TypeError("response lost");
+  });
+  const client = new OperatorClient(origin);
+  await client.signIn();
+  await assert.rejects(client.signOut(), failure("logout", true));
+  now += 901_000;
+  assert.equal(client.logoutState, "expired");
+  await assert.rejects(client.signOut(), failure("logout", false));
+  assert.equal(calls, 3);
+  client.lock();
+  assert.equal(client.logoutState, "idle");
+});
+
+test("local Lock fences a late login response and permits a later independent sign-in", async () => {
+  const waiting = deferred<void>();
+  const late = deferred<Response>();
+  let finishes = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("login/options")) return response(loginOptions);
+    if (url.endsWith("login/finish") && finishes++ === 0) {
+      waiting.resolve();
+      return late.promise;
+    }
+    if (url.endsWith("login/finish")) return response(token);
+    return response(invitation, 201);
+  });
+  const client = new OperatorClient(origin);
+  const first = client.signIn();
+  await waiting.promise;
+  client.lock();
+  const later = client.signIn();
+  late.resolve(response(token));
+  await assert.rejects(first, failure("login", false));
+  await later;
+  assert.deepEqual(await client.invite(), invitation);
+});
+
+test("logout waits for a pending refresh and protected operation, then fences queued older actions", async () => {
+  const waiting = deferred<void>();
+  const refreshed = deferred<Response>();
+  const paths: string[] = [];
+  mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const path = new URL(url).pathname;
+    paths.push(path);
+    if (url.endsWith("login/options")) return response(loginOptions);
+    if (url.endsWith("login/finish"))
+      return response({ ...token, expires_in: 10 });
+    if (url.endsWith("/refresh")) {
+      waiting.resolve();
+      return refreshed.promise;
+    }
+    if (url.endsWith("/logout")) {
+      assert.equal(
+        new Headers(init.headers).get("Authorization"),
+        "DPoP rotated-access",
+      );
+      return response({ revoked: true });
+    }
+    return response(invitation, 201);
+  });
+  const client = new OperatorClient(origin);
+  await client.signIn();
+  const invite = client.invite();
+  await waiting.promise;
+  const logout = client.signOut();
+  const queued = client.invite();
+  assert.equal(paths.length, 3);
+  refreshed.resolve(response({ ...token, access_token: "rotated-access" }));
+  await invite;
+  await logout;
+  await assert.rejects(queued, failure("invitation", false));
+  assert.deepEqual(paths.slice(2), [
+    "/api/v1/auth/refresh",
+    "/api/v1/admin/personal-invitations",
+    "/api/v1/auth/operator/logout",
+  ]);
+});
+
+test("local Lock during refresh cannot invalidate a later queued independent sign-in", async () => {
+  const waiting = deferred<void>();
+  const refreshed = deferred<Response>();
+  let logins = 0;
+  mock.method(globalThis, "fetch", async (url: string) => {
+    if (url.endsWith("login/options")) return response(loginOptions);
+    if (url.endsWith("login/finish"))
+      return response({ ...token, expires_in: ++logins === 1 ? 10 : 900 });
+    if (url.endsWith("/refresh")) {
+      waiting.resolve();
+      return refreshed.promise;
+    }
+    return response(invitation, 201);
+  });
+  const client = new OperatorClient(origin);
+  await client.signIn();
+  const old = client.invite();
+  await waiting.promise;
+  client.lock();
+  const later = client.signIn();
+  refreshed.resolve(response(token));
+  await assert.rejects(old, failure("refresh", false));
+  await later;
+  assert.deepEqual(await client.invite(), invitation);
+});

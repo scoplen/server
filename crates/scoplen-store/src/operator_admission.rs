@@ -31,6 +31,7 @@ pub enum OperatorAuthEndpoint {
     LoginOptions = 3,
     LoginFinish = 4,
     Refresh = 5,
+    Logout = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,7 +40,7 @@ pub enum OperatorAdmissionDecision {
     RateLimited(u64),
 }
 
-/// Operator buckets are selected only after assertion or stored refresh-binding verification.
+/// Operator buckets are selected only after assertion or current credential/family verification.
 /// A submitted handle or operator id is never sufficient evidence for that variant.
 #[derive(Clone, Copy)]
 pub enum OperatorPrivateBucket<'a> {
@@ -59,7 +60,7 @@ impl OperatorPrivateBucket<'_> {
         self,
         endpoint: OperatorAuthEndpoint,
     ) -> Result<(i64, Vec<u8>), OperatorAdmissionError> {
-        use OperatorAuthEndpoint::{LoginFinish, Refresh, SetupFinish, SetupOptions};
+        use OperatorAuthEndpoint::{LoginFinish, Logout, Refresh, SetupFinish, SetupOptions};
         match self {
             Self::SetupDigest(digest) if matches!(endpoint, SetupOptions | SetupFinish) => {
                 Ok((2, digest.to_vec()))
@@ -68,7 +69,8 @@ impl OperatorPrivateBucket<'_> {
                 Ok((3, id.as_bytes().to_vec()))
             }
             Self::AuthenticatedOperator(id)
-                if matches!(endpoint, LoginFinish | Refresh) && id.get_version_num() == 7 =>
+                if matches!(endpoint, LoginFinish | Refresh | Logout)
+                    && id.get_version_num() == 7 =>
             {
                 Ok((4, id.as_bytes().to_vec()))
             }
@@ -276,9 +278,7 @@ macro_rules! admission_store {
                 if reason == OperatorAuthFailureReason::AuthenticationDenied {
                     $outcome(&mut tx,endpoint,source,private,false).await?;
                 } else if let Some(private) = private { private.parts(endpoint)?; }
-                let mut event = b"spl-operator-auth-failure-v1".to_vec();
-                event.extend_from_slice(&[endpoint as u8, reason as u8]);
-                event.extend_from_slice(&now.to_be_bytes());
+                let event = failure_event(endpoint, reason, now);
                 $append(&mut tx,&event,now).await?;
                 tx.commit().await?;
                 Ok(())
@@ -345,6 +345,17 @@ macro_rules! admission_store {
             Ok(())
         }
     }
+}
+
+pub(crate) fn failure_event(
+    endpoint: OperatorAuthEndpoint,
+    reason: OperatorAuthFailureReason,
+    now: i64,
+) -> Vec<u8> {
+    let mut event = b"spl-operator-auth-failure-v1".to_vec();
+    event.extend_from_slice(&[endpoint as u8, reason as u8]);
+    event.extend_from_slice(&now.to_be_bytes());
+    event
 }
 
 async fn sqlite_begin(

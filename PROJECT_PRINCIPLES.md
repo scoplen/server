@@ -56,9 +56,18 @@ self-hosted server, host agent, administration CLI, and web console.
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only
   Operator refresh enforce exact Origin, durable DPoP/admission and non-disclosure after unknown
-  commits. Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
+  commits. Current-family Operator logout is implemented at the storage boundary on both
+  databases, with current credential/key validation, post-wait expiry checks, atomic revocation
+  audit and fresh-proof terminal confirmation. It preserves other families and unexpired
+  digests. The public HTTP route and console use the same current-family boundary.
+  Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
   independent database quotas, and transaction-local session authorization; one-time URLs are
   disclosed only after an audited confirmed commit.
+  Current-family Operator logout uses the independent access token and a fresh token-bound
+  proof, ignores refresh cookies and serializes revocation with its audit. Confirmed terminal
+  retry cannot authorize other operations. Uncertain logout outcomes preserve the original
+  browser credentials for explicit retry before expiry; local Lock makes no server-revocation
+  claim. Same-tab session actions are serialized and late responses are fenced after Lock.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
@@ -75,9 +84,9 @@ self-hosted server, host agent, administration CLI, and web console.
   pairing HTTP operations now enforce current-device DPoP, exact scope, verified role admission,
   bounded shared codecs and noncacheable responses. The public link landing requests no password
   and runs no script. Remaining device lifecycle mutations remain open.
-  The Personal React console connects setup, fresh passkey sign-in and invitation
-  requests through the generated public API contract. Its proof key and access token stay in
-  memory; reloads require a new login. Manifest-validated static assets fail independently of
+  The Personal React console connects setup, fresh passkey sign-in, invitation
+  requests and explicit server sign out through the generated public API contract. Its proof key
+  and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of
   API readiness. Physical passkey/browser interoperability, remaining console administration,
   complete identity and policy workflows, Shared/organization membership-aware purging,
   certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap. The worker

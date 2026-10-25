@@ -17,8 +17,8 @@ use webauthn_rs_core::{
     WebauthnCore,
     proto::{
         AttestationConveyancePreference, AttestationFormat, AuthenticationState, COSEAlgorithm,
-        Credential, PublicKeyCredential, RegisterPublicKeyCredential, RegistrationState,
-        UserVerificationPolicy,
+        COSEKeyType, Credential, ECDSACurve, PublicKeyCredential, RegisterPublicKeyCredential,
+        RegistrationState, UserVerificationPolicy,
     },
 };
 
@@ -124,6 +124,32 @@ impl OperatorPasskeyVerifier {
     #[must_use]
     pub fn rp_id(&self) -> &str {
         &self.rp_id
+    }
+
+    /// Validate the bounded stored credential and its original RP/origin/id binding.
+    /// This returns no authentication or authorization evidence.
+    ///
+    /// # Errors
+    /// Rejects corrupt state, a different credential id, or another deployment's binding.
+    pub fn validate_stored_credential(
+        &self,
+        bytes: &[u8],
+        credential_id: &[u8],
+    ) -> Result<(), PasskeyError> {
+        let credential: Credential = self.restore("credential", bytes)?;
+        if !(1..=1_023).contains(&credential_id.len())
+            || credential.cred_id.as_ref() != credential_id
+            || credential.cred.type_ != COSEAlgorithm::ES256
+            || !matches!(&credential.cred.key, COSEKeyType::EC_EC2(key)
+                if key.curve == ECDSACurve::SECP256R1 && key.x.len() == 32 && key.y.len() == 32)
+            || without_library_tracing(|| credential.cred.get_openssl_pkey()).is_err()
+            || !credential.user_verified
+            || (credential.backup_state && !credential.backup_eligible)
+            || credential.attestation_format != AttestationFormat::None
+        {
+            return Err(PasskeyError::State);
+        }
+        Ok(())
     }
 
     /// # Errors

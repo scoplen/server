@@ -15,10 +15,11 @@ import {
   creationOptions,
   requestOptions,
   invitationResponse,
+  logoutResponse,
 } from "./wire.ts";
 
 export type Operation =
-  "options" | "setup" | "login" | "refresh" | "invitation";
+  "options" | "setup" | "login" | "refresh" | "invitation" | "logout";
 export class ConsoleFailure extends Error {
   readonly operation: Operation;
   readonly code: string;
@@ -123,6 +124,11 @@ export class OperatorClient {
   #refreshing?: Promise<void>;
   #setupToken?: string;
   #setupRecovery: "ready" | "login-required" | "login-failed" = "ready";
+  #generation = 0;
+  #activeGeneration = 0;
+  #pending: Promise<void> = Promise.resolve();
+  #logoutAttempted = false;
+  #logoutState: "idle" | "pending" | "failed" | "uncertain" = "idle";
   readonly origin: string;
 
   constructor(origin: string, setupToken?: string) {
@@ -135,10 +141,47 @@ export class OperatorClient {
   get canReturnToSetup(): boolean {
     return this.canSetup && this.#setupRecovery !== "login-required";
   }
+  get logoutState(): "idle" | "pending" | "failed" | "uncertain" | "expired" {
+    if (
+      this.#logoutState !== "pending" &&
+      this.#logoutAttempted &&
+      Date.now() >= this.#expiresAt
+    )
+      return "expired";
+    return this.#logoutState;
+  }
+  get logoutExpiresAt(): number {
+    return this.#expiresAt;
+  }
   lock(): void {
+    this.#generation++;
     this.#token = undefined;
     this.#key = undefined;
     this.#expiresAt = 0;
+    this.#logoutAttempted = false;
+    this.#logoutState = "idle";
+  }
+
+  #assertCurrent(
+    operation: Operation,
+    generation = this.#activeGeneration,
+  ): void {
+    if (generation !== this.#generation)
+      throw new ConsoleFailure(operation, "session_changed");
+  }
+
+  #serialize<T>(operation: Operation, run: () => Promise<T>): Promise<T> {
+    const generation = this.#generation;
+    const result = this.#pending.then(() => {
+      this.#assertCurrent(operation, generation);
+      this.#activeGeneration = generation;
+      return run();
+    });
+    this.#pending = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   async #request(
@@ -149,10 +192,15 @@ export class OperatorClient {
     limit: number,
     token?: string,
   ): Promise<unknown> {
+    const generation = this.#activeGeneration;
+    this.#assertCurrent(operation, generation);
     if (new URL(this.origin).protocol !== "https:")
       throw new ConsoleFailure(operation, "https_required");
-    this.#key ??= await BrowserProofKey.create();
-    const proof = await this.#key.proof(this.origin, path, token);
+    const key = this.#key ?? (await BrowserProofKey.create());
+    this.#assertCurrent(operation, generation);
+    this.#key = key;
+    const proof = await key.proof(this.origin, path, token);
+    this.#assertCurrent(operation, generation);
     let result: Response;
     try {
       result = await fetch(this.origin + path, {
@@ -164,19 +212,21 @@ export class OperatorClient {
           ...(token ? { Authorization: `DPoP ${token}` } : {}),
         },
         body: JSON.stringify(body),
-        credentials: "same-origin",
+        credentials: operation === "logout" ? "omit" : "same-origin",
         redirect: "error",
         cache: "no-store",
         referrerPolicy: "no-referrer",
         signal: AbortSignal.timeout(30_000),
       });
     } catch {
+      this.#assertCurrent(operation, generation);
       throw new ConsoleFailure(
         operation,
         "response_lost",
         operation !== "options",
       );
     }
+    this.#assertCurrent(operation, generation);
     const expectedType =
       result.status === success
         ? "application/json"
@@ -191,12 +241,14 @@ export class OperatorClient {
         result.status === success ? limit : 4_096,
       );
     } catch {
+      this.#assertCurrent(operation, generation);
       throw new ConsoleFailure(
         operation,
         "invalid_response",
         operation !== "options",
       );
     }
+    this.#assertCurrent(operation, generation);
     if (result.status !== success) {
       let problem: Record<string, unknown>;
       try {
@@ -219,6 +271,38 @@ export class OperatorClient {
           "invalid_response",
           operation !== "options",
         );
+      if (operation === "logout") {
+        const denied =
+          [400, 401, 403, 413, 415].includes(result.status) &&
+          problem.changed === false &&
+          problem.retryable === false &&
+          ((result.status === 400 &&
+            ["auth.invalid_request", "auth.invalid_dpop_proof"].includes(
+              problem.code,
+            )) ||
+            (result.status === 401 &&
+              problem.code === "auth.authentication_required") ||
+            (result.status === 403 && problem.code === "policy.denied") ||
+            ([413, 415].includes(result.status) &&
+              problem.code === "auth.invalid_request"));
+        const rate =
+          result.status === 429 &&
+          problem.code === "auth.rate_limited" &&
+          problem.changed === false &&
+          problem.retryable === true;
+        const storage =
+          result.status === 503 &&
+          problem.code === "auth.storage_unavailable" &&
+          problem.changed === false &&
+          problem.retryable === true;
+        const unknown =
+          result.status === 503 &&
+          problem.code === "auth.commit_outcome_unknown" &&
+          problem.changed === true &&
+          problem.retryable === true;
+        if (!denied && !rate && !storage && !unknown)
+          throw new ConsoleFailure("logout", "invalid_response", true);
+      }
       const delay = Number(result.headers.get("Retry-After"));
       throw new ConsoleFailure(
         operation,
@@ -231,6 +315,10 @@ export class OperatorClient {
   }
 
   async register(): Promise<void> {
+    return this.#serialize("setup", () => this.#register());
+  }
+
+  async #register(): Promise<void> {
     if (!this.#setupToken)
       throw new ConsoleFailure("setup", "setup_link_required");
     if (!this.canReturnToSetup)
@@ -306,6 +394,12 @@ export class OperatorClient {
   }
 
   async signIn(): Promise<void> {
+    return this.#serialize("login", () => this.#login());
+  }
+
+  async #login(): Promise<void> {
+    if (this.#logoutAttempted)
+      throw new ConsoleFailure("login", "logout_unresolved");
     try {
       await this.#signIn();
     } catch (error) {
@@ -370,6 +464,7 @@ export class OperatorClient {
   }
 
   #accept(value: unknown, operation: "login" | "refresh"): void {
+    this.#assertCurrent(operation);
     let session: BrowserAuthTokenResponse;
     try {
       session = sessionResponse(value);
@@ -380,12 +475,13 @@ export class OperatorClient {
     this.#expiresAt = Date.now() + Math.min(session.expires_in, 86_400) * 1_000;
   }
 
-  async #accessToken(): Promise<string> {
-    if (!this.#token)
-      throw new ConsoleFailure("invitation", "sign_in_required");
+  async #accessToken(operation: Operation = "invitation"): Promise<string> {
+    this.#assertCurrent(operation);
+    if (!this.#token) throw new ConsoleFailure(operation, "sign_in_required");
     if (this.#expiresAt - Date.now() <= 30_000) {
       this.#refreshing ??= navigator.locks
         .request<void>("scoplen-operator-refresh", async () => {
+          this.#assertCurrent(operation);
           try {
             this.#accept(
               await this.#request(
@@ -398,7 +494,7 @@ export class OperatorClient {
               "refresh",
             );
           } catch (error) {
-            this.lock();
+            if (this.#activeGeneration === this.#generation) this.lock();
             throw error;
           }
         })
@@ -407,12 +503,17 @@ export class OperatorClient {
         });
       await this.#refreshing;
     }
-    if (!this.#token)
-      throw new ConsoleFailure("invitation", "sign_in_required");
+    if (!this.#token) throw new ConsoleFailure(operation, "sign_in_required");
     return this.#token;
   }
 
   async invite(): Promise<PersonalInvitationResponse> {
+    return this.#serialize("invitation", () => this.#invite());
+  }
+
+  async #invite(): Promise<PersonalInvitationResponse> {
+    if (this.#logoutAttempted)
+      throw new ConsoleFailure("invitation", "logout_unresolved");
     const token = await this.#accessToken();
     let result: unknown;
     try {
@@ -439,5 +540,41 @@ export class OperatorClient {
     } catch {
       throw new ConsoleFailure("invitation", "invalid_response", true);
     }
+  }
+
+  async signOut(): Promise<void> {
+    return this.#serialize("logout", async () => {
+      const token = this.#logoutAttempted
+        ? this.#token
+        : await this.#accessToken("logout");
+      if (!token || Date.now() >= this.#expiresAt)
+        throw new ConsoleFailure("logout", "logout_expired");
+      this.#logoutAttempted = true;
+      this.#logoutState = "pending";
+      try {
+        const value = await this.#request(
+          "logout",
+          "/api/v1/auth/operator/logout",
+          {},
+          200,
+          256,
+          token,
+        );
+        try {
+          logoutResponse(value);
+        } catch {
+          throw new ConsoleFailure("logout", "invalid_response", true);
+        }
+        this.#assertCurrent("logout");
+        this.lock();
+      } catch (error) {
+        if (this.#activeGeneration === this.#generation)
+          this.#logoutState =
+            error instanceof ConsoleFailure && error.uncertain
+              ? "uncertain"
+              : "failed";
+        throw error;
+      }
+    });
   }
 }

@@ -7,6 +7,9 @@ type Authenticator = webauthn_authenticator_rs::WebauthnAuthenticator<passkey::R
 #[path = "operator_personal_flow_tests.rs"]
 mod personal_flow;
 
+#[path = "operator_logout_http_tests.rs"]
+mod logout;
+
 impl Fixture {
     async fn enroll(&self, client: &P256SigningKey) -> (Authenticator, Uuid) {
         let token = self.token().await;

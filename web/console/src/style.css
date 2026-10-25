@@ -112,8 +112,12 @@ p {
   color: var(--muted-foreground);
   font-size: 13px;
 }
-.console-header button {
+.session-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .workspace {
   display: grid;
