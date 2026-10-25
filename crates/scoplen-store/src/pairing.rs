@@ -40,6 +40,15 @@ const RETENTION_MS: i64 = 86_400_000;
 const LIFETIME_MS: i64 = 300_000;
 const MAX_PAYLOAD_BYTES: i64 = 268_435_456;
 
+/// Committed results from one bounded pairing maintenance transaction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PairingCleanupReport {
+    /// Live sessions expired and their relay payloads erased, at most 256.
+    pub expired_sessions: u64,
+    /// Sessions removed after their fixed terminal retention, at most 256.
+    pub removed_sessions: u64,
+}
+
 /// A current old-device identity or the separately delivered new-device capability.
 #[derive(Clone, Copy)]
 pub enum PairingActor<'a> {
@@ -386,37 +395,53 @@ macro_rules! pairing_store {
                 })
             }
 
-            async fn cleanup(store: &$store) -> Result<(), PairingStoreError> {
+            async fn cleanup(store: &$store) -> Result<PairingCleanupReport, PairingStoreError> {
                 let mut tx = start(store, None).await?;
                 let result = async {
                     let now = now_ms()?;
+                    let mut report = PairingCleanupReport::default();
                     let ids: Vec<Vec<u8>> = sqlx::query_scalar(&sql("SELECT pairing_id FROM pairing_sessions WHERE state IN ('waiting','exchanging','ready') AND expires_at_ms<=? ORDER BY expires_at_ms LIMIT 256"))
                         .bind(now).fetch_all(&mut *tx).await?;
-                    let mut changed = !ids.is_empty();
                     for id in ids {
                         sqlx::query(&sql("UPDATE pairing_sessions SET state='expired', payload_bytes=0 WHERE pairing_id=?"))
                             .bind(&id).execute(&mut *tx).await?;
                         sqlx::query(&sql("UPDATE pairing_slots SET payload=NULL WHERE pairing_id=?"))
                             .bind(&id).execute(&mut *tx).await?;
                         event(&mut tx, 6, Uuid::from_slice(&id).map_err(|_| PairingStoreError::Database)?, now).await?;
+                        report.expired_sessions += 1;
                     }
                     let ids: Vec<Vec<u8>> = sqlx::query_scalar(&sql("SELECT pairing_id FROM pairing_sessions WHERE retain_until_ms<=? ORDER BY retain_until_ms LIMIT 256"))
                         .bind(now).fetch_all(&mut *tx).await?;
-                    changed |= !ids.is_empty();
                     for id in ids {
                         sqlx::query(&sql("DELETE FROM pairing_sessions WHERE pairing_id=?"))
                             .bind(&id).execute(&mut *tx).await?;
                         event(&mut tx, 7, Uuid::from_slice(&id).map_err(|_| PairingStoreError::Database)?, now).await?;
+                        report.removed_sessions += 1;
                     }
-                    Ok(changed)
+                    Ok(report)
                 }.await;
                 match result {
-                    Ok(false) => tx.rollback().await.map_err(|_| PairingStoreError::Database),
-                    other => finish(tx, other.map(|_| ()), true).await,
+                    Ok(report) if report == PairingCleanupReport::default() => {
+                        tx.rollback().await.map_err(|_| PairingStoreError::Database)?;
+                        Ok(report)
+                    }
+                    other => finish(tx, other, true).await,
                 }
             }
 
             impl $store {
+                /// Expire at most 256 sessions and remove at most 256 retained sessions.
+                ///
+                /// Trusted time is sampled after transaction locks. Each transition and its
+                /// deployment audit commit together; unexpired sessions and retained receipts remain.
+                ///
+                /// # Errors
+                /// Returns a storage, audit, clock, or unconfirmed-commit failure without
+                /// reporting any unconfirmed counts.
+                pub async fn cleanup_pairings(&self) -> Result<PairingCleanupReport, PairingStoreError> {
+                    cleanup(self).await
+                }
+
                 /// Create a five-minute session and return its one-time responder capability.
                 ///
                 /// # Errors

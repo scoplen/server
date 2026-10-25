@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added bounded worker maintenance for pairing sessions on SQLite and PostgreSQL, independently
+  of later pairing requests. Each heartbeat expires at most 256 sessions and removes at most
+  256 retention-expired sessions, with atomic payload erasure and deployment audit. Unexpired
+  sessions and retained receipts are preserved, and shutdown cancels an active pass.
+
 - Fixed disposable Personal fixture preparation on Windows to write ordinary canonical
   local-drive paths accepted by production admission. Bootstrap and restart checks use the
   same normalization and retain exact owned-path checks; Windows ACL and alias restrictions

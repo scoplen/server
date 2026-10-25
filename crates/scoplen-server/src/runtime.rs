@@ -19,6 +19,7 @@ use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_audit::{checkpoint_payload, deployment_checkpoint_payload};
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
+use scoplen_store::pairing::{PairingCleanupReport, PairingStoreError};
 use scoplen_store::sync::MAX_PAGE_SIZE;
 use scoplen_store::{
     AuditChainHead, AuditCheckpoint, AuditStoreError, DeploymentAuditChainHead,
@@ -653,6 +654,9 @@ const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
 pub(crate) trait WorkerStoreBackend: Send + Sync {
+    fn cleanup_pairings(
+        &self,
+    ) -> impl Future<Output = Result<PairingCleanupReport, PairingStoreError>> + Send;
     fn requeue_expired_jobs(
         &self,
         now_ms: i64,
@@ -730,6 +734,12 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
 macro_rules! impl_worker_store_backend {
     ($store:ty) => {
         impl WorkerStoreBackend for $store {
+            fn cleanup_pairings(
+                &self,
+            ) -> impl Future<Output = Result<PairingCleanupReport, PairingStoreError>> + Send {
+                <$store>::cleanup_pairings(self)
+            }
+
             fn requeue_expired_jobs(
                 &self,
                 now_ms: i64,
@@ -859,6 +869,8 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
     let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
+    // A slow sweep must not replay a backlog of maintenance heartbeats.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = interval.tick() => {},
@@ -869,6 +881,20 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 info!(role = "worker", requeued_expired_jobs = requeued, "worker heartbeat");
             }
             Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
+        }
+        let pairing_cleanup = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.cleanup_pairings() => result,
+        };
+        match pairing_cleanup {
+            Ok(report) => info!(
+                role = "worker",
+                expired_pairing_sessions = report.expired_sessions,
+                removed_pairing_sessions = report.removed_sessions,
+                "pairing maintenance pass"
+            ),
+            Err(error) => error!(%error, role = "worker", "pairing maintenance pass failed"),
         }
         let retention = tokio::select! {
             biased;
@@ -2901,6 +2927,131 @@ mod tests {
 
         store.pool().close().await;
         drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    macro_rules! assert_worker_pairing_maintenance {
+        ($store:expr, $directory:expr, $postgres:literal) => {{
+            let store = Arc::new($store);
+            let sql = |source: &str| {
+                if !$postgres { return source.to_owned(); }
+                let mut n = 0;
+                source.chars().map(|c| if c == '?' {n += 1; format!("${n}")}else{c.to_string()}).collect::<String>()
+            };
+            let now = worker_now_ms().expect("clock");
+            let expired = uuid::Uuid::now_v7();
+            let removed = uuid::Uuid::now_v7();
+            for (id,state,expires,retained,bytes) in [
+                (expired,"waiting",now-1,now+86_400_000,1_i64),
+                (removed,"cancelled",now-300_000,now-1,0_i64),
+            ] {
+                sqlx::query(&sql("INSERT INTO pairing_sessions (pairing_id,trusted_origin,responder_device_id,capability_digest,created_at_ms,expires_at_ms,retain_until_ms,state,slot_count,payload_bytes) VALUES (?,?,?,?,?,?,?,?,1,?)"))
+                    .bind(id.as_bytes().as_slice()).bind("https://worker-pairing.example.test")
+                    .bind(uuid::Uuid::now_v7().as_bytes().as_slice()).bind([7_u8;32].as_slice())
+                    .bind(expires-300_000).bind(expires).bind(retained).bind(state).bind(bytes)
+                    .execute(store.pool()).await.expect("seed worker session");
+                sqlx::query(&sql("INSERT INTO pairing_slots (pairing_id,slot_index,payload,payload_digest) VALUES (?,0,?,?)"))
+                    .bind(id.as_bytes().as_slice()).bind((bytes==1).then_some(vec![9_u8]))
+                    .bind([8_u8;32].as_slice()).execute(store.pool()).await.expect("seed worker slot");
+            }
+            let signer_path = $directory.join("audit-signing.key");
+            fs::write(&signer_path,"11".repeat(32)).expect("write test signer");
+            let signer=LocalAuditSigner::load(&signer_path).expect("test audit signer");
+            let (shutdown,receiver)=watch::channel(false);
+            let worker=tokio::spawn(run_worker_role(store.clone(),Arc::new(signer),receiver));
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let states:Vec<String>=sqlx::query_scalar("SELECT state FROM pairing_sessions").fetch_all(store.pool()).await.expect("observe worker maintenance");
+                    if states.len() == 1 && states[0] == "expired" {break;}
+                    assert!(!worker.is_finished(),"worker remains healthy");
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("worker cleans sessions without pairing requests");
+            shutdown.send(true).expect("stop worker");
+            tokio::time::timeout(Duration::from_secs(2),worker).await.expect("bounded worker shutdown").expect("worker task").expect("normal shutdown");
+            let payload:Option<Vec<u8>>=sqlx::query_scalar(&sql("SELECT payload FROM pairing_slots WHERE pairing_id=?"))
+                .bind(expired.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("expired slot");
+            assert_eq!(payload,None);
+            let removed_slots:i64=sqlx::query_scalar(&sql("SELECT COUNT(*) FROM pairing_slots WHERE pairing_id=?"))
+                .bind(removed.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("removed slots");
+            assert_eq!(removed_slots,0);
+            assert_eq!(store.deployment_audit_head().await.expect("audit head").expect("maintenance events").sequence,2);
+            store.verify_deployment_audit_chain().await.expect("valid maintenance audit chain");
+            store.pool().close().await;
+        }};
+    }
+
+    #[tokio::test]
+    async fn worker_pairing_maintenance_erases_expired_sessions_without_request_traffic() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-pairing-worker-{}", uuid::Uuid::new_v4()));
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("worker SQLite store");
+        assert_worker_pairing_maintenance!(store, data_dir, false);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_pairing_maintenance_erases_expired_sessions_without_request_traffic() {
+        let (url, fixture_pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(url.as_str()).await.expect("worker PostgreSQL store");
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-pairing-worker-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data_dir).expect("test signer directory");
+        assert_worker_pairing_maintenance!(store, data_dir, true);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_shutdown_interrupts_blocked_pairing_maintenance() {
+        let (mut url, fixture_pool, schema) = postgres_fixture().await;
+        let marker = format!("pairing_shutdown_{}", uuid::Uuid::new_v4().simple());
+        url.query_pairs_mut().append_pair("application_name", &marker);
+        let store =
+            Arc::new(PostgresStore::connect(url.as_str()).await.expect("worker PostgreSQL store"));
+        let mut blocker = store.pool().begin().await.expect("maintenance blocker");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("blocker pid");
+        sqlx::query("SELECT pg_advisory_xact_lock(1935897196,114)")
+            .execute(&mut *blocker)
+            .await
+            .expect("hold pairing serialization lock");
+        let data_dir = std::env::temp_dir()
+            .join(format!("scoplen-pairing-worker-shutdown-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&data_dir).expect("test signer directory");
+        let signer_path = data_dir.join("audit-signing.key");
+        fs::write(&signer_path, "11".repeat(32)).expect("write test signer");
+        let signer = LocalAuditSigner::load(&signer_path).expect("test signer");
+        let (shutdown, receiver) = watch::channel(false);
+        let worker = tokio::spawn(run_worker_role(store.clone(), Arc::new(signer), receiver));
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                let waiting:bool=sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=$2 AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)))")
+                    .bind(blocker_pid).bind(&marker).fetch_one(store.pool()).await.expect("observe this worker's pairing lock waiter");
+                if waiting {break;}
+                assert!(!worker.is_finished(),"worker is waiting for maintenance lock");
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("worker reached pairing maintenance");
+        shutdown.send(true).expect("request shutdown");
+        tokio::time::timeout(Duration::from_secs(2), worker)
+            .await
+            .expect("shutdown does not await pairing lock")
+            .expect("worker task")
+            .expect("normal shutdown");
+        blocker.rollback().await.expect("release pairing lock");
+        assert_eq!(
+            store.cleanup_pairings().await.expect("pool usable after cancellation"),
+            PairingCleanupReport::default()
+        );
+        store.pool().close().await;
+        drop(store);
+        cleanup_postgres_fixture(fixture_pool, schema).await;
         remove_test_directory(&data_dir).await;
     }
 
