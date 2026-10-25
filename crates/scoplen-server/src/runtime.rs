@@ -1600,6 +1600,7 @@ mod tests {
     use scoplen_store::RelationalStore;
     use scoplen_store::operator_setup::OperatorSetupError;
     use scoplen_store::sync::{ObjectWrite, TOMBSTONE_PURGE_AFTER_DAYS, VaultKind};
+    use sqlx::Connection;
     use tokio::io::AsyncReadExt;
 
     async fn remove_test_directory(path: &Path) {
@@ -1612,6 +1613,33 @@ mod tests {
                 Err(error) => panic!("remove test directory {}: {error}", path.display()),
             }
         }
+    }
+
+    fn deployment_lease_probe(data_dir: &Path) -> fs::File {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(data_dir.join(crate::deployment_lease::FILE_NAME))
+            .expect("existing fixture lease file")
+    }
+
+    async fn wait_for_deployment_lease_release(data_dir: &Path) -> DeploymentLease {
+        let probe = deployment_lease_probe(data_dir);
+        // Repeating full admission runs synchronous Windows ACL helpers on this test's
+        // single-thread executor, delaying the very cleanup whose lease release we await.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match probe.try_lock() {
+                    Ok(()) => break,
+                    Err(fs::TryLockError::WouldBlock) => sleep(Duration::from_millis(20)).await,
+                    Err(error) => panic!("unexpected lease probe error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("detached startup drains and releases lease");
+        drop(probe);
+        DeploymentLease::try_exclusive(data_dir).expect("offline admission after startup cleanup")
     }
 
     fn run_isolated_shutdown_test(test_name: &str, child_directory_variable: &str) {
@@ -2044,16 +2072,16 @@ mod tests {
         bootstrap(&config).expect("private deployment material");
         let raw = SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("test database");
         let blocker = raw.pool().begin_with("BEGIN IMMEDIATE").await.expect("hold SQLite writer");
+        let probe = deployment_lease_probe(&data_dir);
         let starting_config = config.clone();
         let startup =
             tokio::spawn(async move { prepare_roles(&starting_config, &[Role::Api]).await });
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if matches!(
-                    DeploymentLease::try_exclusive(&data_dir),
-                    Err(ServerError::DeploymentLeaseOccupied)
-                ) {
-                    break;
+                match probe.try_lock() {
+                    Ok(()) => probe.unlock().expect("release idle lease probe"),
+                    Err(fs::TryLockError::WouldBlock) => break,
+                    Err(error) => panic!("unexpected lease probe error: {error}"),
                 }
                 assert!(!startup.is_finished(), "preparation stopped before admission");
                 sleep(Duration::from_millis(20)).await;
@@ -2061,6 +2089,7 @@ mod tests {
         })
         .await
         .expect("preparation acquired lease");
+        drop(probe);
         sleep(Duration::from_millis(100)).await;
         assert!(!startup.is_finished(), "SQLite writer must block operator setup");
         startup.abort();
@@ -2072,19 +2101,7 @@ mod tests {
         blocker.commit().await.expect("release SQLite writer");
         raw.pool().close().await;
         drop(raw);
-        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match DeploymentLease::try_exclusive(&data_dir) {
-                    Ok(lease) => break lease,
-                    Err(ServerError::DeploymentLeaseOccupied) => {
-                        sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("unexpected lease error: {error}"),
-                }
-            }
-        })
-        .await
-        .expect("detached startup drains and releases lease");
+        let exclusive = wait_for_deployment_lease_release(&data_dir).await;
         drop(exclusive);
         remove_test_directory(&data_dir).await;
     }
@@ -2098,6 +2115,10 @@ mod tests {
         bootstrap(&config).expect("private deployment material");
         let store =
             SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("current database");
+        let pending_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(store.pool())
+            .await
+            .expect("latest migration version");
         sqlx::query(
             "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
         )
@@ -2135,19 +2156,21 @@ mod tests {
         blocker.commit().await.expect("release SQLite writer");
         store.pool().close().await;
         drop(store);
-        let exclusive = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match DeploymentLease::try_exclusive(&data_dir) {
-                    Ok(lease) => break lease,
-                    Err(ServerError::DeploymentLeaseOccupied) => {
-                        sleep(Duration::from_millis(20)).await;
-                    }
-                    Err(error) => panic!("unexpected lease error: {error}"),
-                }
-            }
-        })
+        let exclusive = wait_for_deployment_lease_release(&data_dir).await;
+        let mut inspection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.join("scoplen.sqlite")),
+        )
         .await
-        .expect("detached migration and startup cleanup release lease");
+        .expect("inspect database without running migrations");
+        let migration_completed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = ? AND success = TRUE)",
+        )
+        .bind(pending_version)
+        .fetch_one(&mut inspection)
+        .await
+        .expect("inspect detached migration result");
+        assert!(migration_completed, "migration finished before the lease was released");
+        inspection.close().await.expect("close migration inspection");
         drop(exclusive);
         let reopened = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
             .await
