@@ -189,7 +189,8 @@ shared vault memberships per account, and 1,000 accounts per shared vault. The K
 session advertises these limits. Quota rejection returns `413 sync.quota_exceeded` without changing
 state. Member limits cannot exceed 1,000 because epoch publication requires one key wrap per member
 and the current wire codec accepts at most 1,000 wraps. The authenticated K-4 router enforces configured
-per-device write rates in a process-local token bucket and advertises those same values in the
+per-device write rates in durable SQLite/PostgreSQL token buckets shared across API instances
+and restarts, and advertises those same values in the
 session (defaults: 50 requests per second, burst 200). An exhausted bucket returns
 `429 sync.rate_limited` and `Retry-After`. The router also enforces configured envelope bytes,
 batch object count, and encoded batch bytes, advertises those bounds in the session, and returns
@@ -208,7 +209,7 @@ parameters, rejecting longer queries with a CBOR `400 sync.invalid_request` prob
 authorization. A read cursor below the purge horizon or ahead of the vault sequence returns a
 CBOR `410 sync.cursor_expired` problem so the client can restart full reconciliation; an ACK cursor
 ahead of the sequence remains `400 sync.cursor_ahead`. These limits are not session-advertised write
-settings. Other route body limits and multi-instance rate admission remain roadmap work.
+settings. Other route body limits remain roadmap work.
 The SQLite and PostgreSQL stores atomically provision one personal vault per account with an opaque
 ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
 vault and current shared memberships. The authenticated K-4 vault-key route delivers that key only
@@ -512,9 +513,24 @@ Set the three `[sync]` cardinality values in `spl-server.example.toml` or overri
 SQLite's signed count range, and the member limit must be at most 1,000.
 Set `sync.write_requests_per_second` and `sync.write_burst` in the same file, or use
 `SPL_SYNC_WRITE_REQUESTS_PER_SECOND` and `SPL_SYNC_WRITE_BURST`. Both values must be positive. The
-mounted Personal sync router uses the validated write-rate settings. Limits are enforced per
-process until shared admission is implemented; connections share the same buckets on plain HTTP,
-configured-certificate TLS, and ACME TLS listeners.
+mounted Personal sync router uses the validated write-rate settings across independent API
+instances and restarts sharing the database, on plain HTTP, configured-certificate TLS and
+ACME TLS listeners. Each authorized object POST charges one attempt in a short transaction
+before collecting its body; malformed, oversized or conflicting requests do not refund it.
+Reads, ACKs and key operations are independent. Replicas must use the same rate/burst settings.
+After changing configuration, a stored bucket refills under its old policy before the new
+policy can take effect; pending transitions return retryable `503 sync.storage_unavailable`.
+Database time is sampled after the device lock. Integer fractional balances preserve the
+complete positive unsigned range; native clocks have millisecond SQLite and microsecond
+PostgreSQL precision, so a configured rate is a ceiling rather than guaranteed throughput.
+Backward time grants no refill; an exhausted response's `Retry-After` includes a future origin.
+At most 16 indexed retirement candidates are examined per admission. Only fully refilled state
+with another 60 seconds of inactivity can retire, and deletion retains a monotonic clock
+watermark in the same transaction so rollback of database time cannot recreate early refill.
+Admission storage/clock/state errors, including a counter COMMIT with an unconfirmed result,
+return `503 sync.storage_unavailable`, `changed: false`, `retryable: true`: no object write
+has been dispatched. The server does not automatically repeat admission. Upgrade all API
+replicas before relying on durable enforcement; older binaries still have process-local buckets.
 Set `sync.max_envelope_bytes`, `sync.max_batch_objects`, and `sync.max_batch_bytes` in the same file,
 or use `SPL_SYNC_MAX_ENVELOPE_BYTES`, `SPL_SYNC_MAX_BATCH_OBJECTS`, and
 `SPL_SYNC_MAX_BATCH_BYTES`. Each must be positive and fit the platform; limits may be raised or

@@ -381,13 +381,45 @@ async fn postgres_router_preserves_lost_commit_outcomes_and_ack_no_ops() {
         }],
     };
     let write_uri = format!("/sync/v1/vaults/{vault}/objects");
+    let mut blocker = direct.pool().begin().await.expect("block business write");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("business lock owner");
+    sqlx::query("SELECT current_seq FROM sync_vaults WHERE vault_id=$1 FOR UPDATE")
+        .bind(vault.as_bytes().as_slice())
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("hold business vault lock");
+    let body = batch.to_cbor().expect("write");
+    let pending = send(&app, Method::POST, &write_uri, body);
+    tokio::pin!(pending);
+    let reached_business_write = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker_pid)
+            .fetch_one(direct.pool())
+            .await
+            .expect("observe business lock wait");
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::select! {
+        response = &mut pending => panic!("write completed before its business lock: {}", response.status()),
+        result = tokio::time::timeout(Duration::from_secs(5), reached_business_write) => {
+            result.expect("business write reaches its lock after admission commits");
+        }
+    }
     proxy.armed.store(true, Ordering::SeqCst);
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        send(&app, Method::POST, &write_uri, batch.to_cbor().expect("write")),
-    )
-    .await
-    .expect("lost write reply timeout");
+    blocker.rollback().await.expect("release direct business lock");
+    let response = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("lost write reply timeout");
     assert_storage_outcome(response, true).await;
     assert_eq!(proxy.dropped.load(Ordering::SeqCst), 1);
     let versions =

@@ -1832,7 +1832,71 @@ const PAIRING_ADMISSION: TableSpec = TableSpec {
     indexes: &[IndexSpec { name: "pairing_admission_by_retention", columns: &["retain_until_ms"] }],
 };
 
+const SYNC_WRITE_ADMISSION: TableSpec = TableSpec {
+    name: "sync_write_admission",
+    columns: &[
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "requests_per_second",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "burst", kind: LogicalType::Bytes, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "tokens",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "refill_origin_ns",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "retire_at_ns",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec {
+        name: "sync_write_admission_by_retirement",
+        columns: &["retire_at_ns", "device_id"],
+    }],
+};
+
+const SYNC_WRITE_ADMISSION_CLOCK: TableSpec = TableSpec {
+    name: "sync_write_admission_clock",
+    columns: &[
+        ColumnSpec {
+            name: "singleton",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "retired_through_ns",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
 const TABLES: &[TableSpec] = &[
+    SYNC_WRITE_ADMISSION,
+    SYNC_WRITE_ADMISSION_CLOCK,
     PAIRING_SESSIONS,
     PAIRING_SLOTS,
     PAIRING_ADMISSION,
@@ -2304,6 +2368,11 @@ mod tests {
     const POSTGRES_PAIRING_SESSIONS: &str =
         include_str!("../migrations/postgres/20261024030000_pairing_sessions.sql");
 
+    const SQLITE_SYNC_WRITE_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261025000000_sync_write_admission.sql");
+    const POSTGRES_SYNC_WRITE_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261025000000_sync_write_admission.sql");
+
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).expect("create isolated test directory");
@@ -2345,6 +2414,7 @@ mod tests {
             SQLITE_PERSONAL_INVITATION_ADMISSION,
             SQLITE_PAIRING_ADMISSION,
             SQLITE_PAIRING_SESSIONS,
+            SQLITE_SYNC_WRITE_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2367,6 +2437,7 @@ mod tests {
             POSTGRES_PERSONAL_INVITATION_ADMISSION,
             POSTGRES_PAIRING_ADMISSION,
             POSTGRES_PAIRING_SESSIONS,
+            POSTGRES_SYNC_WRITE_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2416,7 +2487,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 21);
+        assert_eq!(migration_count, 22);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2425,7 +2496,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 21);
+        assert_eq!(replay_count, 22);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

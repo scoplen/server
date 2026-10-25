@@ -2113,19 +2113,21 @@ mod tests {
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
         bootstrap(&config).expect("private deployment material");
-        let store =
-            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("current database");
-        let pending_version: i64 = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-            .fetch_one(store.pool())
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(data_dir.join("scoplen.sqlite"))
+                    .create_if_missing(true)
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                    .foreign_keys(true),
+            )
             .await
-            .expect("latest migration version");
-        sqlx::query(
-            "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
-        )
-        .execute(store.pool())
-        .await
-        .expect("owned pending migration fixture");
-        let blocker = store.pool().begin_with("BEGIN IMMEDIATE").await.expect("hold SQLite writer");
+            .expect("historical database");
+        let mut prior = sqlx::migrate!("../scoplen-store/migrations/sqlite");
+        let pending_version = prior.migrations.to_mut().pop().expect("latest migration").version;
+        prior.run(&pool).await.expect("genuine schema before the latest migration");
+        let blocker = pool.begin_with("BEGIN IMMEDIATE").await.expect("hold SQLite writer");
         let starting_config = config.clone();
         let startup =
             tokio::spawn(async move { prepare_roles(&starting_config, &[Role::Api]).await });
@@ -2154,8 +2156,8 @@ mod tests {
             Err(ServerError::DeploymentLeaseOccupied)
         ));
         blocker.commit().await.expect("release SQLite writer");
-        store.pool().close().await;
-        drop(store);
+        pool.close().await;
+        drop(pool);
         let exclusive = wait_for_deployment_lease_release(&data_dir).await;
         let mut inspection = sqlx::SqliteConnection::connect_with(
             &sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.join("scoplen.sqlite")),

@@ -181,7 +181,10 @@ registered driver, rejects repeated bootstrap, then restarts the service and ver
 same public keyrings and completed setup state. It also archives the pinned server revision
 `37af5126585254612e734f542cfd4e36670915d9` from local Git history and builds its original
 server binaries into a disposable image with the current check's runtime files. That revision
-precedes the `20261024040000` SQLite migration. The old image starts a real Personal volume;
+precedes the `20261024040000` configurable-limit and `20261025000000` durable write-admission
+SQLite migrations. The recovery anchor remains `20261024030000`; the current-image check follows
+the latest migration and verifies both new admission tables and the initial clock watermark.
+The old image starts a real Personal volume;
 the check seeds committed organization and sync-object rows and an object file, then starts the
 current image against that volume while the seeding SQLite connection keeps its committed WAL
 open. It checks that the WAL holds data absent from the main database file alone, then verifies

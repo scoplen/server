@@ -103,6 +103,17 @@ async fn migration_count(connection: &mut SqliteConnection) -> i64 {
         .expect("migration history")
 }
 
+async fn fail_latest_migration(pool: &SqlitePool) {
+    let migrations = sqlx::migrate!("./migrations/sqlite");
+    let latest = migrations.migrations.last().expect("latest migration").version;
+    sqlx::query(&format!(
+        "CREATE TRIGGER fixture_fail_latest_migration BEFORE INSERT ON _sqlx_migrations WHEN NEW.version = {latest} BEGIN SELECT RAISE(ABORT, 'owned pending migration failure'); END"
+    ))
+    .execute(pool)
+    .await
+    .expect("owned latest migration failure");
+}
+
 async fn assert_retained(connection: &mut SqliteConnection) {
     let name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = ?")
         .bind([7_u8; 16].as_slice())
@@ -169,10 +180,7 @@ async fn an_existing_unmanaged_schema_is_preserved_before_first_managed_migratio
 async fn a_later_failed_migration_keeps_the_snapshot_before_any_upgrade_step() {
     let fixture = Fixture::new();
     let historical = fixture.historical_before(2).await;
-    sqlx::query("CREATE TABLE sync_objects_configurable (retained TEXT)")
-        .execute(&historical)
-        .await
-        .expect("owned later migration conflict");
+    fail_latest_migration(&historical).await;
     let previous: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&historical)
         .await
@@ -273,10 +281,7 @@ async fn snapshot_failure_blocks_migration_and_preserves_database_and_keys() {
 async fn failed_migrations_keep_the_three_latest_verified_recovery_points_only() {
     let fixture = Fixture::new();
     let historical = fixture.historical().await;
-    sqlx::query("CREATE TABLE sync_objects_configurable (retained TEXT)")
-        .execute(&historical)
-        .await
-        .expect("owned migration conflict");
+    fail_latest_migration(&historical).await;
     let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
         .fetch_one(&historical)
         .await
@@ -406,10 +411,7 @@ async fn cancelling_the_startup_caller_does_not_release_the_migration_lock_early
 async fn a_future_dated_recovery_point_cannot_cause_the_current_snapshot_to_be_pruned() {
     let fixture = Fixture::new();
     let historical = fixture.historical().await;
-    sqlx::query("CREATE TABLE sync_objects_configurable (retained TEXT)")
-        .execute(&historical)
-        .await
-        .expect("owned migration conflict");
+    fail_latest_migration(&historical).await;
     assert!(matches!(SqliteStore::open(&fixture.database).await, Err(StoreError::Migration(_))));
     let future = Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, 4_102_444_800, 0));
     fs::rename(
@@ -486,10 +488,7 @@ async fn retention_failure_keeps_published_snapshots_and_blocks_the_pending_migr
 
     let fixture = Fixture::new();
     let historical = fixture.historical().await;
-    sqlx::query("CREATE TABLE sync_objects_configurable (retained TEXT)")
-        .execute(&historical)
-        .await
-        .expect("owned migration conflict");
+    fail_latest_migration(&historical).await;
     for _ in 0..3 {
         assert!(matches!(
             SqliteStore::open(&fixture.database).await,
@@ -504,7 +503,7 @@ async fn retention_failure_keeps_published_snapshots_and_blocks_the_pending_migr
         .share_mode(1)
         .open(&original[0])
         .expect("hold the owned oldest snapshot without delete sharing");
-    sqlx::query("DROP TABLE sync_objects_configurable")
+    sqlx::query("DROP TRIGGER fixture_fail_latest_migration")
         .execute(&historical)
         .await
         .expect("remove owned failure fixture");

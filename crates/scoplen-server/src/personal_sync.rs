@@ -515,6 +515,7 @@ fn storage_unavailable() -> AuthFailure {
 #[cfg(test)]
 mod tests {
     mod limits;
+    mod write_admission;
     use super::*;
     use std::{fmt::Write as _, net::SocketAddr, path::PathBuf, time::Duration};
 
@@ -593,6 +594,7 @@ mod tests {
     struct Reply {
         status: u16,
         body: Vec<u8>,
+        headers: String,
     }
 
     async fn http(
@@ -618,6 +620,10 @@ mod tests {
         stream.write_all(body).await.expect("body");
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("response");
+        parse_reply(&response)
+    }
+
+    fn parse_reply(response: &[u8]) -> Reply {
         let split = response.windows(4).position(|part| part == b"\r\n\r\n").expect("HTTP head");
         let head = std::str::from_utf8(&response[..split]).expect("HTTP header UTF-8");
         let status = head
@@ -629,7 +635,7 @@ mod tests {
             .expect("code")
             .parse()
             .expect("numeric status");
-        Reply { status, body: response[split + 4..].to_vec() }
+        Reply { status, body: response[split + 4..].to_vec(), headers: head.to_owned() }
     }
 
     fn problem(reply: &Reply, status: u16, code: &str) {

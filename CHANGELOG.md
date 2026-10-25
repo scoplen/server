@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Made per-device object-write admission durable across API instances and restarts on SQLite
+  and PostgreSQL. Admission commits before body collection; malformed and oversized attempts
+  retain their charge. Exact unsigned fixed-point balances, database time, stored-policy
+  transitions and bounded retirement with a persistent clock watermark preserve debt. Storage
+  failures, including an unconfirmed admission-only commit, dispatch no business mutation and
+  return retryable `sync.storage_unavailable`. Existing wire shapes and defaults are unchanged.
+
 - Connected worker retention to transaction-current Personal device acknowledgements on SQLite
   and PostgreSQL. Complete signed certificate/revocation verification, current admission checks,
   ACK reads and tombstone/history deletion share one transaction. Missing ACKs count as zero;
