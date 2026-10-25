@@ -18,6 +18,7 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_audit::{checkpoint_payload, deployment_checkpoint_payload};
+use scoplen_store::account_entry_admission::{AccountEntryCleanup, AccountEntryStateError};
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
 use scoplen_store::refresh_retention::{RefreshCleanupError, RefreshCleanupReport};
 use scoplen_store::sync::MAX_PAGE_SIZE;
@@ -654,6 +655,9 @@ const AUDIT_CHECKPOINT_INTERVAL_MS: i64 = 60 * 60 * 1_000;
 const AUDIT_HEAD_PAGE_SIZE: u32 = 256;
 
 pub(crate) trait WorkerStoreBackend: Send + Sync {
+    fn cleanup_account_entry_state(
+        &self,
+    ) -> impl Future<Output = Result<AccountEntryCleanup, AccountEntryStateError>> + Send;
     fn cleanup_refresh_families(
         &self,
     ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send;
@@ -735,6 +739,11 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
 macro_rules! impl_worker_store_backend {
     ($store:ty) => {
         impl WorkerStoreBackend for $store {
+            fn cleanup_account_entry_state(
+                &self,
+            ) -> impl Future<Output = Result<AccountEntryCleanup, AccountEntryStateError>> + Send {
+                <$store>::cleanup_account_entry_state(self)
+            }
             fn cleanup_refresh_families(
                 &self,
             ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send {
@@ -885,6 +894,21 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 info!(role = "worker", requeued_expired_jobs = requeued, "worker heartbeat");
             }
             Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
+        }
+        let entry_cleanup = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.cleanup_account_entry_state() => result,
+        };
+        if let Ok(report) = entry_cleanup {
+            info!(
+                role = "worker",
+                removed_account_admission_rows = report.admission_rows,
+                removed_account_challenges = report.challenge_rows,
+                "Account entry retention pass"
+            );
+        } else {
+            error!(role = "worker", "Account entry retention pass failed");
         }
         let refresh_cleanup = tokio::select! {
             biased;
@@ -1290,6 +1314,7 @@ pub(crate) fn api_router_with_notifications(
         }));
     if api_enabled {
         router
+            .merge(crate::account_entry::router(trusted_origin.clone(), auth_backend.clone()))
             .merge(crate::account_devices::router(
                 trusted_origin.clone(),
                 auth_backend.clone(),
@@ -3021,6 +3046,67 @@ mod tests {
             std::env::temp_dir().join(format!("scoplen-refresh-worker-{}", uuid::Uuid::now_v7()));
         let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
         assert_worker_refresh_retention!(store, directory, 1_i64);
+        remove_test_directory(&directory).await;
+    }
+
+    macro_rules! assert_worker_account_entry_retention {
+        ($store:expr, $directory:expr) => {{
+            use scoplen_api::account_admission::{AccountRequestChallengeRequest, AccountRequestIntent, AccountRequestKind};
+            use scoplen_store::account_entry_admission::AccountEntryEndpoint;
+            let store = Arc::new($store);
+            let source = "127.0.0.1".parse().expect("fixture source");
+            store.admit_account_entry_source(AccountEntryEndpoint::RequestChallenge, source).await.expect("source admission");
+            let request = AccountRequestChallengeRequest { kind: AccountRequestKind::Register,
+                intent: AccountRequestIntent::Submit, operation_id: uuid::Uuid::now_v7(), device_id: uuid::Uuid::now_v7() };
+            store.issue_account_request_challenge(source, "https://example.com", &request).await.expect("real challenge issuance");
+            let expired = worker_now_ms().expect("time") - 120_001;
+            sqlx::query("UPDATE account_request_challenges SET issued_at_ms=$1,expires_at_ms=$2")
+                .bind(expired).bind(expired+120_000).execute(store.pool()).await.expect("expire fixture challenge");
+            sqlx::query("UPDATE account_entry_admission SET last_admitted_ms=1,window_start_ms=0,retire_at_ms=600001")
+                .execute(store.pool()).await.expect("expire admitted fixture buckets");
+            let signer_path=$directory.join("audit-signing.key");
+            fs::write(&signer_path,"11".repeat(32)).expect("signer file");
+            let signer=LocalAuditSigner::load(&signer_path).expect("signer");
+            let (shutdown,receiver)=watch::channel(false);
+            let worker=tokio::spawn(run_worker_role(store.clone(),Arc::new(signer),receiver));
+            tokio::time::timeout(Duration::from_secs(10),async {
+                loop {
+                    let rows:i64=sqlx::query_scalar("SELECT rate_rows+challenge_rows FROM account_entry_state WHERE singleton=1")
+                        .fetch_one(store.pool()).await.expect("observe entry retirement");
+                    if rows==0 {break;}
+                    assert!(!worker.is_finished(),"worker remains healthy");
+                    sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("worker retires entry state without requests");
+            shutdown.send(true).expect("request shutdown");
+            tokio::time::timeout(Duration::from_secs(2),worker).await.expect("bounded shutdown").expect("worker task").expect("normal shutdown");
+            let rows:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM account_entry_admission)+(SELECT COUNT(*) FROM account_request_challenges)")
+                .fetch_one(store.pool()).await.expect("actual entry rows");
+            assert_eq!(rows,0);
+            store.pool().close().await;
+        }};
+    }
+
+    #[tokio::test]
+    async fn worker_account_entry_retention_removes_expired_state_without_request_traffic() {
+        let directory = std::env::temp_dir()
+            .join(format!("scoplen-account-entry-worker-{}", uuid::Uuid::now_v7()));
+        let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("store");
+        assert_worker_account_entry_retention!(store, directory);
+        remove_test_directory(&directory).await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_worker_account_entry_retention_removes_expired_state_without_request_traffic()
+    {
+        let (url, pool, schema) = postgres_fixture().await;
+        let store = PostgresStore::connect(url.as_str()).await.expect("store");
+        let directory = std::env::temp_dir()
+            .join(format!("scoplen-account-entry-worker-{}", uuid::Uuid::now_v7()));
+        fs::create_dir(&directory).expect("signer directory");
+        assert_worker_account_entry_retention!(store, directory);
+        cleanup_postgres_fixture(pool, schema).await;
         remove_test_directory(&directory).await;
     }
 

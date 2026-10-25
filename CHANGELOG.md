@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mount the native Account request-challenge route with independent durable pre-body source
+  admission, strict shared metadata/JSON validation, private Device quotas and audited failures.
+  Challenge secrets are returned only after confirmed commit; browser credentials and CORS
+  alternatives are rejected. Worker maintenance retires expired challenges and idle debt in
+  indexed bounded batches. This endpoint grants no Account, Device or sync authority; the
+  remaining registration, password login and Device admission routes stay incomplete.
+
 - Advance the SQLite container recovery probe to the Account-id retention migration while
   preserving its pinned historical source and pre-upgrade recovery boundary.
 

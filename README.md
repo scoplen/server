@@ -164,9 +164,19 @@ unbounded cascading deletion. Unexpired families and spent digests, including re
 remain intact until absolute expiry. Expiry is rechecked after family locks, shutdown cancels
 a blocked pass, and logs contain only confirmed counts or fixed failures. This retirement
 reuses database pages; it does not vacuum or promise a smaller database file.
+The API also mounts native `POST /api/v1/auth/accounts/requests/challenge`. Independent durable
+Account-entry source admission runs before reading the body. Strict shared JSON and HTTP
+metadata validation reject browser credentials, query parameters and mismatched origins.
+Decoded Device admission, challenge capacity, independent random attempt/nonce digests and
+response preflight share one transaction; unconfirmed commits disclose no challenge. Responses
+are non-cacheable, without cookies or CORS grants. The worker retires expired challenges and
+idle admission rows in bounded indexed batches. This challenge route creates no Account or
+Device and grants no login or sync authority. Registration, password login and Device admission
+remain unmounted.
+
 All Rust protocol consumers, route-contract CI and generated console API types use published
 `proto@a604b726`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`.
-The published Account password and device-admission contracts are not yet server endpoints.
+The remaining published Account password and device-admission contracts are not yet server endpoints.
 The sync service retains encrypted object envelopes without reading their Credential fields.
 Server-hosted SSH and agent execution remain separate roadmap work.
 
