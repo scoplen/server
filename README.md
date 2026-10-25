@@ -411,6 +411,17 @@ and discloses the replacement only after confirmed commit. Completed setup never
 including after operator revocation. A result with an unknown commit outcome discloses no link;
 use the deliberate local reissue action only if setup remains pending.
 
+The storage service supports current-family Operator logout through `logout_operator` on both
+databases. Its caller verifies the Operator access token, exact Origin and token-bound DPoP,
+durably claims the proof and charges source admission before invoking the mutation. The store
+serializes with refresh and other protected mutations, checks current credential/family state,
+the stored ES256/P-256 public key and time, and atomically revokes that family with one
+deployment audit. A fresh eligible retry
+can confirm an already revoked family without producing general authorization evidence. It
+retains all refresh digests until normal expiry maintenance and preserves every other family.
+An unconfirmed revocation commit requires explicit fresh-proof confirmation while the original
+access token remains valid. The public HTTP adapter and console integration remain separate.
+
 The storage service verifies real ES256 passkey registration and discoverable assertions with
 the maintained WebAuthn core under the configured exact origin/RP, required residency and UV,
 and `none` attestation policy. SQLite and PostgreSQL atomically persist the first operator,
