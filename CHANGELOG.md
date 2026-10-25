@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Keep probe-key fault-injection trigger creation and removal on one owned connection, so
+  SQLite pool schema caches cannot reject a repeated failure fixture as already existing.
+
 - Retain the complete accepted signed K-4 PUT atomically with verified enrollment, publication
   and pairing on SQLite and PostgreSQL. A bounded consistent storage reader rejects damaged or
   mismatched projections, including missing or extra wraps. Existing rows keep no historical
