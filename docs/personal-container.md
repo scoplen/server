@@ -167,7 +167,9 @@ the operating system or browser trust store.
 Before building images, the check admits its SQLite probe as UID/GID 65532 using a separate
 read-only context containing only the public check identity. The private temporary directory,
 TLS material and command diagnostics keep their original permissions and are not exposed to
-that probe. A seeding process that exits before readiness fails immediately with a fixed
+that probe. The probe also verifies the schema checkpoint against a temporary SQLite database
+whose schema starts in WAL, using the same checkpoint function as the old-schema seeder.
+A seeding process that exits before readiness fails immediately with a fixed
 reason. Its summary includes bounded exit/OOM status and, when present, a fixed probe phase,
 an allowlisted error code and a bounded numeric SQLite code. The final log is read after
 process exit so a fast failure does not hide its summary. Detailed output remains private;
@@ -178,7 +180,30 @@ checks image/data-volume permissions, non-root writes, TLS trust and hostname re
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs
 one public setup, fresh resident software-passkey login and invitation issuance with the
 registered driver, rejects repeated bootstrap, then restarts the service and verifies the
-same public keyrings and completed setup state. It also archives the pinned server revision
+same public keyrings and completed setup state. Before that restart, the driver's
+`check-native-restart` command publicly enrolls a fresh device and saves an encrypted, signed
+Host with a confirmed write receipt, verified download and ACK. The same driver process retains
+its device proof key, vault key and still-unused native JSON refresh credential only in RAM.
+Fixed `native-restart.ready` and `native-restart.resume` files coordinate the existing controller's
+graceful stop and start; they contain no credentials. A failed or interrupted attempt cannot be
+replayed against that fixture.
+
+After the real server process exits successfully and the restarted service reaches readiness,
+the driver's first authentication operation rotates the original refresh credential using a
+fresh DPoP proof from the same key. The new access token must retrieve the same Personal vault
+and exact Host envelope, sequence and decrypted object. Its first post-restart ACK submits
+the older cursor zero and must return the previously stored maximum one, so the check cannot
+repair a lost ACK before detecting it. A fresh proof reusing the old refresh credential must
+revoke that family. After the published one-second first-denial cooldown, the successor's
+first refresh attempt must also return an authentication denial. A new device challenge then
+recovers authentication and Host access; replaying that consumed challenge must fail. Every
+HTTPS exchange has a whole-request deadline, no operation is automatically retried, and identity
+and admission rows are never seeded or repaired by SQL.
+The controller aborts and reaps its own driver after a failed restart or readiness deadline.
+This is a server restart/authentication/synchronization acceptance case. It does not establish
+the cause of the historical native post-reopen refresh failure or native GUI/macOS acceptance.
+
+The check also archives the pinned server revision
 `37af5126585254612e734f542cfd4e36670915d9` from local Git history and builds its original
 server binaries into a disposable image with the current check's runtime files. That revision
 precedes the `20261024040000` configurable-limit and `20261025000000` durable write-admission
@@ -187,7 +212,9 @@ the latest migration and verifies both new admission tables and the initial cloc
 The old image starts a real Personal volume;
 the check seeds committed organization and sync-object rows and an object file, then starts the
 current image against that volume while the seeding SQLite connection keeps its committed WAL
-open. It checks that the WAL holds data absent from the main database file alone, then verifies
+open. Before seeding, a successful truncating checkpoint establishes the old schema in the main
+database, so the bare-file comparison can check the seeded rows rather than fail on a missing
+schema. It checks that the WAL holds data absent from the main database file alone, then verifies
 the migrated rows, the independently readable old schema snapshot, and both SQLite integrity and
 foreign-key integrity. After stopping the current
 server, the check copies only the completed snapshot, original keys, and object files into a

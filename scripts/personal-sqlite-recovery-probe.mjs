@@ -76,6 +76,60 @@ function ordinary(path, directory = false) {
   return metadata;
 }
 
+function checkpointSeedSchema(database) {
+  failurePhase = "checkpoint-seed-schema";
+  const checkpoint = database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  assert.equal(checkpoint.busy, 0);
+  assert.equal(checkpoint.log, 0);
+  assert.equal(checkpoint.checkpointed, 0);
+}
+
+function checkSchemaBaseline() {
+  const path = "/tmp/checkpoint-schema.sqlite";
+  const bare = "/tmp/checkpoint-schema-bare.sqlite";
+  const database = new DatabaseSync(path);
+  function bareSchema() {
+    copyFileSync(path, bare, constants.COPYFILE_EXCL);
+    const copy = new DatabaseSync(bare, { readOnly: true });
+    try {
+      return copy
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE name = 'checkpoint_probe'",
+        )
+        .get();
+    } finally {
+      copy.close();
+      unlinkSync(bare);
+    }
+  }
+  try {
+    database.exec(
+      "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE checkpoint_probe (id INTEGER PRIMARY KEY)",
+    );
+    failurePhase = "verify-schema-baseline";
+    assert.equal(
+      bareSchema(),
+      undefined,
+      "regression schema must start in WAL",
+    );
+    checkpointSeedSchema(database);
+    failurePhase = "verify-schema-baseline";
+    assert.equal(bareSchema()?.name, "checkpoint_probe");
+  } finally {
+    database.close();
+    for (const file of [
+      path,
+      `${path}-wal`,
+      `${path}-shm`,
+      bare,
+      `${bare}-wal`,
+      `${bare}-shm`,
+    ]) {
+      if (existsSync(file)) unlinkSync(file);
+    }
+  }
+}
+
 function snapshot(root) {
   const directory = join(root, "scoplen.sqlite.migration-snapshots");
   const folder = ordinary(directory, true);
@@ -242,6 +296,7 @@ if (operation === "check-context") {
   assert.equal(process.getuid(), 65532);
   assert.equal(process.getgid(), 65532);
   assert.deepEqual(readdirSync("/check"), [".container-check-owner"]);
+  checkSchemaBaseline();
   console.log("context-ready");
 } else if (operation === "seed-and-hold") {
   failurePhase = "open-seed-database";
@@ -256,6 +311,8 @@ if (operation === "check-context") {
         .get().version,
       oldMigration,
     );
+    // A fresh server may leave schema pages in WAL; seed only after that baseline is durable.
+    checkpointSeedSchema(database);
     failurePhase = "seed-rows";
     database.exec(
       "PRAGMA foreign_keys = ON; PRAGMA wal_autocheckpoint = 0; BEGIN IMMEDIATE",

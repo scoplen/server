@@ -38,7 +38,9 @@ const failurePhases = new Set([
   "non-root Compose startup and trusted HTTPS",
   "bundled console assets",
   "single public setup, fresh Passkey login and invitation",
+  "native enrollment and saved Host before restart",
   "restart and persistent setup/key verification",
+  "native refresh, reuse denial and challenge recovery",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
@@ -66,6 +68,8 @@ export function describeCheckFailure({
     ["image data directory missing", "directory-missing"],
     ["committed WAL fixture exited before readiness", "wal-holder-exit"],
     ["committed WAL fixture timed out", "wal-holder-timeout"],
+    ["native restart driver exited before restart", "native-driver-exit"],
+    ["native restart driver readiness timed out", "native-driver-timeout"],
   ];
   const reason =
     (assertion && typeof error.message === "string"
@@ -120,6 +124,8 @@ export function describeWalHolderFailure(state, stderr) {
           "context",
           "open-seed-database",
           "verify-seed-schema",
+          "checkpoint-seed-schema",
+          "verify-schema-baseline",
           "seed-rows",
           "write-object-marker",
           "verify-material",
@@ -330,7 +336,14 @@ async function request(origin, path, ca, servername = "localhost") {
   return await new Promise((accept, reject) => {
     const outgoing = https.get(
       new URL(path, origin),
-      { ca, servername, rejectUnauthorized: true, family: 4, timeout: 5000 },
+      {
+        ca,
+        servername,
+        rejectUnauthorized: true,
+        family: 4,
+        timeout: 5000,
+        signal: AbortSignal.timeout(5000),
+      },
       (incoming) => {
         const chunks = [];
         let size = 0;
@@ -355,6 +368,62 @@ async function request(origin, path, ca, servername = "localhost") {
     );
     outgoing.on("error", reject);
   });
+}
+
+export async function runNativeRestart({
+  fixture,
+  run,
+  restart,
+  timeout = 120_000,
+}) {
+  for (const name of ["native-restart.ready", "native-restart.resume"]) {
+    try {
+      await lstat(join(fixture, name));
+      assert.fail("native restart signal already exists");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  const controller = new AbortController();
+  let settled = false;
+  const completed = run(controller.signal).finally(() => {
+    settled = true;
+  });
+  // The driver can fail while the controller is observing its readiness marker.
+  completed.catch(() => {});
+  try {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      if (settled) {
+        await completed;
+        assert.fail("native restart driver exited before restart");
+      }
+      try {
+        assert.equal(
+          await readFile(join(fixture, "native-restart.ready"), "utf8"),
+          "ready\n",
+        );
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      assert(
+        Date.now() < deadline,
+        "native restart driver readiness timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 50));
+    }
+    await restart();
+    assert(!settled, "native restart driver exited before restart");
+    await writeFile(join(fixture, "native-restart.resume"), "resume\n", {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await completed;
+  } finally {
+    controller.abort();
+    await completed.catch(() => {});
+  }
 }
 
 export async function checkPersonalContainer(driverPath) {
@@ -407,27 +476,33 @@ export async function checkPersonalContainer(driverPath) {
       timeout = 120_000,
       allowFailure = false,
       binary = false,
+      signal,
     } = {},
   ) {
     const log = join(
       directory,
       `${String(++sequence).padStart(3, "0")}-${basename(program).replace(/[^A-Za-z0-9.-]/g, "_")}`,
     );
+    let closed;
     const result = await new Promise((accept) => {
-      execFile(
+      const child = execFile(
         program,
         args,
         {
           cwd: repository,
           env: environment,
           timeout,
+          signal,
           windowsHide: true,
           encoding: binary ? "buffer" : "utf8",
           maxBuffer: 32 * 1024 * 1024,
         },
         (error, stdout, stderr) => accept({ error, stdout, stderr }),
       );
+      if (signal)
+        closed = new Promise((acceptClose) => child.once("close", acceptClose));
     });
+    if (closed) await closed;
     await writePrivateDiagnostic(`${log}.stdout`, result.stdout, phase);
     await writePrivateDiagnostic(`${log}.stderr`, result.stderr, phase);
     if (result.error && !allowFailure)
@@ -914,50 +989,69 @@ export async function checkPersonalContainer(driverPath) {
       keys.push(response.body);
     }
 
-    progress("restart and persistent setup/key verification");
-    await compose(["stop", "server"]);
-    assert.equal((await inspect("container", container)).State.ExitCode, 0);
-    await compose(["up", "--detach", "--no-build"]);
-    const restartDeadline = Date.now() + 60_000;
-    for (;;) {
-      try {
-        if ((await request(origin, "/readyz", ca)).status === 200) break;
-      } catch {}
-      assert(
-        Date.now() < restartDeadline,
-        "restarted production HTTPS readiness timed out",
-      );
-      await new Promise((accept) => setTimeout(accept, 500));
-    }
-    for (const [index, path] of paths.entries()) {
-      const response = await request(origin, path, ca);
-      assert.equal(response.status, 200);
-      assert.deepEqual(
-        response.body,
-        keys[index],
-        "restart changed a persisted token keyring",
-      );
-    }
-    const recovery = await compose(
-      ["exec", "-T", "server", "/app/splctl", "bootstrap", "--reissue-pending"],
-      { allowFailure: true },
-    );
-    assert(
-      recovery.error &&
-        recovery.stderr.trim() ===
-          "splctl: operator setup error: operator setup authentication denied",
-      "completed Operator setup must survive restart",
-    );
-    assert.equal(
-      recovery.stdout,
-      "",
-      "completed setup disclosed a replacement link",
-    );
-    assert.equal(
-      (await inspect("container", container)).RestartCount,
-      0,
-      "service restarted unexpectedly",
-    );
+    progress("native enrollment and saved Host before restart");
+    await runNativeRestart({
+      fixture,
+      run: (signal) =>
+        command(driver, ["check-native-restart", fixture], {
+          signal,
+          timeout: 300_000,
+        }),
+      restart: async () => {
+        progress("restart and persistent setup/key verification");
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await compose(["up", "--detach", "--no-build"]);
+        const restartDeadline = Date.now() + 60_000;
+        for (;;) {
+          try {
+            if ((await request(origin, "/readyz", ca)).status === 200) break;
+          } catch {}
+          assert(
+            Date.now() < restartDeadline,
+            "restarted production HTTPS readiness timed out",
+          );
+          await new Promise((accept) => setTimeout(accept, 500));
+        }
+        for (const [index, path] of paths.entries()) {
+          const response = await request(origin, path, ca);
+          assert.equal(response.status, 200);
+          assert.deepEqual(
+            response.body,
+            keys[index],
+            "restart changed a persisted token keyring",
+          );
+        }
+        const recovery = await compose(
+          [
+            "exec",
+            "-T",
+            "server",
+            "/app/splctl",
+            "bootstrap",
+            "--reissue-pending",
+          ],
+          { allowFailure: true },
+        );
+        assert(
+          recovery.error &&
+            recovery.stderr.trim() ===
+              "splctl: operator setup error: operator setup authentication denied",
+          "completed Operator setup must survive restart",
+        );
+        assert.equal(
+          recovery.stdout,
+          "",
+          "completed setup disclosed a replacement link",
+        );
+        assert.equal(
+          (await inspect("container", container)).RestartCount,
+          0,
+          "service restarted unexpectedly",
+        );
+        progress("native refresh, reuse denial and challenge recovery");
+      },
+    });
 
     progress("offline snapshot restore");
     await compose(["stop", "server"]);
@@ -1142,7 +1236,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public bootstrap, restart, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, console, public bootstrap, native refresh and Host synchronization across restart, reuse denial and challenge recovery, SQLite upgrade and matching old image recovery.",
   );
 }
 

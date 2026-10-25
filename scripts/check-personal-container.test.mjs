@@ -24,7 +24,203 @@ import {
   describeImageBuildFailure,
   describeWalHolderFailure,
   prepareRecoveryProbeContext,
+  runNativeRestart,
 } from "./check-personal-container.mjs";
+
+function nativeTestDriver(fixture, source, signal, observe = () => {}) {
+  return new Promise((accept, reject) => {
+    let result;
+    const child = execFile(
+      process.execPath,
+      ["--input-type=module", "-e", source, fixture],
+      { signal, timeout: 5000, windowsHide: true },
+      (error, stdout, stderr) => {
+        result = { error, stdout, stderr };
+      },
+    );
+    observe(child);
+    child.once("close", () => {
+      if (result.error)
+        reject(
+          new Error("synthetic native driver failed", { cause: result.error }),
+        );
+      else accept(result);
+    });
+  });
+}
+
+const nativeReady = `
+  import assert from "node:assert/strict";
+  import { readFile, writeFile } from "node:fs/promises";
+  import { join } from "node:path";
+  const fixture = process.argv[1];
+  const held = { proof: "synthetic-private-proof", refresh: "synthetic-private-refresh" };
+  await writeFile(join(fixture, "native-restart.ready"), "ready\\n", { flag: "wx" });
+  for (;;) {
+    try {
+      assert.equal(await readFile(join(fixture, "native-restart.resume"), "utf8"), "resume\\n");
+      break;
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    await new Promise((accept) => setTimeout(accept, 10));
+  }
+  assert.equal(held.refresh, "synthetic-private-refresh");
+  assert.equal(held.proof, "synthetic-private-proof");
+  process.stdout.write("native-test-complete\\n");
+`;
+
+test("native driver retains its process across the controller restart before resuming", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-native-restart-test-"));
+  let restarts = 0;
+  let result;
+  try {
+    await runNativeRestart({
+      fixture,
+      run: async (signal) => {
+        result = await nativeTestDriver(fixture, nativeReady, signal);
+      },
+      restart: async () => {
+        restarts++;
+        await assert.rejects(readFile(join(fixture, "native-restart.resume")), {
+          code: "ENOENT",
+        });
+      },
+    });
+    assert.equal(restarts, 1);
+    assert.equal(result.stdout, "native-test-complete\n");
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("native driver failure before readiness never restarts the server or publishes resume", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-native-restart-test-"));
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runNativeRestart({
+        fixture,
+        run: (signal) => nativeTestDriver(fixture, "process.exit(7)", signal),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /synthetic native driver failed/,
+    );
+    assert.equal(restarts, 0);
+    await assert.rejects(readFile(join(fixture, "native-restart.resume")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("native readiness deadline aborts and reaps only its own stalled driver", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-native-restart-test-"));
+  let child;
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runNativeRestart({
+        fixture,
+        timeout: 50,
+        run: (signal) =>
+          nativeTestDriver(
+            fixture,
+            "setInterval(() => {}, 1000)",
+            signal,
+            (value) => {
+              child = value;
+            },
+          ),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /native restart driver readiness timed out/,
+    );
+    assert.equal(restarts, 0);
+    assert(child.exitCode !== null || child.signalCode !== null);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("controller restart failure aborts the retained native driver without publishing resume", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-native-restart-test-"));
+  let child;
+  try {
+    await assert.rejects(
+      runNativeRestart({
+        fixture,
+        run: (signal) =>
+          nativeTestDriver(fixture, nativeReady, signal, (value) => {
+            child = value;
+          }),
+        restart: async () => {
+          throw new Error("synthetic restart failure");
+        },
+      }),
+      /synthetic restart failure/,
+    );
+    assert(child.exitCode !== null || child.signalCode !== null);
+    await assert.rejects(readFile(join(fixture, "native-restart.resume")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("stale native restart signals are preserved and never start a driver or restart", async () => {
+  for (const name of ["native-restart.ready", "native-restart.resume"]) {
+    const fixture = await mkdtemp(
+      join(tmpdir(), "scoplen-native-restart-test-"),
+    );
+    let calls = 0;
+    try {
+      const path = join(fixture, name);
+      await writeFile(path, "synthetic-private-value", { flag: "wx" });
+      await assert.rejects(
+        runNativeRestart({
+          fixture,
+          run: async () => {
+            calls++;
+          },
+          restart: async () => {
+            calls++;
+          },
+        }),
+        /native restart signal already exists/,
+      );
+      assert.equal(calls, 0);
+      assert.equal(await readFile(path, "utf8"), "synthetic-private-value");
+    } finally {
+      await rm(fixture, { recursive: true });
+    }
+  }
+});
+
+test("a successful child exit without native readiness is not restart acceptance", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-native-restart-test-"));
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runNativeRestart({
+        fixture,
+        run: (signal) => nativeTestDriver(fixture, "process.exit(0)", signal),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /native restart driver exited before restart/,
+    );
+    assert.equal(restarts, 0);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
 
 test("recovery probe follows the latest SQLite migration and preserves its old-image anchor", async () => {
   const migrations = await readdir(
@@ -70,27 +266,33 @@ test("actual recovery probe reports a bounded failure before opening an invalid 
 
 test("WAL holder failures expose only fixed probe phases and bounded status", () => {
   const secret = "synthetic-private-value";
-  const stderr = `Scoplen SQLite probe failure: ${JSON.stringify({
-    phase: "verify-base-only",
-    code: "ERR_SQLITE_ERROR",
-    sqliteCode: 14,
-    message: secret,
-  })}\n${secret}`;
-  assert.deepEqual(
-    describeWalHolderFailure(
-      { ExitCode: 1, OOMKilled: false, Error: secret },
-      stderr,
-    ),
-    {
-      exitCode: 1,
-      oomKilled: false,
-      probe: {
-        phase: "verify-base-only",
-        code: "ERR_SQLITE_ERROR",
-        sqliteCode: 14,
+  for (const phase of [
+    "verify-base-only",
+    "checkpoint-seed-schema",
+    "verify-schema-baseline",
+  ]) {
+    const stderr = `Scoplen SQLite probe failure: ${JSON.stringify({
+      phase,
+      code: "ERR_SQLITE_ERROR",
+      sqliteCode: 14,
+      message: secret,
+    })}\n${secret}`;
+    assert.deepEqual(
+      describeWalHolderFailure(
+        { ExitCode: 1, OOMKilled: false, Error: secret },
+        stderr,
+      ),
+      {
+        exitCode: 1,
+        oomKilled: false,
+        probe: {
+          phase,
+          code: "ERR_SQLITE_ERROR",
+          sqliteCode: 14,
+        },
       },
-    },
-  );
+    );
+  }
   for (const value of [
     secret,
     "{",
@@ -187,6 +389,8 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
     "SQLite migration snapshot",
     "offline snapshot restore",
     "matching old image recovery",
+    "native enrollment and saved Host before restart",
+    "native refresh, reuse denial and challenge recovery",
   ]) {
     const description = describeCheckFailure({ phase, error });
     assert.equal(description.phase, phase);
@@ -219,6 +423,8 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
   for (const [message, reason] of [
     ["committed WAL fixture exited before readiness", "wal-holder-exit"],
     ["committed WAL fixture timed out", "wal-holder-timeout"],
+    ["native restart driver exited before restart", "native-driver-exit"],
+    ["native restart driver readiness timed out", "native-driver-timeout"],
   ]) {
     assert.equal(
       describeCheckFailure({
