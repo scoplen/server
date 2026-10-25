@@ -31,7 +31,7 @@ The Rust protocol consumers and generated console API types use the published
 `proto@a604b726` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
 `scoplen-model`. This revision includes the Account password and Device admission contracts
 and removes retired Personal invitation/enrollment and pairing formats. Consuming these
-contracts does not mount the new Account entry endpoints.
+contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
 The server stores encrypted object envelopes
 without inspecting Credential fields. D-121 interactive SSH authentication belongs to
 `scoplen-ssh`, which this workspace does not consume. Server SSH execution and host-agent
@@ -81,8 +81,8 @@ The UI uses local Inter, Lora and JetBrains Mono fonts without third-party reque
 `scoplen-identity` exposes the maintained Operator passkey verifier. Retired Personal
 invitation/enrollment and pairing modules, routes, privileges and worker cleanup are absent.
 Historical schema and data remain intact and unused by runtime. Existing Devices continue to
-use public authentication and Personal sync. Native Account registration/password HTTP is mounted;
-Device-admission HTTP and complete independent password-entry acceptance remain incomplete.
+use public authentication and Personal sync. Native Account registration/password/admission HTTP
+is mounted; complete independent password-entry acceptance remains incomplete.
 Legacy sync tests directly seed real signed artifacts only into owned fixture databases.
 
 First-run material is created exclusively and flushed before success. On Unix, new files have
@@ -280,7 +280,7 @@ Device/key freshness, preflight the complete protocol response, add its immutabl
 consume the relevant protocol state and append mandatory audit in the same transaction.
 Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
 confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
-Mounted Device-admission HTTP and full V3 acceptance remain incomplete.
+Full V3 acceptance remains incomplete.
 
 Account-entry admission uses independent fixed-window state for the five native endpoints.
 A singleton writer lock serializes new bucket/challenge capacity and advances a durable
@@ -308,8 +308,8 @@ mandatory deployment audit; audit failure overrides a reportable denial. Respons
 fixed no-store/no-cache profile, without cookies or CORS. Unsupported methods return the same
 bounded problem format. The worker calls indexed admission/challenge retirement with shutdown
 cancellation; storage serializes cleanup frequency and time across replicas. Challenge issuance
-alone creates no Account, Device, password credential, session or sync authority. The remaining
-Device-admission route still requires its mounted protocol adapter.
+alone creates no Account, Device, password credential, session or sync authority. Separate native
+registration/password/admission adapters own the remaining public entry operations.
 
 The registration coordinator accepts only the native encoded body after the HTTP adapter's
 source/transport/concurrency admission. It uses the published structural decoder before
@@ -344,6 +344,16 @@ deadlines are operational bounds, not evidence of a large-deployment performance
 statement writers take the same singleton before Account locks, and transaction-local bootstrap
 creation requires its caller to hold it and enforce freshness. No permanent Device/key cache is
 introduced; only D-129's Account-id digest survives Account deletion.
+
+The native Device-admission HTTP adapter uses the same Account-entry state and nonwaiting
+16-job semaphore as registration/password login. Actual-peer source admission precedes strict
+native metadata checks and bounded zeroizing body collection. The encoded limit is 6,291,456
+bytes, including chunked input, and body/precommit preparation shares a 15-second deadline.
+The store owns the non-cancellable COMMIT. New admission returns 201; explicit exact historical
+confirmation returns 200. Store failures map directly to the published status/code/change/retry
+contract, without a second failure audit. Actual HTTP lifecycle tests use the production API
+router for registration, password login, admission, ordinary Device authentication and same-Account
+K-4/session reads on both databases. Inactive Account state and complete V3/I1 remain open.
 
 The Device-admission coordinator strictly decodes the complete body before claiming its fresh
 challenge. Decoded Device admission commits separately. The owning business transaction claims

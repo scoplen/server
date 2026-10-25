@@ -37,6 +37,7 @@ use tokio::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+mod admission;
 mod password;
 
 use crate::{
@@ -112,6 +113,7 @@ fn routes() -> Router<Arc<EntryState>> {
             "/api/v1/auth/accounts/register",
             post(register).fallback(registration_method_denied),
         )
+        .merge(admission::routes())
         .merge(password::routes())
 }
 
@@ -326,8 +328,8 @@ impl Failure {
             Self::Quota => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "auth.quota_exceeded",
-                "Account registration capacity exceeded",
-                "The deployment cannot admit another Account or retained operation.",
+                "Account entry capacity exceeded",
+                "The deployment cannot retain the requested Account entry operation.",
                 false,
             ),
             Self::Policy => (

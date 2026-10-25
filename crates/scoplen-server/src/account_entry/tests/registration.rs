@@ -15,6 +15,8 @@ use super::*;
 const REGISTER: &str = "/api/v1/auth/accounts/register";
 const JSON: &[(&str, &str)] = &[("Content-Type", "application/json")];
 
+mod admission;
+
 struct Registration {
     payload: AccountRegistrationPayload,
     root: Ed25519SigningKey,
