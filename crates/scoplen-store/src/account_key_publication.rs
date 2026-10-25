@@ -137,10 +137,11 @@ async fn postgres_load(
 }
 
 macro_rules! publication {
-    ($module:ident, $store:ty, $begin:ident, $load:ident, $statements:ident, $matches:ident, $capacity:ident, $append:ident, $postgres:literal) => {
+    ($module:ident, $store:ty, $begin:ident, $load:ident, $statements:ident, $matches:ident, $capacity:ident, $append:ident, $password:ident, $protect:ident, $postgres:literal) => {
         mod $module {
             use super::*;
             use crate::{account_devices::$statements, account_keys::{$matches, $capacity}, $append};
+            use crate::account_bootstrap::{$password, $protect};
 
             fn sql(source: &str) -> String {
                 if !$postgres { return source.to_owned(); }
@@ -154,7 +155,7 @@ macro_rules! publication {
                 /// # Errors
                 /// `expires_at` is the expiry of the original verified keys:write token.
                 /// Rejects expired authority, stale identity, invalid signatures/recipients, revision conflicts,
-                /// capacity or audit failures, and preserves attempted-COMMIT uncertainty.
+                /// unsupported password transitions, capacity or audit failures, and preserves attempted-COMMIT uncertainty.
                 #[allow(clippy::too_many_lines)]
                 pub async fn publish_account_key_bundle(&self, expected: &CurrentPrincipal, expires_at: u64, update: &SyncAccountKeyBundleUpdate)
                     -> Result<AccountKeyBundlePut, AccountKeyStoreError> {
@@ -167,6 +168,7 @@ macro_rules! publication {
                         }
                         current($load(&mut tx, expected.device_id).await.map_err(|error| identity_error(&error))?, expected)?;
                         live_authorization(expires_at)?;
+                        $password(&mut tx, &expected.account_id).await?;
                         let account = expected.account_id.as_slice();
                         let query = sql("SELECT revision,account_signing_key,account_kem_key,recovery_blob,signature FROM sync_account_key_bundles WHERE account_id=?");
                         let row = sqlx::query(&query).bind(account).fetch_optional(&mut *tx).await?.ok_or(AccountKeyStoreError::BundleNotFound)?;
@@ -182,7 +184,8 @@ macro_rules! publication {
                         if current_revision.checked_add(1) != Some(update.revision) {
                             return Err(AccountKeyStoreError::Conflict { current_revision });
                         }
-                        AccountKeyBundleUpdate::try_from(update)?;
+                        let candidate = AccountKeyBundleUpdate::try_from(update)?;
+                        $protect(&mut tx, expected.account_id, &candidate).await?;
                         let revision = i64::try_from(update.revision).map_err(|_| AccountKeyStoreError::RevisionExhausted)?;
                         let key: Vec<u8> = sqlx::query_scalar(&sql("SELECT account_signing_public_key FROM identity_accounts WHERE account_id=?"))
                             .bind(account).fetch_one(&mut *tx).await?;
@@ -227,6 +230,8 @@ publication!(
     update_matches_current,
     check_sqlite_key_response_capacity,
     append_deployment_audit_event_in_transaction,
+    sqlite_password_account,
+    protect_sqlite_password_bundle,
     false
 );
 publication!(
@@ -238,5 +243,7 @@ publication!(
     update_matches_current_postgres,
     check_postgres_key_response_capacity,
     append_deployment_audit_event_in_postgres_transaction,
+    postgres_password_account,
+    protect_postgres_password_bundle,
     true
 );

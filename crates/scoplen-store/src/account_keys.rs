@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod accepted_put;
+pub(crate) use accepted_put::{read_postgres_accepted_put, read_sqlite_accepted_put};
 
 use sqlx::{Postgres, Row, Sqlite, Transaction, postgres::PgRow};
 use thiserror::Error;
@@ -164,6 +165,9 @@ pub enum AccountKeyStoreError {
     /// A revision did not follow the current revision or was not an exact replay.
     #[error("account key bundle revision conflicts with current revision {current_revision}")]
     Conflict { current_revision: u64 },
+    /// A password Account requires a separately authorized atomic key/bootstrap lifecycle.
+    #[error("password Account key transition is unsupported")]
+    UnsupportedTransition,
     /// A stored row violated a schema or representation invariant.
     #[error("account key storage contains invalid row data: {0}")]
     CorruptRow(&'static str),
@@ -305,7 +309,8 @@ impl SqliteStore {
     /// Returns a validation error for an invalid artifact or device-wrap set,
     /// [`AccountKeyStoreError::Conflict`] for a stale, skipped, or non-identical replayed
     /// revision, [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would
-    /// exceed the wire bound, or [`AccountKeyStoreError::Database`] when SQLite cannot commit.
+    /// exceed the wire bound, [`AccountKeyStoreError::UnsupportedTransition`] for a new revision
+    /// on a password Account, or [`AccountKeyStoreError::Database`] when SQLite cannot commit.
     pub async fn put_account_key_bundle(
         &self,
         account_id: AccountId,
@@ -313,6 +318,9 @@ impl SqliteStore {
     ) -> Result<AccountKeyBundlePut, AccountKeyStoreError> {
         validate_update(update)?;
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let password_account =
+            crate::account_bootstrap::sqlite_password_account(&mut transaction, &account_id)
+                .await?;
         let existing = sqlx::query(
             "SELECT revision, account_signing_key, account_kem_key, recovery_blob, signature
              FROM sync_account_key_bundles WHERE account_id = ?",
@@ -339,6 +347,9 @@ impl SqliteStore {
             return Err(AccountKeyStoreError::Conflict { current_revision: 0 });
         }
 
+        if password_account {
+            return Err(AccountKeyStoreError::UnsupportedTransition);
+        }
         let updated_at_ms = now_ms()?;
         sqlx::query(
             "INSERT INTO sync_account_key_bundles
@@ -387,15 +398,17 @@ impl SqliteStore {
 
     /// Replace the signed device certificate and revocation statements for one account.
     ///
-    /// Enrollment and revocation services call this method after authenticating their own
-    /// operation.  Entries are treated as opaque, deduplicated by the database, and returned from
+    /// Legacy Account services call this method after authenticating their own operation.
+    /// Password Accounts require a separately authorized atomic lifecycle. Entries are treated
+    /// as opaque, deduplicated by the database, and returned from
     /// [`get_account_key_bundle`] in lexicographic byte order.
     ///
     /// # Errors
     ///
     /// Returns a validation error when a statement is empty or exceeds the artifact limit,
     /// [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would exceed
-    /// the wire bound, or a database error when the replacement transaction cannot commit.
+    /// the wire bound, [`AccountKeyStoreError::UnsupportedTransition`] for a password Account,
+    /// or a database error when the replacement transaction cannot commit.
     pub async fn replace_account_key_statements(
         &self,
         account_id: AccountId,
@@ -405,6 +418,9 @@ impl SqliteStore {
         validate_statements(certificates, "certificate")?;
         validate_statements(revocations, "revocation")?;
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        if crate::account_bootstrap::sqlite_password_account(&mut transaction, &account_id).await? {
+            return Err(AccountKeyStoreError::UnsupportedTransition);
+        }
         sqlx::query("DELETE FROM sync_account_key_certificates WHERE account_id = ?")
             .bind(account_id.as_slice())
             .execute(&mut *transaction)
@@ -572,7 +588,8 @@ impl PostgresStore {
     /// Returns a validation error for an invalid artifact or device-wrap set,
     /// [`AccountKeyStoreError::Conflict`] for a stale, skipped, or non-identical replayed
     /// revision, [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would
-    /// exceed the wire bound, or [`AccountKeyStoreError::Database`] when PostgreSQL cannot commit.
+    /// exceed the wire bound, [`AccountKeyStoreError::UnsupportedTransition`] for a new revision
+    /// on a password Account, or [`AccountKeyStoreError::Database`] when PostgreSQL cannot commit.
     pub async fn put_account_key_bundle(
         &self,
         account_id: AccountId,
@@ -584,6 +601,9 @@ impl PostgresStore {
             .bind(account_id.as_slice())
             .execute(&mut *transaction)
             .await?;
+        let password_account =
+            crate::account_bootstrap::postgres_password_account(&mut transaction, &account_id)
+                .await?;
         let existing = sqlx::query(
             "SELECT revision, account_signing_key, account_kem_key, recovery_blob, signature
              FROM sync_account_key_bundles WHERE account_id = $1 FOR UPDATE",
@@ -612,6 +632,9 @@ impl PostgresStore {
             return Err(AccountKeyStoreError::Conflict { current_revision: 0 });
         }
 
+        if password_account {
+            return Err(AccountKeyStoreError::UnsupportedTransition);
+        }
         let updated_at_ms = now_ms()?;
         sqlx::query(
             "INSERT INTO sync_account_key_bundles
@@ -661,11 +684,14 @@ impl PostgresStore {
     /// Replace the signed device certificate and revocation statements for one account in
     /// PostgreSQL.
     ///
+    /// Password Accounts require a separately authorized atomic lifecycle.
+    ///
     /// # Errors
     ///
     /// Returns a validation error when a statement is empty or exceeds the artifact limit,
     /// [`AccountKeyStoreError::KeyResponseLimit`] when a resulting device response would exceed
-    /// the wire bound, or a database error when the replacement transaction cannot commit.
+    /// the wire bound, [`AccountKeyStoreError::UnsupportedTransition`] for a password Account,
+    /// or a database error when the replacement transaction cannot commit.
     pub async fn replace_account_key_statements(
         &self,
         account_id: AccountId,
@@ -679,6 +705,11 @@ impl PostgresStore {
             .bind(account_id.as_slice())
             .execute(&mut *transaction)
             .await?;
+        if crate::account_bootstrap::postgres_password_account(&mut transaction, &account_id)
+            .await?
+        {
+            return Err(AccountKeyStoreError::UnsupportedTransition);
+        }
         sqlx::query("DELETE FROM sync_account_key_certificates WHERE account_id = $1")
             .bind(account_id.as_slice())
             .execute(&mut *transaction)

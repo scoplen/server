@@ -75,8 +75,8 @@ removed from the server, including their verifier, storage adapters, authorizati
 maintenance. Historical migrations and tables remain intact and unused by runtime.
 Operator tokens retain the published inert legacy scope claim; it authorizes no current business
 operation or Account/Device entry. Existing
-Accounts and Devices keep authentication and sync; new Account password registration/sign-in,
-bootstrap and device admission remain incomplete. `scoplen-identity` retains the maintained
+Accounts and Devices keep authentication and sync; new Account password registration/sign-in
+and device admission remain incomplete. `scoplen-identity` retains the maintained
 Operator passkey verifier. A separate SQLite/PostgreSQL
 device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
 keys, rotates the active key after 30 days with a seven-day verification overlap, and audits
@@ -114,15 +114,31 @@ audit before returning. Missing singleton state, invalid ciphertext or an incorr
 without generating a replacement. Database guards also reject clearing, deleting or replacing
 an initialized singleton and changing its original creation metadata. Same-value KMS rewrapping
 remains available. Restart and ordinary token-key rotation preserve Kprobe.
-This boundary is not yet connected to Account password routes; credentials, bootstrap snapshots
-and independent password sign-in remain incomplete. Intentional Kprobe replacement is not exposed.
+This key boundary is not connected to Account password routes. Intentional Kprobe replacement is not exposed.
 
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
 serving projection and audit in the same transaction. The bounded storage reader requires exact
 agreement with every current field, signature and wrap. Existing projection-only rows remain
 without acceptance evidence; historical accepted evidence is preserved. Lower-level new revisions
-invalidate prior evidence, and exact replay does not backfill it. This storage prerequisite adds
-no Account password route or credentials to existing Accounts.
+for legacy Accounts invalidate prior evidence, and exact replay does not backfill it. This storage
+prerequisite adds no Account password route or credentials to existing Accounts.
+
+The initial password Account storage helper creates a new Account, active Device/certificate,
+Personal epoch-one key, exact accepted K-4 PUT and generation-one credential in the caller's
+SQLite/PostgreSQL transaction. Only the fixed verifier and public/encrypted bootstrap state are
+stored. A creation-only ownership marker distinguishes legacy Accounts from damaged password
+Accounts; missing credentials fail closed. Database guards prevent ownership conversion,
+credential replacement and standalone deletion, while parent Account deletion cascades its
+credential. The bounded current-snapshot reader validates complete signatures and recipients,
+accepted evidence, root/ownership anchors and the supported Personal state. Other epochs,
+pending rotation and credential/root changes are unsupported. Password Account key publication
+preserves protected artifacts and existing wraps; lower-level new PUTs, independent statement
+replacement and Personal recreation are rejected. Authorized exact publication replay remains
+available. These helpers never commit, authorize an operation or issue a session/capability.
+Their caller must atomically verify the live challenge and both possession proofs, enforce
+deployment-wide Device/key freshness and admission, add the terminal receipt, consume protocol
+state and append mandatory audit. A staged snapshot can be disclosed only after confirmed
+commit. Mounted registration/login/admission and complete V3 acceptance remain incomplete.
 
 Account-id retention has a separate SQLite/PostgreSQL storage boundary. Explicit initialization
 reserves existing Account ids before enabling registration and durably admits a ceiling (default

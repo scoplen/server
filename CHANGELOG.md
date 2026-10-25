@@ -7,6 +7,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 - Advance the SQLite container recovery probe to the Account-id retention migration while
   preserving its pinned historical source and pre-upgrade recovery boundary.
 
+- Add transaction-local initial password Account persistence and bounded complete bootstrap
+  validation on SQLite/PostgreSQL. Immutable creation ownership prevents missing credentials
+  from becoming legacy state. Password Account K-4 writers preserve encrypted roots, recovery
+  material and existing wraps; unsupported transitions return nonretryable conflicts, with
+  legitimate exact replay classified first. Caller-owned protocol proofs, admission, receipts,
+  consumption and audit must commit atomically. Registration/login routes and Device admission
+  remain incomplete; no capability or session is issued by these storage helpers.
+
 - Removed retired Personal invitation/enrollment and pairing production modules, routes,
   privileges and worker maintenance. Historical migrations, tables and business data remain
   intact. Existing Device authentication and Personal sync continue. Operator setup/login/logout
@@ -35,7 +43,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   and pairing on SQLite and PostgreSQL. A bounded consistent storage reader rejects damaged or
   mismatched projections, including missing or extra wraps. Existing rows keep no historical
   acceptance claim; lower-level new revisions invalidate evidence and exact replay never
-  backfills it. Account credentials and password bootstrap remain separate work.
+  backfills it. Account registration/login and Device admission remain separate work.
 
 - Added durable current-family Operator logout on SQLite and PostgreSQL. Revocation and its
   deployment audit commit atomically; eligible fresh-proof retries confirm an already revoked
