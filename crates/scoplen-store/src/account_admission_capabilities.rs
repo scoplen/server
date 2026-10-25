@@ -22,6 +22,10 @@ pub struct ClaimedAccountAdmissionCapability {
 }
 
 impl ClaimedAccountAdmissionCapability {
+    pub(crate) fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
     #[must_use]
     pub fn account_id(&self) -> Uuid {
         self.account_id

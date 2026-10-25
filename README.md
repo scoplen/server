@@ -134,8 +134,8 @@ confirmed commit. Unknown usernames use stable synthetic salt/verifier derivatio
 preserves the attempt while retaining admitted quota debt. Preparation timeouts acknowledge
 rollback; COMMIT is never cancelled. Account deletion cascades capabilities without deleting
 permanent used-id digests. The existing once-per-second worker gate retires at most 100 indexed
-due rows from each transient table. Device admission, Account inactive-state enforcement across
-all authenticated surfaces, mounted password HTTP and complete V3 acceptance remain separate.
+due rows from each transient table. Account inactive-state enforcement across all authenticated
+surfaces, mounted password HTTP and complete V3 acceptance remain separate.
 
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
 serving projection and audit in the same transaction. The bounded storage reader requires exact
@@ -175,6 +175,26 @@ fresh proof and confirms only the original receipt, even after Device revocation
 changes or registration closure. It issues no session or current authority and cannot recreate
 a deleted Account. A new `submit` never turns into historical confirmation.
 
+The independent Device-admission coordinator claims a real password-login capability and fresh
+challenge under the Account-entry and Account locks, then revalidates the complete current
+bootstrap. Changed snapshot state invalidates that capability with a checked conflict; this
+branch does not claim to have verified an old-root signature or select an Account quota.
+Matching current state requires the additional Account signature, signed next K-4 PUT,
+root-signed new certificate and fresh Device signing proof before Account quota admission.
+Success adds exactly one active Device, certificate and wrap, preserving every old encrypted
+root, recovery/password artifact, wrap, generation and Personal epoch. The complete next
+snapshot, future login envelope, GET capacity and confirmation JSON are preflighted.
+Receipt, challenge/capability consumption and mandatory audit commit together. Invalid proofs
+keep the capability while consuming the challenged denial; rate rejection restores both
+provisional claims. A confirmed unchanged capacity denial preserves the capability and rate
+debt, consumes the challenge and requires a fresh challenge for an explicit retry.
+Only a failed new-business COMMIT reports an unknown outcome. Explicit historical confirmation
+uses the original receipt root and Device points, requires no current snapshot or capability,
+and neither reactivates a Device nor repeats its success audit. Preparation rollback precedes a
+separate five-second failure-audit preparation budget; attempted COMMIT is never cancelled.
+The mounted admission route, full inactive Account enforcement and complete V3 acceptance
+remain separate work. The current schema does not represent active/suspended Account state.
+
 Receipts retain the exact request digest, original ids, canonical original Device public points,
 Account signing root, revision and trusted time: 275 application bytes each, at most 65,536
 per Account, deleted with that Account. No encrypted bundle, verifier or bearer is copied into
@@ -183,8 +203,8 @@ revocations and admission rows, including legacy Accounts and cross-role SEC1 eq
 Without a legacy canonical-key index, it streams bounded artifacts across retained state with
 constant application memory; work grows with total statements. The HTTP deadline and bounded
 proof concurrency remain necessary. Legacy statement replacement shares the global singleton
-before Account locks. Password login and new Device admission remain separate implementation
-work; storage coordinator completion does not establish complete V3 acceptance.
+before Account locks. Registration and Device admission share these immutable receipt/freshness
+helpers; storage coordinator completion does not establish complete V3 acceptance.
 
 Account-id retention has a separate SQLite/PostgreSQL storage boundary. Explicit initialization
 reserves existing Account ids before enabling registration and durably admits a ceiling (default

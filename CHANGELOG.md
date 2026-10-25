@@ -4,6 +4,16 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add atomic SQLite/PostgreSQL independent Device admission using real password-login
+  capabilities, complete current-snapshot CAS, fresh Account/Device proofs and shared immutable
+  receipts. Success adds one Device/certificate/wrap while preserving old encrypted material.
+  Stale state spends the capability without selecting an Account quota; invalid proof, rate and
+  checked capacity denials preserve their distinct claim/debt rules. Exact historical
+  confirmation survives later root/Device changes and grants no current authority. Response
+  bounds and final expiry precede the non-cancellable COMMIT; lost business acknowledgement
+  remains unknown. Mounted admission HTTP, inactive Account state and full V3 acceptance are
+  independent gaps.
+
 - Mount the native Account request-challenge route with independent durable pre-body source
   admission, strict shared metadata/JSON validation, private Device quotas and audited failures.
   Challenge secrets are returned only after confirmed commit; browser credentials and CORS
@@ -16,7 +26,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   commit together. Historical confirmation remains available after revocation or registration
   closure, grants no current authority and cannot recreate deleted Accounts. Device freshness
   includes all retained Accounts and canonical cross-role public keys. Unacknowledged business
-  commits remain unknown; mounted HTTP, password login and new Device admission are separate work.
+  commits remain unknown; mounted HTTP and complete V3 acceptance are separate work.
 
 - Add durable password options/login and digest-only admission capabilities on SQLite/PostgreSQL.
   Strict shared DTOs, retained Kprobe, synthetic unknown-user probes, fixed-size verifier checks,
@@ -24,8 +34,8 @@ Changes are recorded here for released or reviewable repository outcomes.
   transaction outcomes. A rate rejection retains the attempt and admitted debt. Preparation
   timeout acknowledges rollback; uncertain commits disclose no token or bootstrap. Capability
   capacity is bounded globally and per Account; Account deletion preserves permanent used-id
-  digests. Indexed retirement shares the existing once-per-second worker gate. Mounted HTTP,
-  Device admission and cross-surface inactive Account enforcement remain separate work.
+  digests. Indexed retirement shares the existing once-per-second worker gate. Mounted HTTP
+  and cross-surface inactive Account enforcement remain separate work.
 
 - Advance the SQLite container recovery probe to the Account-id retention migration while
   preserving its pinned historical source and pre-upgrade recovery boundary.

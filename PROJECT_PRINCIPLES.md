@@ -91,6 +91,17 @@ self-hosted server, host agent, administration CLI, and web console.
   COMMIT is never cancelled and an unknown commit returns no capability. Digest-only capability
   consumption stays transaction-local and Account deletion leaves permanent used-id retention.
   Mounted HTTP, cross-surface inactive Account enforcement and complete V3 acceptance remain open.
+  Independent Device admission now revalidates a real password capability against the complete
+  transaction-current bootstrap before Account/Device proof and established Account admission.
+  Stale CAS invalidates the capability without claiming old-root proof verification or charging
+  Account quota. Success commits only one new Device/certificate/wrap, its signed next PUT,
+  immutable receipt and challenge/capability consumption with mandatory audit. Invalid proof,
+  rate and unchanged capacity denials preserve their explicit claim/debt semantics. Historical
+  confirmation uses only exact receipt facts and the original root/Device keys; it neither
+  restores authority nor repeats success audit. Full response bounds and both final expiries
+  precede an uncancelled COMMIT. Shared receipt/freshness helpers preserve the registration
+  boundary. The schema has no Account active/suspended state; that enforcement, mounted
+  admission HTTP and complete identity acceptance remain independent gaps.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
