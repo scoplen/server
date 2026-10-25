@@ -278,7 +278,13 @@ macro_rules! constraints {
 macro_rules! audit_rollback {
     ($store:expr, $create:literal, $remove:literal) => {{
         let store = &$store;
-        sqlx::raw_sql($create).execute(store.pool()).await.expect("install audit failure");
+        // SQLite can reject CREATE against a stale schema cached on another pooled connection.
+        let mut failure_connection =
+            store.pool().acquire().await.expect("owned failure connection");
+        sqlx::raw_sql($create)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("install audit failure");
         assert!(matches!(
             store.ensure_account_probe_key(&TestKms([7; 32])).await,
             Err(AccountProbeKeyError::Audit(_))
@@ -290,12 +296,18 @@ macro_rules! audit_rollback {
                 .expect("uninitialized singleton");
         assert!(key.is_none());
         assert!(store.deployment_audit_head().await.expect("rolled-back audit").is_none());
-        sqlx::raw_sql($remove).execute(store.pool()).await.expect("remove audit failure");
+        sqlx::raw_sql($remove)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("remove audit failure");
         let original = store
             .ensure_account_probe_key(&TestKms([7; 32]))
             .await
             .expect("initialize after rollback");
-        sqlx::raw_sql($create).execute(store.pool()).await.expect("install rewrap failure");
+        sqlx::raw_sql($create)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("install rewrap failure");
         assert!(matches!(
             store.rewrap_account_probe_key(&TestKms([7; 32]), &TestKms([9; 32])).await,
             Err(AccountProbeKeyError::Audit(_))
@@ -321,22 +333,30 @@ macro_rules! audit_rollback {
                 .sequence,
             1
         );
-        sqlx::raw_sql($remove).execute(store.pool()).await.expect("remove rewrap failure");
+        sqlx::raw_sql($remove)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("remove rewrap failure");
     }};
 }
 
 macro_rules! ignored_write {
     ($store:expr, $create:literal, $remove:literal) => {{
         let store = &$store;
-        sqlx::raw_sql($create).execute(store.pool()).await.expect("suppress key write");
+        let mut failure_connection =
+            store.pool().acquire().await.expect("owned failure connection");
+        sqlx::raw_sql($create).execute(&mut *failure_connection).await.expect("suppress key write");
         assert!(matches!(
             store.ensure_account_probe_key(&TestKms([7; 32])).await,
             Err(AccountProbeKeyError::Integrity)
         ));
         assert!(store.deployment_audit_head().await.expect("no creation audit").is_none());
-        sqlx::raw_sql($remove).execute(store.pool()).await.expect("restore writes");
+        sqlx::raw_sql($remove).execute(&mut *failure_connection).await.expect("restore writes");
         let original = store.ensure_account_probe_key(&TestKms([7; 32])).await.expect("initialize");
-        sqlx::raw_sql($create).execute(store.pool()).await.expect("suppress rewrap write");
+        sqlx::raw_sql($create)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("suppress rewrap write");
         assert!(matches!(
             store.rewrap_account_probe_key(&TestKms([7; 32]), &TestKms([9; 32])).await,
             Err(AccountProbeKeyError::Integrity)
@@ -358,7 +378,10 @@ macro_rules! ignored_write {
                 .sequence,
             1
         );
-        sqlx::raw_sql($remove).execute(store.pool()).await.expect("restore rewrap writes");
+        sqlx::raw_sql($remove)
+            .execute(&mut *failure_connection)
+            .await
+            .expect("restore rewrap writes");
     }};
 }
 
