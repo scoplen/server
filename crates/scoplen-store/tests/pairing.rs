@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "pairing/maintenance.rs"]
+mod maintenance;
+
 #[path = "pairing/retention.rs"]
 mod retention;
 

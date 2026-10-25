@@ -137,8 +137,15 @@ commit together; success clearing participates in its business transaction. Boun
 and source normalization apply on both databases.
 The durable relay stores only a capability digest and seven ordered, role-specific opaque
 slots. Five-minute expiry, bounded cleanup, a 1,000-live/10,000-retained session limit and a
-256 MiB aggregate payload limit serialize across replicas. Cancellation and expiry erase
-payloads immediately and retain terminal metadata until original expiry plus 24 hours.
+256 MiB aggregate payload limit serialize across replicas. Cancellation and durable expiry
+transitions erase payloads in their transaction and retain terminal metadata until original
+expiry plus 24 hours.
+The worker also runs one maintenance batch per 30-second heartbeat, independently of pairing
+requests: at most 256 live sessions expire and at most 256 retention-expired sessions are
+removed. It samples time after serialization locks and commits each transition with its audit.
+It preserves unexpired sessions and retained completion receipts, leaves further work for the
+next heartbeat, and cancels an active maintenance pass during shutdown. Logs contain only
+committed counts and fixed error categories.
 Second-device completion rechecks current authorization and verifies the exact signed
 certificate, complete next K-4 bundle, certified/unrevoked recipient set and context-bound
 new-device acceptance in one transaction. It commits identity, keys, response-capacity checks,

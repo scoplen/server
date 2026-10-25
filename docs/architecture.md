@@ -187,10 +187,20 @@ storage boundary for local filesystem and S3-compatible stores, with validated k
 or multipart access. Database-backed roles initialize the configured object backend at startup and
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
-expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Retention scheduling
-visits every vault through strictly increasing id pages of at most 1,000 entries on SQLite and
-PostgreSQL. Each sweep captures its greatest id before paging, defers later appended ids, and
-restarts from the beginning on the next heartbeat to discover ids inserted behind its cursor.
+expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. The worker
+also runs one bounded pairing maintenance transaction per heartbeat before the sync-retention
+sweep. This shares the request-triggered SQLite/PostgreSQL cleanup: after taking the existing
+pairing serialization lock, it samples trusted time, expires at most 256 live sessions with
+payload erasure, then removes at most 256 sessions whose fixed retention has elapsed. Each
+transition and its deployment audit commit atomically. No-change passes roll back without
+creating an audit event. Missed heartbeats are skipped after a slow sweep; further eligible
+sessions wait for a later heartbeat. Shutdown cancels an active pass, with transaction and pool
+cleanup completing before normal lease release. Unexpired sessions and retained receipts remain
+unchanged; logs expose only committed counts and fixed errors.
+Retention scheduling visits every vault through strictly increasing id pages of at most 1,000
+entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
+later appended ids, and restarts from the beginning on the next heartbeat to discover ids
+inserted behind its cursor.
 Shutdown can interrupt an active retention sweep; unfinished durable jobs keep their existing
 deduplication, lease and retry behavior. Retention jobs use the same SQLite/PostgreSQL transaction
 for Personal ownership, complete bounded signed certificates/revocations, current admission
