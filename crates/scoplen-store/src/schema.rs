@@ -1926,7 +1926,47 @@ const ACCOUNT_PASSWORD_PROBE_KEY: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ACCOUNT_USED_IDS: TableSpec = TableSpec {
+    name: "account_used_ids",
+    columns: &[ColumnSpec {
+        name: "digest",
+        kind: LogicalType::Bytes,
+        nullable: false,
+        primary_key: true,
+    }],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
+const ACCOUNT_ID_RETENTION_GUARD: TableSpec = TableSpec {
+    name: "account_id_retention_guard",
+    columns: &[
+        ColumnSpec {
+            name: "singleton",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "row_ceiling",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "maintenance",
+            kind: LogicalType::Boolean,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
 const TABLES: &[TableSpec] = &[
+    ACCOUNT_USED_IDS,
+    ACCOUNT_ID_RETENTION_GUARD,
     ACCOUNT_PASSWORD_PROBE_KEY,
     SYNC_WRITE_ADMISSION,
     SYNC_WRITE_ADMISSION_CLOCK,
@@ -2007,7 +2047,8 @@ fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType,
     match (table, column, declared.as_str()) {
         ("identity_devices", "active", "INTEGER")
         | ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER")
-        | ("sync_vaults", "rotation_pending", "INTEGER") => Ok(LogicalType::Boolean),
+        | ("sync_vaults", "rotation_pending", "INTEGER")
+        | ("account_id_retention_guard", "maintenance", "INTEGER") => Ok(LogicalType::Boolean),
         (_, _, "BLOB") => Ok(LogicalType::Bytes),
         (_, _, "TEXT") => Ok(LogicalType::Text),
         (_, _, "INTEGER") => Ok(LogicalType::Integer),
@@ -2020,7 +2061,8 @@ fn postgres_kind(table: &str, column: &str, declared: &str) -> Result<LogicalTyp
     match (table, column, declared) {
         ("identity_devices", "active", "boolean")
         | ("sync_objects" | "sync_object_versions", "tombstone", "boolean")
-        | ("sync_vaults", "rotation_pending", "boolean") => Ok(LogicalType::Boolean),
+        | ("sync_vaults", "rotation_pending", "boolean")
+        | ("account_id_retention_guard", "maintenance", "boolean") => Ok(LogicalType::Boolean),
         (_, _, "bytea") => Ok(LogicalType::Bytes),
         (_, _, "text") => Ok(LogicalType::Text),
         (_, _, "bigint") => Ok(LogicalType::Integer),
@@ -2413,6 +2455,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025030000_accepted_account_key_put.sql");
     const POSTGRES_ACCEPTED_ACCOUNT_KEY_PUT: &str =
         include_str!("../migrations/postgres/20261025030000_accepted_account_key_put.sql");
+    const SQLITE_ACCOUNT_USED_IDS: &str =
+        include_str!("../migrations/sqlite/20261025040000_account_used_ids.sql");
+    const POSTGRES_ACCOUNT_USED_IDS: &str =
+        include_str!("../migrations/postgres/20261025040000_account_used_ids.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2458,6 +2504,7 @@ mod tests {
             SQLITE_SYNC_WRITE_ADMISSION,
             SQLITE_ACCOUNT_PASSWORD_PROBE_KEY,
             SQLITE_ACCEPTED_ACCOUNT_KEY_PUT,
+            SQLITE_ACCOUNT_USED_IDS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2483,6 +2530,7 @@ mod tests {
             POSTGRES_SYNC_WRITE_ADMISSION,
             POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY,
             POSTGRES_ACCEPTED_ACCOUNT_KEY_PUT,
+            POSTGRES_ACCOUNT_USED_IDS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2532,7 +2580,10 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 25);
+        assert_eq!(
+            migration_count,
+            i64::try_from(crate::POSTGRES_MIGRATIONS.iter().count()).unwrap()
+        );
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2541,7 +2592,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 25);
+        assert_eq!(replay_count, migration_count);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

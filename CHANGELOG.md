@@ -19,6 +19,12 @@ Changes are recorded here for released or reviewable repository outcomes.
   clock, so failed jobs remain deferred until a later sweep. Deterministic SQLite/PostgreSQL
   regressions cover completion, retry clocks and eligibility after the retry time has elapsed.
 
+- Add Account-id digest retention on SQLite and PostgreSQL, with bounded upgrade reservation,
+  a durable admitted ceiling, explicit audited maintenance and a transaction-local registration
+  helper. Independent instances serialize new digests; rollback preserves capacity and audit.
+  Forward schema guards prevent ordinary digest removal or ceiling reset. Registration HTTP,
+  operator maintenance authorization and warning delivery remain separate work.
+
 - Keep probe-key fault-injection trigger creation and removal on one owned connection, so
   SQLite pool schema caches cannot reject a repeated failure fixture as already existing.
 
