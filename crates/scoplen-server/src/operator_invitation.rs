@@ -16,7 +16,7 @@ use axum::{
 };
 use scoplen_api::{
     ErrorCode, ProblemDetails,
-    auth::OperatorAccessOperation,
+    auth::{OperatorAccessOperation, OperatorAccessRequirement},
     personal_enrollment::{
         MAX_PERSONAL_INVITATION_REQUEST_BYTES, PersonalInvitationRequest, PersonalRateLimitHeaders,
     },
@@ -213,7 +213,10 @@ async fn issue_request(
     }
     let verified = authenticate(state, headers).await?;
     let operation = OperatorAccessOperation::PersonalInvitationIssue;
-    if !operation.required_scope().is_present_in(&verified.claims().scope) {
+    let OperatorAccessRequirement::Scope(scope) = operation.requirement() else {
+        return Err(Failure::Policy);
+    };
+    if !scope.is_present_in(&verified.claims().scope) {
         return Err(Failure::Policy);
     }
     let current =
