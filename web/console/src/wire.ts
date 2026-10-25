@@ -6,6 +6,7 @@ import type {
   OperatorRequestOptions,
   OperatorSetupOptionsResponse,
   PersonalInvitationResponse,
+  OperatorLogoutResponse,
 } from "./generated/api.ts";
 
 export function bytes(
@@ -148,6 +149,13 @@ export async function jsonResponse(
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
+}
+
+export function logoutResponse(value: unknown): OperatorLogoutResponse {
+  const input = object(value);
+  if (Object.keys(input).length !== 1 || input.revoked !== true)
+    throw new Error("Sign-out confirmation could not be verified.");
+  return { revoked: true };
 }
 
 export function sessionResponse(value: unknown): BrowserAuthTokenResponse {

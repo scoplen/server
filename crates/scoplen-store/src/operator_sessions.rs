@@ -391,7 +391,7 @@ macro_rules! session_store {
             }
 
             /// Revoke only the access token's current eligible browser family.
-            /// The caller must verify the independent token, exact Origin and token-bound DPoP,
+            /// The caller must verify the independent token, exact Origin and token-bound `DPoP`,
             /// durably claim that proof once, and charge the source bucket before this call.
             /// No refresh credential is read, rotated, deleted or returned.
             ///

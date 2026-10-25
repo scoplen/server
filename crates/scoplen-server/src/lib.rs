@@ -12,6 +12,7 @@ mod device_auth;
 mod error;
 mod operator_auth;
 mod operator_invitation;
+mod operator_logout;
 mod pairing;
 mod personal_enrollment;
 mod personal_sync;

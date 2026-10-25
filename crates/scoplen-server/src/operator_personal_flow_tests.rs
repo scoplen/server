@@ -29,13 +29,13 @@ mod account_profile;
 #[path = "personal_key_tests.rs"]
 mod key_publication;
 #[path = "personal_notify_tests.rs"]
-mod notifications;
+pub(super) mod notifications;
 #[path = "pairing_http_tests.rs"]
 mod pairing;
 #[path = "personal_retention_tests.rs"]
 mod retention;
 
-async fn mount_complete_api(f: &mut Fixture) {
+pub(super) async fn mount_complete_api(f: &mut Fixture) {
     f.server.abort();
     let _ = (&mut f.server).await;
     let storage = ObjectStorage::from_config(&ObjectStorageConfig::Filesystem {
@@ -94,7 +94,7 @@ async fn protected(
     .await
 }
 
-fn enrollment(token: [u8; 32], client: &P256SigningKey) -> PersonalEnrollmentRequest {
+pub(super) fn enrollment(token: [u8; 32], client: &P256SigningKey) -> PersonalEnrollmentRequest {
     let account = Uuid::now_v7();
     let device = Uuid::now_v7();
     let signing = Ed25519SigningKey::from_bytes(&[7; 32]).expect("account signing key");
@@ -151,7 +151,11 @@ fn enrollment(token: [u8; 32], client: &P256SigningKey) -> PersonalEnrollmentReq
     request
 }
 
-async fn authenticate_device(f: &Fixture, device: Uuid, client: &P256SigningKey) -> String {
+pub(super) async fn authenticate_device(
+    f: &Fixture,
+    device: Uuid,
+    client: &P256SigningKey,
+) -> String {
     let body = AuthChallengeRequest::new(device).expect("challenge").to_json().expect("JSON");
     let reply = http(
         f.address,

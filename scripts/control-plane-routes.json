@@ -9,6 +9,7 @@
   { "method": "POST", "path": "/auth/operator/setup/finish" },
   { "method": "POST", "path": "/auth/operator/login/options" },
   { "method": "POST", "path": "/auth/operator/login/finish" },
+  { "method": "POST", "path": "/auth/operator/logout" },
   { "method": "POST", "path": "/auth/personal-enroll" },
   { "method": "POST", "path": "/auth/pairings" },
   { "method": "POST", "path": "/auth/pairings/{pairing}/claim" },

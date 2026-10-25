@@ -9,7 +9,25 @@ import {
   timestamp,
   sessionResponse,
   invitationResponse,
+  logoutResponse,
 } from "./wire.ts";
+
+test("logout confirms only one true revoked member", () => {
+  assert.deepEqual(logoutResponse({ revoked: true }), { revoked: true });
+  for (const value of [
+    null,
+    [],
+    {},
+    { revoked: false },
+    { revoked: 1 },
+    { revoked: "true" },
+    { revoked: true, sid: "other" },
+  ])
+    assert.throws(() => logoutResponse(value));
+  assert.throws(() =>
+    logoutResponse(strictJson('{"revoked":true,"rev\\u006fked":true}')),
+  );
+});
 
 test("canonical bounded base64url rejects aliases and unused pad bits", () => {
   assert.deepEqual(bytes("AA", 1), new Uint8Array([0]));

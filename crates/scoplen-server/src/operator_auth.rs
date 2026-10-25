@@ -414,7 +414,9 @@ async fn ceremony(
             (LOGIN_OPTIONS_PATH, MAX_OPERATOR_OPTIONS_REQUEST_BYTES)
         }
         OperatorAuthEndpoint::LoginFinish => (LOGIN_FINISH_PATH, MAX_OPERATOR_LOGIN_FINISH_BYTES),
-        OperatorAuthEndpoint::Refresh => unreachable!("refresh is not a passkey ceremony"),
+        OperatorAuthEndpoint::Refresh | OperatorAuthEndpoint::Logout => {
+            unreachable!("session operations are not passkey ceremonies")
+        }
     };
     let body = match json_body(&parts.headers, body, limit).await {
         Ok(body) => body,
@@ -443,7 +445,9 @@ async fn ceremony(
         OperatorAuthEndpoint::LoginFinish => {
             OperatorLoginFinishRequest::from_json(body.as_bytes()).map(CeremonyRequest::LoginFinish)
         }
-        OperatorAuthEndpoint::Refresh => unreachable!("refresh is not a passkey ceremony"),
+        OperatorAuthEndpoint::Refresh | OperatorAuthEndpoint::Logout => {
+            unreachable!("session operations are not passkey ceremonies")
+        }
     };
     let Ok(decoded) = decoded else {
         return attempt

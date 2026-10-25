@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
+          ref: 439b956158b386a7eb6c951a22e4dd5ce43335d5
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -141,12 +142,16 @@ jobs:
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::postgres_
       - name: Check PostgreSQL Operator sessions and authorization locks
         run: cargo test -p scoplen-store --test operator_sessions --features postgres-integration postgres_
+      - name: Check populated Operator logout admission migration
+        run: cargo test --locked -p scoplen-store --test operator_logout_migrations --features postgres-integration
       - name: Check bounded PostgreSQL refresh retirement and uncertain commits
         run: cargo test --locked -p scoplen-store --test refresh_retention --features postgres-integration postgres_
       - name: Check PostgreSQL Operator invitation issuance HTTP
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_invitation::tests::postgres_
       - name: Check PostgreSQL Operator login and browser refresh HTTP
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::postgres_
+      - name: Check PostgreSQL current Operator logout HTTP
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::logout::postgres_
       - name: Check PostgreSQL public Personal bootstrap and sync
         run: cargo test -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::postgres_
       - name: Check PostgreSQL public ACK and atomic Personal worker retention

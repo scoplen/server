@@ -17,6 +17,13 @@ Changes are recorded here for released or reviewable repository outcomes.
   Existing protected invitation handling requires the business-scope variant explicitly;
   an intrinsic requirement cannot grant invitation authority. Mounting logout is separate.
 
+- Added current Operator-family sign out through the strict DPoP-protected logout HTTP route
+  and Personal console. It ignores refresh cookies, revokes and audits only the current family,
+  and confirms eligible already-revoked state with a fresh proof. Uncertain outcomes retain the
+  original browser credentials for explicit retry before expiry; local tab locking remains a
+  separate action. The console serializes session actions and rejects late responses after lock.
+  Route-contract CI checks the same published proto revision as the server dependency.
+
 - Added atomic worker retirement of expired device and Operator refresh credentials on SQLite
   and PostgreSQL. Each heartbeat examines at most 16 expired families per kind, removes at most
   256 digests and deletes only empty families. Unexpired and revoked-unexpired reuse evidence

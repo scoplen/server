@@ -687,13 +687,7 @@ async fn postgres_logout_serializes_both_orders_with_real_refresh() {
             let keyring = keyring.clone();
             let refresh = cookie(&session);
             tokio::spawn(async move {
-                if !logout_first {
-                    replica
-                        .logout_operator(source(), &principal, ORIGIN)
-                        .await
-                        .map(|_| ())
-                        .map_err(|_| ())
-                } else {
+                if logout_first {
                     replica
                         .refresh_operator(
                             source(),
@@ -702,6 +696,12 @@ async fn postgres_logout_serializes_both_orders_with_real_refresh() {
                             proof(&key(1)).as_str(),
                             &keyring,
                         )
+                        .await
+                        .map(|_| ())
+                        .map_err(|_| ())
+                } else {
+                    replica
+                        .logout_operator(source(), &principal, ORIGIN)
                         .await
                         .map(|_| ())
                         .map_err(|_| ())
