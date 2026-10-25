@@ -665,6 +665,7 @@ macro_rules! pairing_store {
                             .bind(id.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
                         if acceptance != request.new_device_signature { return Err(PairingStoreError::InvalidRequest); }
                         let update = verify_update(&stored, request, &key, revision, [&signing,&kem,&recovery], &certs,&revocations,&handoff)?;
+                        let accepted_put = update.to_cbor().map_err(|_| PairingStoreError::InvalidRequest)?;
                         let device = stored.context.responder_device_id.as_bytes().as_slice();
                         let exists: Option<Vec<u8>> = sqlx::query_scalar(&sql("SELECT device_id FROM identity_devices WHERE device_id=?"))
                             .bind(device).fetch_optional(&mut *tx).await?;
@@ -673,8 +674,8 @@ macro_rules! pairing_store {
                             .bind(device).bind(account).bind(&request.device_certificate).bind(true).bind(now).execute(&mut *tx).await?;
                         sqlx::query(&sql("INSERT INTO sync_account_key_certificates (account_id,certificate) VALUES (?,?)"))
                             .bind(account).bind(&request.device_certificate).execute(&mut *tx).await?;
-                        sqlx::query(&sql("UPDATE sync_account_key_bundles SET revision=?,signature=?,updated_at_ms=? WHERE account_id=?"))
-                            .bind(i64::try_from(update.revision).map_err(|_| PairingStoreError::Conflict)?).bind(&update.signature).bind(now).bind(account).execute(&mut *tx).await?;
+                        sqlx::query(&sql("UPDATE sync_account_key_bundles SET revision=?,signature=?,updated_at_ms=?,accepted_put_cbor=? WHERE account_id=?"))
+                            .bind(i64::try_from(update.revision).map_err(|_| PairingStoreError::Conflict)?).bind(&update.signature).bind(now).bind(accepted_put).bind(account).execute(&mut *tx).await?;
                         sqlx::query(&sql("DELETE FROM sync_account_key_device_wraps WHERE account_id=?")).bind(account).execute(&mut *tx).await?;
                         for wrap in &update.device_wraps {
                             sqlx::query(&sql("INSERT INTO sync_account_key_device_wraps (account_id,device_id,wrapped_ark) VALUES (?,?,?)"))

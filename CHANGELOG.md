@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Retain the complete accepted signed K-4 PUT atomically with verified enrollment, publication
+  and pairing on SQLite and PostgreSQL. A bounded consistent storage reader rejects damaged or
+  mismatched projections, including missing or extra wraps. Existing rows keep no historical
+  acceptance claim; lower-level new revisions invalidate evidence and exact replay never
+  backfills it. Account credentials and password bootstrap remain separate work.
+
 - Added durable current-family Operator logout on SQLite and PostgreSQL. Revocation and its
   deployment audit commit atomically; eligible fresh-proof retries confirm an already revoked
   family without another revocation event. Other families and all retained refresh digests stay

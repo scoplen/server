@@ -218,6 +218,7 @@ macro_rules! pairing_tests {
                 let receipt=first.expect("first confirmed result");
                 assert_eq!(second.expect("exact concurrent replay"),receipt);
                 assert_eq!(receipt.revision,2);
+                assert_eq!(store.read_accepted_account_key_put(old.account_id).await.expect("accepted membership PUT"),Some(complete.key_bundle_update.clone()));
                 assert_eq!(store.deployment_audit_head().await.expect("audit").expect("head").sequence,before+1);
                 let snapshot=store.read_pairing(ORIGIN,context.pairing_id,PairingActor::Responder(&token),source()).await.expect("terminal read");
                 assert_eq!(snapshot.state,PairingState::Completed);
@@ -368,6 +369,7 @@ macro_rules! pairing_tests {
                 sqlx::raw_sql(remove).execute(store.pool()).await.expect("restore audit");
                 let devices:i64=sqlx::query_scalar(&sql("SELECT COUNT(*) FROM identity_devices WHERE device_id=?")).bind(context.responder_device_id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("rolled-back identity");assert_eq!(devices,0);
                 let revision:i64=sqlx::query_scalar(&sql("SELECT revision FROM sync_account_key_bundles WHERE account_id=?")).bind(old.account_id.as_slice()).fetch_one(store.pool()).await.expect("original revision");assert_eq!(revision,1);
+                assert_eq!(store.read_accepted_account_key_put(old.account_id).await.expect("original evidence after rollback"),Some(request.key_bundle_update.to_cbor().expect("original PUT")));
                 let snapshot=store.read_pairing(ORIGIN,context.pairing_id,PairingActor::Responder(&token),source()).await.expect("ready after rollback");assert_eq!(snapshot.state,PairingState::Ready);assert_eq!(snapshot.messages.len(),7);
                 store.complete_pairing(ORIGIN,context.pairing_id,&old,&complete,source()).await.expect("retry after confirmed rollback");
                 pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}

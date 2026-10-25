@@ -127,6 +127,13 @@ remains available. Restart and ordinary token-key rotation preserve Kprobe.
 This boundary is not yet connected to Account password routes; credentials, bootstrap snapshots
 and independent password sign-in remain incomplete. Intentional Kprobe replacement is not exposed.
 
+Verified first-device enrollment, key publication and pairing now retain the complete accepted
+canonical signed K-4 PUT with their serving projection and audit in the same transaction. The
+bounded storage reader requires exact agreement with every current field, signature and wrap.
+Existing projection-only rows remain without acceptance evidence. Lower-level new revisions
+invalidate prior evidence, and exact replay does not backfill it. This is a storage prerequisite
+for complete bootstrap; it adds no Account password route or credentials to existing Accounts.
+
 The worker retires expired device and Operator refresh credentials in one atomic transaction
 per 30-second heartbeat, independently of later authentication requests. For each kind it
 locks at most 16 expired families, removes at most 256 digests and removes only empty expired
