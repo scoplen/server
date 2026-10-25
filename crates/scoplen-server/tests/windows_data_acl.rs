@@ -236,23 +236,56 @@ async fn migration_snapshots_inherit_private_permissions_and_unsafe_existing_acl
     use scoplen_store::RelationalStore;
     let fixture = Fixture::new();
     let config = fixture.config();
-    let mut prepared = prepare_roles(&config, &[Role::Api]).await.expect("private initial startup");
-    let store = prepared.store.take().expect("SQLite store");
-    sqlx::query(
-        "DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)",
-    )
-    .execute(store.pool())
-    .await
-    .expect("owned fixture pending migration");
-    store.pool().close().await;
-    drop(store);
-    drop(prepared);
+    bootstrap(&config).expect("private deployment material");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(config.server.data_dir.join("scoplen.sqlite"))
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .foreign_keys(true),
+        )
+        .await
+        .expect("historical database in private deployment");
+    let mut prior = sqlx::migrate!("../scoplen-store/migrations/sqlite");
+    let pending_version = prior.migrations.to_mut().pop().expect("latest migration").version;
+    prior.run(&pool).await.expect("genuine schema before the latest migration");
+    pool.close().await;
+    drop(pool);
     let mut prepared =
         prepare_roles(&config, &[Role::Api]).await.expect("private protected upgrade");
     let store = prepared.store.take().expect("upgraded SQLite store");
+    let migration_completed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = ? AND success = TRUE)",
+    )
+    .bind(pending_version)
+    .fetch_one(store.pool())
+    .await
+    .expect("completed private upgrade");
+    assert!(migration_completed);
     store.pool().close().await;
     drop(store);
     drop(prepared);
+    let probe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(config.server.data_dir.join("deployment.lease"))
+        .expect("existing fixture lease");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match probe.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("unexpected fixture lease error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("upgraded startup releases its lease before ACL mutation");
+    drop(probe);
     let directory = config.server.data_dir.join("scoplen.sqlite.migration-snapshots");
     let snapshots: Vec<_> = fs::read_dir(&directory)
         .expect("snapshot directory")

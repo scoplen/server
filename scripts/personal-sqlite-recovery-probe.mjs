@@ -51,7 +51,7 @@ assert(
 assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
 
 const oldMigration = 20261024030000;
-const newMigration = 20261024040000;
+const newMigration = 20261025000000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -124,6 +124,29 @@ function inspectDatabase(path, current) {
     assert(versions.includes(oldMigration));
     assert.equal(versions.includes(newMigration), current);
     assert.equal(versions.at(-1), current ? newMigration : oldMigration);
+    const admissionTables = database
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('sync_write_admission', 'sync_write_admission_clock') ORDER BY name",
+      )
+      .all()
+      .map((row) => row.name);
+    assert.deepEqual(
+      admissionTables,
+      current ? ["sync_write_admission", "sync_write_admission_clock"] : [],
+    );
+    if (current) {
+      const clock = database
+        .prepare(
+          "SELECT retired_through_ns FROM sync_write_admission_clock WHERE singleton = 1",
+        )
+        .get();
+      assert.deepEqual(Buffer.from(clock.retired_through_ns), Buffer.alloc(16));
+      assert.equal(
+        database.prepare("SELECT COUNT(*) AS count FROM sync_write_admission").get()
+          .count,
+        0,
+      );
+    }
     const organization = database
       .prepare("SELECT name FROM organizations WHERE id = ?")
       .get(organizationId);

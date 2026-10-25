@@ -154,6 +154,20 @@ prevents startup. `/readyz` queries the database and returns 503 when the query 
 listener mounts Personal enrollment, device authentication, Operator setup/login/refresh and
 the authenticated Personal sync subset. The injected sync router selects one SQLite or PostgreSQL
 backend for its account-key, object-sync, and shared-vault operations.
+Object POST admission uses a separate short transaction before body collection. The store owns
+the validated rate settings and fixed-point arithmetic; the HTTP layer reexports those settings
+and advertises them in the session. SQLite reserves the writer before sampling database time. PostgreSQL
+upserts the device bucket to serialize first insertion and existing debt before sampling
+`clock_timestamp()`. Admission does not hold account/vault locks or keep the bucket lock through
+body validation and business mutation. A failed or unconfirmed admission transaction dispatches
+no business write and has `changed: false`, `retryable: true`.
+Retirement uses an indexed, fixed set of at most 16 fully refilled idle candidates. PostgreSQL
+skips locked rows inside that set without finding replacement candidates. Candidate locks precede
+the singleton retirement-clock update, which commits atomically with deletion. Ordinary
+admission only reads that clock through a non-locking query. Preserved clock history prevents a
+deleted bucket from gaining early refill after database time rolls backward. Fixed-width
+big-endian bytes preserve positive `u64` settings and exact `u128` balances/horizons in both
+backends; no floating-point or signed count narrowing participates in rate admission.
 It delegates authentication, signature verification, membership, and policy decisions to the
 service. Notification events are encoded by `scoplen-api` and delivered only to authenticated
 device subscriptions through a process-local broadcast hub. SQLite publishes after a committed

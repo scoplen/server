@@ -6,11 +6,8 @@ use super::{
 };
 #[cfg(feature = "postgres-integration")]
 use crate::PostgresStore;
-use crate::sync::VaultKind;
+use crate::{sync::VaultKind, test_support as support};
 use std::{collections::BTreeMap, sync::Mutex};
-
-#[path = "../../../tests/support/mod.rs"]
-mod support;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct Observation {
