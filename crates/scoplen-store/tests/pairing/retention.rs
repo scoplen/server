@@ -66,7 +66,7 @@ macro_rules! retention_tests {
             }
 
             async fn close(store: $store, directory: Option<std::path::PathBuf>) {
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 if let Some(directory) = directory { support::remove_test_directory(directory).await; }
             }
 
@@ -310,7 +310,7 @@ async fn sqlite_retention_reads_current_identity_after_obtaining_the_writer_lock
     let report = task.await.expect("retention task").expect("serialized read");
     assert_eq!(report.purged_tombstones, 0);
     assert_eq!(report.purge_horizon, 0);
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
     support::remove_test_directory(directory.expect("SQLite directory")).await;
 }
 
@@ -384,7 +384,7 @@ async fn postgres_retention_waits_for_actual_pairing_commit_and_counts_the_new_d
         .execute(store.pool())
         .await
         .expect("remove fixture gate");
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -449,7 +449,7 @@ async fn postgres_retention_publication_and_authorized_ack_keep_account_before_v
             .purged_tombstones,
         1
     );
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
 }
 
 #[cfg(feature = "postgres-integration")]
@@ -477,5 +477,5 @@ async fn postgres_retention_rechecks_owner_after_waiting_for_its_row() {
     let report = retention.await.expect("retention").expect("conservative owner recheck");
     assert_eq!(report.purged_tombstones, 0);
     assert_eq!(report.purge_horizon, 0);
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
 }
