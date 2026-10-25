@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Advance the SQLite container recovery probe to the Account-id retention migration while
+  preserving its pinned historical source and pre-upgrade recovery boundary.
+
 - Removed retired Personal invitation/enrollment and pairing production modules, routes,
   privileges and worker maintenance. Historical migrations, tables and business data remain
   intact. Existing Device authentication and Personal sync continue. Operator setup/login/logout
