@@ -176,6 +176,24 @@ async fn postgres_begin(
 macro_rules! probe_key_store {
     ($store:ty, $begin:ident, $write:literal, $append:ident) => {
         impl $store {
+            /// Read the retained deployment probe key without creating or replacing it.
+            ///
+            /// # Errors
+            /// Missing initialization, corrupt ciphertext or a wrong KMS key fails closed.
+            pub async fn read_account_probe_key(
+                &self,
+                kms: &dyn KeyManagementService,
+            ) -> Result<AccountProbeKey, AccountProbeKeyError> {
+                let row = sqlx::query(READ)
+                    .fetch_optional(self.pool())
+                    .await?
+                    .ok_or(AccountProbeKeyError::Integrity)?;
+                let stored =
+                    stored_key(row.try_get("encrypted_key")?, row.try_get("created_at_ms")?)?
+                        .ok_or(AccountProbeKeyError::Integrity)?;
+                open(&stored, kms)
+            }
+
             /// Load or initialize the independently random Kprobe under a database lock.
             ///
             /// Initialization and its deployment audit commit together. No key is returned

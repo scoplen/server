@@ -2294,8 +2294,112 @@ const ACCOUNT_REQUEST_CHALLENGES: TableSpec = TableSpec {
     }],
 };
 
+const ACCOUNT_PASSWORD_ATTEMPTS: TableSpec = TableSpec {
+    name: "account_password_attempts",
+    columns: &[
+        ColumnSpec {
+            name: "attempt_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "origin_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "username",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "password_profile",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "password_salt",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[IndexSpec { name: "account_password_attempts_expiry", columns: &["expires_at_ms"] }],
+};
+
+const ACCOUNT_ADMISSION_CAPABILITIES: TableSpec = TableSpec {
+    name: "account_admission_capabilities",
+    columns: &[
+        ColumnSpec {
+            name: "token_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential_generation",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "snapshot_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[
+        IndexSpec { name: "account_admission_capabilities_expiry", columns: &["expires_at_ms"] },
+        IndexSpec { name: "account_admission_capabilities_account", columns: &["account_id"] },
+    ],
+};
+
 const TABLES: &[TableSpec] = &[
     ACCOUNT_OPERATION_RECEIPTS,
+
+    ACCOUNT_PASSWORD_ATTEMPTS,
+    ACCOUNT_ADMISSION_CAPABILITIES,
     ACCOUNT_PASSWORD_BOOTSTRAP,
     ACCOUNT_ENTRY_STATE,
     ACCOUNT_ENTRY_ADMISSION,
@@ -2809,6 +2913,11 @@ mod tests {
     const POSTGRES_ACCOUNT_OPERATION_RECEIPTS: &str =
         include_str!("../migrations/postgres/20261025070000_account_operation_receipts.sql");
 
+    const SQLITE_ACCOUNT_PASSWORD_LOGIN: &str =
+        include_str!("../migrations/sqlite/20261025080000_account_password_login.sql");
+    const POSTGRES_ACCOUNT_PASSWORD_LOGIN: &str =
+        include_str!("../migrations/postgres/20261025080000_account_password_login.sql");
+
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).expect("create isolated test directory");
@@ -2857,6 +2966,8 @@ mod tests {
             SQLITE_ACCOUNT_PASSWORD_BOOTSTRAP,
             SQLITE_ACCOUNT_ENTRY_STATE,
             SQLITE_ACCOUNT_OPERATION_RECEIPTS,
+
+            SQLITE_ACCOUNT_PASSWORD_LOGIN,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2886,6 +2997,8 @@ mod tests {
             POSTGRES_ACCOUNT_PASSWORD_BOOTSTRAP,
             POSTGRES_ACCOUNT_ENTRY_STATE,
             POSTGRES_ACCOUNT_OPERATION_RECEIPTS,
+
+            POSTGRES_ACCOUNT_PASSWORD_LOGIN,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
