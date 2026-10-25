@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/b1748dd92478cf1451ce468ff1f1c2ead7c0b32c/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/439b956158b386a7eb6c951a22e4dd5ce43335d5/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -20,9 +20,11 @@ export interface components {
     OperatorSetupFinishRequest: OperatorSetupFinishRequest;
     OperatorLoginOptionsRequest: OperatorLoginOptionsRequest;
     OperatorLoginFinishRequest: OperatorLoginFinishRequest;
+    OperatorLogoutRequest: OperatorLogoutRequest;
     OperatorSetupOptionsResponse: OperatorSetupOptionsResponse;
     OperatorLoginOptionsResponse: OperatorLoginOptionsResponse;
     OperatorSetupFinishResponse: OperatorSetupFinishResponse;
+    OperatorLogoutResponse: OperatorLogoutResponse;
     OperatorCreationOptions: OperatorCreationOptions;
     OperatorRequestOptions: OperatorRequestOptions;
     OperatorInvalidRequestProblem: OperatorInvalidRequestProblem;
@@ -30,6 +32,9 @@ export interface components {
     OperatorOriginDeniedProblem: OperatorOriginDeniedProblem;
     OperatorBodyTooLargeProblem: OperatorBodyTooLargeProblem;
     OperatorContentTypeProblem: OperatorContentTypeProblem;
+    OperatorLogoutAuthenticationRequiredProblem: OperatorLogoutAuthenticationRequiredProblem;
+    OperatorLogoutCommitOutcomeUnknownProblem: OperatorLogoutCommitOutcomeUnknownProblem;
+    OperatorLogoutStorageFailureProblem: OperatorLogoutStorageFailureProblem;
     AuthRateLimitedProblem: AuthRateLimitedProblem;
     AuthAuthenticationRequiredProblem: AuthAuthenticationRequiredProblem;
     AuthStorageUnavailableProblem: AuthStorageUnavailableProblem;
@@ -443,6 +448,12 @@ export interface OperatorRequestOptions {
   [extension: string]: unknown;
 }
 
+export type OperatorLogoutRequest = Record<string, never>;
+
+export interface OperatorLogoutResponse {
+  revoked: true;
+}
+
 export type OperatorInvalidRequestProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 400; code: "auth.invalid_request"; changed: false; retryable: false; };
 
 export type OperatorInvalidDpopProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 400; code: "auth.invalid_dpop_proof"; changed: false; retryable: false; };
@@ -452,6 +463,12 @@ export type OperatorOriginDeniedProblem = Omit<ProblemDetails, "status" | "code"
 export type OperatorBodyTooLargeProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 413; code: "auth.invalid_request"; changed: false; retryable: false; };
 
 export type OperatorContentTypeProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 415; code: "auth.invalid_request"; changed: false; retryable: false; };
+
+export type OperatorLogoutAuthenticationRequiredProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 401; code: "auth.authentication_required"; changed: false; retryable: false; };
+
+export type OperatorLogoutCommitOutcomeUnknownProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & { status: 503; code: "auth.commit_outcome_unknown"; changed: true; retryable: true; };
+
+export type OperatorLogoutStorageFailureProblem = AuthStorageUnavailableProblem | OperatorLogoutCommitOutcomeUnknownProblem;
 // END GENERATED OperatorAuthentication
 
 // BEGIN GENERATED Pairing
