@@ -78,7 +78,7 @@ self-hosted server, host agent, administration CLI, and web console.
   Independent bounded Account-entry admission and digest-only request challenges use durable
   database time and shared replica capacity. Transaction-local consumption requires mandatory
   audit with its owning mutation, while receipt-only confirmation adds no duplicate success
-  audit. Mounted Device admission and complete Account-entry acceptance remain open.
+  audit. Complete Account-entry acceptance remains open.
   The separate registration coordinator verifies fresh possession and owns one complete business
   transaction, mandatory audit and immutable bounded receipts. Explicit historical confirmation
   survives later revocation or registration closure, but supplies no current authority or negative
@@ -109,8 +109,13 @@ self-hosted server, host agent, administration CLI, and web console.
   confirmation uses only exact receipt facts and the original root/Device keys; it neither
   restores authority nor repeats success audit. Full response bounds and both final expiries
   precede an uncancelled COMMIT. Shared receipt/freshness helpers preserve the registration
-  boundary. The schema has no Account active/suspended state; that enforcement, mounted
-  admission HTTP and complete identity acceptance remain independent gaps.
+  boundary. Native admission HTTP now composes the coordinator with actual-peer source checks,
+  strict native metadata, zeroizing bounded input, the shared 16-job proof bound and 15-second
+  preparation budget. Store-owned COMMIT remains uncancelled. Confirmed admission and historical
+  confirmation return 201 and 200; uncertain business outcomes retain explicit recovery.
+  Actual HTTP lifecycle coverage reaches ordinary Device authentication and same-Account
+  K-4/session reads on both databases. The schema has no Account active/suspended state; that
+  enforcement and complete identity acceptance remain independent gaps.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
@@ -123,8 +128,8 @@ self-hosted server, host agent, administration CLI, and web console.
   attestations or server observation timestamps. Retired Personal invitation/enrollment and
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
-  and Personal sync continue. Device-admission HTTP and complete password-account acceptance
-  remain incomplete. The Operator React console connects setup, fresh passkey sign-in and
+  and Personal sync continue. Complete password-account acceptance remains incomplete.
+  The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of
   API readiness. Physical passkey/browser interoperability, remaining console administration,

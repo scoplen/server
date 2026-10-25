@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mount native independent Device admission on SQLite and PostgreSQL with strict source/metadata
+  admission, bounded zeroizing input and the shared nonwaiting proof limit. Confirmed admission
+  returns 201; exact historical confirmation returns 200 without current authority. Preparation
+  deadlines preserve the store-owned COMMIT boundary and published failure flags. Actual HTTP
+  coverage connects registration, password login, admission, ordinary Device authentication and
+  same-Account K-4/session access, including lost-COMMIT recovery. Inactive Account state and full
+  V3/I1 acceptance remain separate work.
+
 - Add atomic SQLite/PostgreSQL independent Device admission using real password-login
   capabilities, complete current-snapshot CAS, fresh Account/Device proofs and shared immutable
   receipts. Success adds one Device/certificate/wrap while preserving old encrypted material.
@@ -11,8 +19,7 @@ Changes are recorded here for released or reviewable repository outcomes.
   checked capacity denials preserve their distinct claim/debt rules. Exact historical
   confirmation survives later root/Device changes and grants no current authority. Response
   bounds and final expiry precede the non-cancellable COMMIT; lost business acknowledgement
-  remains unknown. Mounted admission HTTP, inactive Account state and full V3 acceptance are
-  independent gaps.
+  remains unknown. Inactive Account state and full V3 acceptance remain independent gaps.
 
 - Mount native password options/login on SQLite and PostgreSQL using the durable coordinators.
   Source admission precedes body collection; proof/bootstrap validation shares the registration

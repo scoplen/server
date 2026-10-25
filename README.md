@@ -76,8 +76,9 @@ maintenance. Historical migrations and tables remain intact and unused by runtim
 Operator tokens retain the published inert legacy scope claim; it authorizes no current business
 operation or Account/Device entry. Existing
 Accounts and Devices keep authentication and sync. Native Account registration, exact
-historical confirmation and password options/login are mounted. Password login supplies only
-encrypted bootstrap and a Device-admission capability; Device-admission HTTP remains incomplete.
+historical confirmation, password options/login and independent Device admission are mounted.
+Password login supplies encrypted bootstrap and a Device-admission capability. A newly admitted
+Device uses ordinary Device authentication before accessing Personal sync.
 `scoplen-identity` retains the maintained
 Operator passkey verifier. A separate SQLite/PostgreSQL
 device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
@@ -123,10 +124,11 @@ authentication. Its five endpoint windows, cooldowns, bounded capacity and monot
 time survive restart and are shared by replicas. Challenges retain only digests, expire after
 two minutes and can be consumed with business state and deployment audit in one transaction.
 Bounded indexed maintenance removes expired transient state without discarding live debt.
-The API mounts native request-challenge, registration and password options/login routes. Each charges source
-before collecting the body and rejects browser credentials, queries and untrusted Origin.
-Registration limits proof work to 16 concurrent jobs without a waiting queue, bounds body and
-precommit preparation, and never deadline-cancels an attempted business COMMIT. A confirmed
+The API mounts native request-challenge, registration, password options/login and Device-admission
+routes. Each charges source before collecting the body and rejects browser credentials, queries
+and untrusted Origin. Registration, password login and Device admission share 16 concurrent proof
+jobs without a waiting queue, bound body/precommit preparation, and never deadline-cancel an
+attempted business COMMIT. A confirmed
 submit returns 201; explicit exact confirmation returns 200 without granting session authority.
 Unknown business commits require fresh-proof confirmation with the original payload and keys.
 
@@ -151,7 +153,7 @@ rollback; COMMIT is never cancelled. Account deletion cascades capabilities with
 permanent used-id digests. The existing once-per-second worker gate retires at most 100 indexed
 due rows from each transient table. Password HTTP shares the registration proof-work limit,
 strict native metadata and bounded zeroizing body handling. An unconfirmed options or login
-commit returns no attempt, token or bootstrap. Device-admission HTTP, Account inactive-state
+commit returns no attempt, token or bootstrap. Account inactive-state
 enforcement across all authenticated surfaces and complete V3 acceptance remain separate.
 
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
@@ -176,7 +178,7 @@ available. These helpers never commit, authorize an operation or issue a session
 Their caller must atomically verify the live challenge and both possession proofs, enforce
 deployment-wide Device/key freshness and admission, add the terminal receipt, consume protocol
 state and append mandatory audit. A staged snapshot can be disclosed only after confirmed
-commit. Device-admission HTTP and complete V3 acceptance remain incomplete.
+commit. Complete V3 acceptance remains incomplete.
 
 The registration storage coordinator owns strict structural decoding, decoded Device admission,
 fresh challenge and Account/Device proofs, D-129 reservation, the complete new aggregate,
@@ -209,8 +211,14 @@ Only a failed new-business COMMIT reports an unknown outcome. Explicit historica
 uses the original receipt root and Device points, requires no current snapshot or capability,
 and neither reactivates a Device nor repeats its success audit. Preparation rollback precedes a
 separate five-second failure-audit preparation budget; attempted COMMIT is never cancelled.
-The mounted admission route, full inactive Account enforcement and complete V3 acceptance
-remain separate work. The current schema does not represent active/suspended Account state.
+Native `POST /api/v1/auth/accounts/device-admissions` composes this coordinator on both backends.
+It shares the 16-job nonwaiting proof bound with registration/password login, validates actual-peer
+source admission and native metadata before body collection, and limits the zeroizing encoded
+body to 6,291,456 bytes. Its 15-second preparation deadline never cancels a store-owned COMMIT.
+Confirmed new admission returns 201; exact historical confirmation returns 200. Public error
+codes and change/retry flags preserve the coordinator's outcome, including unknown business
+COMMIT results. Full inactive Account enforcement and complete V3 acceptance remain separate
+work. The current schema does not represent active/suspended Account state.
 
 Receipts retain the exact request digest, original ids, canonical original Device public points,
 Account signing root, revision and trusted time: 275 application bytes each, at most 65,536
@@ -247,12 +255,12 @@ Decoded Device admission, challenge capacity, independent random attempt/nonce d
 response preflight share one transaction; unconfirmed commits disclose no challenge. Responses
 are non-cacheable, without cookies or CORS grants. The worker retires expired challenges and
 idle admission rows in bounded indexed batches. This challenge route creates no Account or
-Device and grants no login or sync authority. The separate registration/password handlers
-compose their own protocol coordinators; Device admission remains unmounted.
+Device and grants no login or sync authority. The separate registration/password/admission
+handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
 `proto@a604b726`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`.
-The published Device-admission contract still requires its server endpoint.
+All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
 The sync service retains encrypted object envelopes without reading their Credential fields.
 Server-hosted SSH and agent execution remain separate roadmap work.
 
@@ -591,8 +599,10 @@ SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator logi
 device challenge/token exchange, authenticated account-profile and device-statement reads,
 Personal session/key reads, encrypted signed host write, download verification/decryption, and
 durable ACK. They use the production API router and verify its deployment audit chain.
-Independent native password-account entry, Device-admission HTTP and desktop two-device
-acceptance remain separate roadmap work.
+Independent actual HTTP fixtures additionally register a new password Account, log in, admit a
+fresh Device, authenticate that Device and read its same-Account K-4 bundle and Personal session
+on both databases. Desktop two-device acceptance, cross-surface inactive Account enforcement
+and complete V3/I1 acceptance remain separate roadmap work.
 
 PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The device-token
 keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.
