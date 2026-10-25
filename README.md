@@ -114,7 +114,16 @@ with the same audited 30-day rotation
 and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only that keyring;
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Remaining console administration and
-control-plane authorization remain roadmap work. All server Rust proto dependencies and
+control-plane authorization remain roadmap work.
+The worker retires expired device and Operator refresh credentials in one atomic transaction
+per 30-second heartbeat, independently of later authentication requests. For each kind it
+locks at most 16 expired families, removes at most 256 digests and removes only empty expired
+families. Further work waits for another heartbeat; a heavily rotated family cannot cause an
+unbounded cascading deletion. Unexpired families and spent digests, including revoked families,
+remain intact until absolute expiry. Expiry is rechecked after family locks, shutdown cancels
+a blocked pass, and logs contain only confirmed counts or fixed failures. This retirement
+reuses database pages; it does not vacuum or promise a smaller database file.
+All server Rust proto dependencies and
 the console's generated public API types are pinned to `proto@b1748dd` for shared
 authentication, Operator token, scope,
 object-signature, complete account-device statement, D-114 pairing and notification scope lookup

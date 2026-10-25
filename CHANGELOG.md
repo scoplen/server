@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added atomic worker retirement of expired device and Operator refresh credentials on SQLite
+  and PostgreSQL. Each heartbeat examines at most 16 expired families per kind, removes at most
+  256 digests and deletes only empty families. Unexpired and revoked-unexpired reuse evidence
+  remains intact. Independent pools, late deletion failure, uncertain commit acknowledgement
+  and blocked shutdown are covered; login no longer performs unbounded cascade cleanup.
+
 - Added bounded worker maintenance for pairing sessions on SQLite and PostgreSQL, independently
   of later pairing requests. Each heartbeat expires at most 256 sessions and removes at most
   256 retention-expired sessions, with atomic payload erasure and deployment audit. Unexpired

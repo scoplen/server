@@ -195,9 +195,11 @@ macro_rules! lifecycle {
         assert!(matches!(store.refresh_operator(source(),ORIGIN,&original,proof(&key(2)).as_str(),&keyring).await,Err(Error::InvalidDpopProof)),"wrong key cannot revoke");
         assert!(matches!(store.refresh_operator(source(),ORIGIN,&original,rotate_proof.as_str(),&keyring).await,Err(Error::InvalidDpopProof)),"replayed proof cannot revoke");
         assert!(store.current_operator_session(&verified).await.expect("still active").is_some());
+        store.cleanup_refresh_families().await.expect("maintenance retains live reuse evidence");
         assert!(matches!(store.refresh_operator(source(),ORIGIN,&original,proof(&key(1)).as_str(),&keyring).await,Err(Error::Denied {changed:true})),"matching spent-token reuse revokes");
         assert!(store.current_operator_session(&verified).await.expect("revoked sid").is_none());
         assert!(store.current_operator_session(&new).await.expect("all family access revoked").is_none());
+        store.cleanup_refresh_families().await.expect("maintenance retains revoked-unexpired evidence");
         let stored:Vec<Vec<u8>>=sqlx::query_scalar("SELECT token_digest FROM operator_refresh_tokens").fetch_all(store.pool()).await.expect("only digests stored");assert_eq!(stored.len(),2);assert!(stored.iter().all(|d|d.len()==32));
         store.verify_deployment_audit_chain().await.expect("audit chain");
     }};

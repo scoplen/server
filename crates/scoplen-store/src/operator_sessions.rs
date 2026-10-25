@@ -311,7 +311,6 @@ macro_rules! session_store {
                     let updated=verified.to_storage(verifier).map_err(|_|OperatorSessionError::Integrity)?;
                     sqlx::query::<$db>("UPDATE operator_credentials SET credential_state=$1 WHERE credential_id=$2").bind(updated).bind(a.credential_id).execute(&mut *tx).await?;
                     sqlx::query::<$db>("UPDATE operator_ceremonies SET consumed_at_s=$1 WHERE ceremony_id=$2").bind(now/1000).bind(input.ceremony_id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                    sqlx::query::<$db>("DELETE FROM operator_refresh_families WHERE family_id IN (SELECT family_id FROM operator_refresh_families WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT 16)").bind(now).execute(&mut *tx).await?;
                     sqlx::query::<$db>("INSERT INTO operator_refresh_families (family_id,principal_kind,operator_id,credential_id,dpop_jkt,trusted_origin,audience,scope,created_at_ms,expires_at_ms) VALUES ($1,'operator',$2,$3,$4,$5,'spl-admin/1',$6,$7,$8)")
                         .bind(family.id.as_bytes().as_slice()).bind(family.operator_id.as_bytes().as_slice()).bind(&family.credential_id).bind(&family.jkt).bind(&family.origin).bind(&family.scope).bind(now).bind(family.expires_at_ms).execute(&mut *tx).await?;
                     sqlx::query::<$db>("INSERT INTO operator_refresh_tokens (token_digest,family_id,issued_at_ms) VALUES ($1,$2,$3)").bind(digest.as_slice()).bind(family.id.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
@@ -423,22 +422,24 @@ macro_rules! session_store {
     }
 }
 
-async fn sqlite_begin(
+pub(crate) async fn sqlite_begin(
     store: &SqliteStore,
 ) -> Result<sqlx::Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
     store.pool().begin_with("BEGIN IMMEDIATE").await
 }
-fn sqlite_lock(
+pub(crate) fn sqlite_lock(
     _: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
 ) -> std::future::Ready<Result<(), sqlx::Error>> {
     std::future::ready(Ok(()))
 }
-async fn postgres_begin(
+pub(crate) async fn postgres_begin(
     store: &PostgresStore,
 ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, sqlx::Error> {
     store.pool().begin().await
 }
-async fn postgres_lock(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), sqlx::Error> {
+pub(crate) async fn postgres_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(1396916048,1397052243)").execute(&mut **tx).await?;
     Ok(())
 }
