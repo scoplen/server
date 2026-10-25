@@ -78,6 +78,13 @@ self-hosted server, host agent, administration CLI, and web console.
   database time and shared replica capacity. Transaction-local consumption requires mandatory
   audit with its owning mutation, while receipt-only confirmation adds no duplicate success
   audit. Mounted registration, password login and their complete acceptance remain open.
+  Password options/login now compose strict shared DTO decoding, retained-key synthetic probes,
+  fixed-size verifier comparison, complete bootstrap validation, transient capability insertion
+  and mandatory audit in durable transactions. Rate rejection retains both attempts and admitted
+  debt. Preparation cancellation explicitly rolls back before bounded fixed failure audit;
+  COMMIT is never cancelled and an unknown commit returns no capability. Digest-only capability
+  consumption stays transaction-local and Account deletion leaves permanent used-id retention.
+  Mounted HTTP, cross-surface inactive Account enforcement and complete V3 acceptance remain open.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;

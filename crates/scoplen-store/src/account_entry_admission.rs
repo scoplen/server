@@ -328,6 +328,8 @@ impl Bucket {
 pub struct AccountEntryCleanup {
     pub admission_rows: u64,
     pub challenge_rows: u64,
+    pub password_attempt_rows: u64,
+    pub admission_capability_rows: u64,
 }
 
 pub(crate) async fn sqlite_account_entry_now(
@@ -465,13 +467,17 @@ macro_rules! account_admission_store {
                 }
                 let challenge_rows=sqlx::query("DELETE FROM account_request_challenges WHERE attempt_digest IN (SELECT attempt_digest FROM account_request_challenges WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT 100)")
                     .bind(now).execute(&mut *tx).await?.rows_affected();
+                let password_attempt_rows=sqlx::query("DELETE FROM account_password_attempts WHERE attempt_digest IN (SELECT attempt_digest FROM account_password_attempts WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT 100)")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
+                let admission_capability_rows=sqlx::query("DELETE FROM account_admission_capabilities WHERE token_digest IN (SELECT token_digest FROM account_admission_capabilities WHERE expires_at_ms <= $1 ORDER BY expires_at_ms LIMIT 100)")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
                 let updated=sqlx::query("UPDATE account_entry_state SET rate_rows=rate_rows-$1,challenge_rows=challenge_rows-$2,last_cleanup_ms=$3 WHERE singleton=1")
                     .bind(i64::try_from(admission_rows).map_err(|_|AccountEntryStateError::Integrity)?)
                     .bind(i64::try_from(challenge_rows).map_err(|_|AccountEntryStateError::Integrity)?)
                     .bind(now).execute(&mut *tx).await?.rows_affected();
                 if updated!=1 { return Err(AccountEntryStateError::Integrity); }
                 tx.commit().await?;
-                Ok(AccountEntryCleanup { admission_rows, challenge_rows })
+                Ok(AccountEntryCleanup { admission_rows, challenge_rows, password_attempt_rows, admission_capability_rows })
             }
         }
 
