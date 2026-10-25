@@ -74,6 +74,10 @@ self-hosted server, host agent, administration CLI, and web console.
   transitions and preserve legitimate exact replay. Caller-owned challenge/proof verification,
   admission, receipts, protocol consumption and audit remain required in the same transaction;
   these helpers never commit or issue authority. Mounted password HTTP and Device admission remain open.
+  Independent bounded Account-entry admission and digest-only request challenges use durable
+  database time and shared replica capacity. Transaction-local consumption requires mandatory
+  audit with its owning mutation, while receipt-only confirmation adds no duplicate success
+  audit. Mounted registration, password login and their complete acceptance remain open.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
