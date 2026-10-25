@@ -157,6 +157,10 @@ prevents startup. `/readyz` queries the database and returns 503 when the query 
 listener mounts existing Device authentication, Operator setup/login/refresh/logout and
 the authenticated Personal sync subset. The injected sync router selects one SQLite or PostgreSQL
 backend for its account-key, object-sync, and shared-vault operations.
+The production Personal authorizer returns the same `404 sync.object_not_found` for absent or
+foreign vault ids after current-device authentication and route-scope checks. It applies to
+vault keys, changes, snapshots, versions, object writes and ACKs; authentication, scope and
+storage failures retain their separate responses.
 Object POST admission uses a separate short transaction before body collection. The store owns
 the validated rate settings and fixed-point arithmetic; the HTTP layer reexports those settings
 and advertises them in the session. SQLite reserves the writer before sampling database time. PostgreSQL
