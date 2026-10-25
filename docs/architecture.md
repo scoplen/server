@@ -343,3 +343,33 @@ deadlines are operational bounds, not evidence of a large-deployment performance
 statement writers take the same singleton before Account locks, and transaction-local bootstrap
 creation requires its caller to hold it and enforce freshness. No permanent Device/key cache is
 introduced; only D-129's Account-id digest survives Account deletion.
+
+Password options/login own their durable transactions after source admission by HTTP. They read
+retained Kprobe without initialization, strictly decode public DTOs, and charge the attempt's
+retained username rather than any supplied Account id. The admission singleton reserves an
+attempt while proof and private admission run; rate rejection commits fixed audit and admitted
+debt while keeping the attempt. A credential denial consumes its matching attempt and audit
+atomically. Valid credentials select an established Account bucket before the existing complete
+bootstrap reader locks and revalidates current state. Under those locks, login rereads ownership,
+generation, profile, salt and verifier and verifies the retained transient secret again.
+A capability stores only its digest,
+Account, credential generation, bootstrap digest and five-minute lifetime. Physical removal is
+single-use consumption; transaction-local claim/finish helpers grant no authority on their own.
+Attempt origin digests keep each row within 168 application bytes even for the longest accepted
+origin; canonical usernames remain bound without an existence marker. Capability rows use at
+most 104 application bytes. Global capacity counts run under the singleton lock, and the
+per-Account index bounds the four capability allowance. Cascading Account deletion frees
+transient capacity without changing deployment-lifetime Account-id retention. Attempts and
+capabilities share the same maintenance gate and indexed 100-row limits as admission debt and
+request challenges.
+
+Preparation uses the supplied monotonic deadline. Cancellation retains the transaction handle
+and waits for explicit rollback before a fixed storage-failure audit with a separate five-second
+preparation budget. Both business and failure-audit COMMIT run outside timeout cancellation.
+Late attempt expiry rolls back staged capability, success audit and streak clearing before
+consuming the matching attempt with mandatory denial audit, preserving the observed high-water
+mark and admitted debt. A retained expired binding still admits its username for common denial.
+An unconfirmed capability-only commit returns no token or bootstrap and supplies no terminal
+receipt. HTTP must bound concurrent proof/bootstrap operations before entering storage.
+The current Account model represents extant password-owned Accounts; full inactive-state
+enforcement across password, Device authentication, synchronization and admission remains open.
