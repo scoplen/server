@@ -23,7 +23,7 @@ impl Fixture {
                 .execute(&pool)
                 .await
                 .expect("remove owned maintenance schema");
-            pool.close().await;
+            pool_close::close(&pool).await;
         }
     }
 }
@@ -211,7 +211,7 @@ macro_rules! maintenance_tests {
                 assert_eq!(receipt_rows,0);
                 assert_eq!(audit_count(&store).await,before+3);
                 store.verify_deployment_audit_chain().await.expect("valid maintenance audit chain");
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 fixture.close().await;
             }
 
@@ -229,7 +229,7 @@ macro_rules! maintenance_tests {
                 assert_eq!(store.cleanup_pairings().await.expect("next finite batch"),PairingCleanupReport {expired_sessions:1,removed_sessions:1});
                 assert_eq!(audit_count(&store).await,514);
                 assert_eq!(store.cleanup_pairings().await.expect("empty pass"),PairingCleanupReport::default());
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 fixture.close().await;
             }
 
@@ -248,8 +248,8 @@ macro_rules! maintenance_tests {
                 assert_eq!(audit_count(&store).await,300);
                 assert_eq!(peer.cleanup_pairings().await.expect("no duplicate transitions"),PairingCleanupReport::default());
                 store.verify_deployment_audit_chain().await.expect("serialized audit chain");
-                peer.pool().close().await;
-                store.pool().close().await;
+                pool_close::close(peer.pool()).await;
+                pool_close::close(store.pool()).await;
                 fixture.close().await;
             }
 
@@ -279,7 +279,7 @@ macro_rules! maintenance_tests {
                 let remove=if $postgres {"DROP TRIGGER reject_maintenance_removal ON deployment_audit_events; DROP FUNCTION reject_maintenance_removal()"}else{"DROP TRIGGER reject_maintenance_removal"};
                 sqlx::raw_sql(remove).execute(store.pool()).await.expect("restore audit");
                 assert_eq!(store.cleanup_pairings().await.expect("explicit next maintenance pass"),PairingCleanupReport {expired_sessions:1,removed_sessions:1});
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 fixture.close().await;
             }
 
@@ -304,7 +304,7 @@ macro_rules! maintenance_tests {
                 tokio::time::sleep(Duration::from_millis(remaining)).await;
                 holder.commit().await.expect("unlock after expiry");
                 assert_eq!(task.await.expect("maintenance task").expect("lock-current time"),PairingCleanupReport {expired_sessions:1,removed_sessions:0});
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 fixture.close().await;
             }
         }

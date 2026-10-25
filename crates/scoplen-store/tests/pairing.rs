@@ -2,6 +2,9 @@
 
 mod support;
 
+#[path = "support/pool_close.rs"]
+mod pool_close;
+
 #[path = "pairing/maintenance.rs"]
 mod maintenance;
 
@@ -245,7 +248,7 @@ macro_rules! pairing_tests {
                 assert_eq!(store.read_pairing(ORIGIN,context.pairing_id,PairingActor::Initiator(&old),source()).await,Err(PairingStoreError::AuthenticationDenied));
                 assert_eq!(store.post_pairing_message(ORIGIN,context.pairing_id,PairingActor::Initiator(&old),&terminal_message,source()).await,Err(PairingStoreError::AuthenticationDenied));
                 assert_eq!(store.cancel_pairing(ORIGIN,context.pairing_id,PairingActor::Initiator(&old),source()).await,Err(PairingStoreError::AuthenticationDenied));
-                store.pool().close().await;
+                pool_close::close(store.pool()).await;
                 if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
@@ -277,7 +280,7 @@ macro_rules! pairing_tests {
                 let row=sqlx::query(&sql("SELECT retain_until_ms,payload_bytes FROM pairing_sessions WHERE pairing_id=?")).bind(id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("terminal");
                 assert_eq!(row.get::<i64,_>("retain_until_ms"),retained);assert_eq!(row.get::<i64,_>("payload_bytes"),0);
                 assert_eq!(store.read_pairing(ORIGIN,id,PairingActor::Responder(&token),source()).await.expect("cancelled").state,PairingState::Cancelled);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -293,7 +296,7 @@ macro_rules! pairing_tests {
                 let row=sqlx::query(&sql("SELECT retain_until_ms,payload_bytes FROM pairing_sessions WHERE pairing_id=?")).bind(context.pairing_id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("terminal row");
                 assert_eq!(row.get::<i64,_>("retain_until_ms"),retained);assert_eq!(row.get::<i64,_>("payload_bytes"),0);
                 assert_eq!(store.deployment_audit_head().await.expect("audit").expect("head").sequence,before);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -317,7 +320,7 @@ macro_rules! pairing_tests {
                 let mut holder=store.pool().begin().await.expect("cleanup tx");
                 for id in ids {sqlx::query(&sql("DELETE FROM pairing_sessions WHERE pairing_id=?")).bind(id.as_bytes().as_slice()).execute(&mut *holder).await.expect("remove seeded row");}
                 holder.commit().await.expect("seed cleanup");
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -332,7 +335,7 @@ macro_rules! pairing_tests {
                 let current:i64=sqlx::query_scalar("SELECT COUNT(*) FROM pairing_sessions").fetch_one(store.pool()).await.expect("retained cap");assert_eq!(current,10000);
                 sqlx::query("DELETE FROM pairing_sessions WHERE trusted_origin='https://retained.pairing-budget.test'").execute(store.pool()).await.expect("remove boundary fixtures");
                 store.create_pairing(ORIGIN,&PairingCreateRequest {device_id:Uuid::now_v7()},source()).await.expect("released capacity");
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -348,7 +351,7 @@ macro_rules! pairing_tests {
                 assert_eq!(store.post_pairing_message(ORIGIN,id,PairingActor::Responder(created.new_device_token.as_bytes()),&next,source()).await,Err(PairingStoreError::ResourceLimited));
                 store.cancel_pairing(ORIGIN,id,PairingActor::Initiator(&old),source()).await.expect("release capacity");
                 let bytes:i64=sqlx::query_scalar(&sql("SELECT payload_bytes FROM pairing_sessions WHERE pairing_id=?")).bind(id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("released");assert_eq!(bytes,0);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -367,7 +370,7 @@ macro_rules! pairing_tests {
                 let revision:i64=sqlx::query_scalar(&sql("SELECT revision FROM sync_account_key_bundles WHERE account_id=?")).bind(old.account_id.as_slice()).fetch_one(store.pool()).await.expect("original revision");assert_eq!(revision,1);
                 let snapshot=store.read_pairing(ORIGIN,context.pairing_id,PairingActor::Responder(&token),source()).await.expect("ready after rollback");assert_eq!(snapshot.state,PairingState::Ready);assert_eq!(snapshot.messages.len(),7);
                 store.complete_pairing(ORIGIN,context.pairing_id,&old,&complete,source()).await.expect("retry after confirmed rollback");
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -380,7 +383,7 @@ macro_rules! pairing_tests {
                 assert!(matches!(left,Ok(_)|Err(PairingStoreError::Conflict)));
                 assert!(matches!(right,Ok(_)|Err(PairingStoreError::Conflict)));
                 let devices:i64=sqlx::query_scalar(&sql("SELECT COUNT(*) FROM identity_devices WHERE account_id=?")).bind(old.account_id.as_slice()).fetch_one(store.pool()).await.expect("atomic membership");assert_eq!(devices,2);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -401,7 +404,7 @@ macro_rules! pairing_tests {
                 assert_eq!(store.complete_pairing(ORIGIN,context.pairing_id,&old,&complete,source()).await,Err(PairingStoreError::QuotaExceeded));
                 let count:i64=sqlx::query_scalar(&sql("SELECT COUNT(*) FROM identity_devices WHERE device_id=?")).bind(context.responder_device_id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("candidate rollback");assert_eq!(count,0);
                 let revision:i64=sqlx::query_scalar(&sql("SELECT revision FROM sync_account_key_bundles WHERE account_id=?")).bind(old.account_id.as_slice()).fetch_one(store.pool()).await.expect("key rollback");assert_eq!(revision,1);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -418,7 +421,7 @@ macro_rules! pairing_tests {
                 let (context,_,complete)=ready_with_device_id(&store,&request,pending_device_id).await;
                 store.complete_pairing(ORIGIN,context.pairing_id,&old,&complete,source()).await.expect("complete certified recipient set");
                 let saved:Vec<u8>=sqlx::query_scalar(&sql("SELECT wrapped_ark FROM sync_account_key_device_wraps WHERE account_id=? AND device_id=?")).bind(old.account_id.as_slice()).bind(inactive_id.as_bytes().as_slice()).fetch_one(store.pool()).await.expect("inactive wrap retained");assert_eq!(saved,vec![11]);
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
 
             #[tokio::test]
@@ -442,7 +445,7 @@ macro_rules! pairing_tests {
                 sqlx::query(&sql("INSERT INTO identity_devices(device_id,account_id,certificate,active,created_at_ms) VALUES(?,?,?,?,1)"))
                     .bind(context.responder_device_id.as_bytes().as_slice()).bind(request.account_id.as_bytes().as_slice()).bind(&complete.device_certificate).bind(false).execute(store.pool()).await.expect("inactive historical id");
                 assert_eq!(store.complete_pairing(ORIGIN,context.pairing_id,&old,&complete,source()).await,Err(PairingStoreError::Conflict));
-                store.pool().close().await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
+                pool_close::close(store.pool()).await;if let Some(directory)=directory {support::remove_test_directory(directory).await;}
             }
         }
     }
@@ -511,8 +514,8 @@ async fn postgres_committed_membership_with_lost_ack_discloses_no_receipt_and_re
         Err(PairingStoreError::Database)
     );
     assert_eq!(proxy.dropped.load(Ordering::SeqCst), 3);
-    uncertain.pool().close().await;
-    direct.pool().close().await;
+    pool_close::close(uncertain.pool()).await;
+    pool_close::close(direct.pool()).await;
 }
 
 #[tokio::test]
@@ -543,7 +546,7 @@ async fn sqlite_expiry_is_rechecked_after_waiting_for_writer_lock() {
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     holder.commit().await.expect("unlock after expiry");
     assert_eq!(task.await.expect("complete task"), Err(PairingStoreError::Denied));
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
     support::remove_test_directory(directory.expect("SQLite directory")).await;
 }
 
@@ -583,5 +586,5 @@ async fn postgres_expiry_is_rechecked_after_waiting_for_exclusive_account_lock()
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     holder.commit().await.expect("unlock after expiry");
     assert_eq!(task.await.expect("complete task"), Err(PairingStoreError::Denied));
-    store.pool().close().await;
+    pool_close::close(store.pool()).await;
 }

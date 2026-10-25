@@ -8,8 +8,8 @@ pub async fn remove_test_directory(path: PathBuf) {
         match std::fs::remove_dir_all(&path) {
             Ok(()) => return,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return,
-            // Closing SQLx waits for its SQLite worker; Windows scanners can still hold
-            // a non-delete-sharing handle after that acknowledgement. Retry only those locks.
+            // Retry only Windows sharing/lock violations; the OS error does not identify
+            // which process still holds the handle.
             Err(error)
                 if cfg!(windows)
                     && matches!(error.raw_os_error(), Some(32 | 33))
