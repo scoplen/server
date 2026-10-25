@@ -279,7 +279,7 @@ Device/key freshness, preflight the complete protocol response, add its immutabl
 consume the relevant protocol state and append mandatory audit in the same transaction.
 Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
 confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
-HTTP entry routes, capabilities, Device admission and full V3 acceptance remain incomplete.
+Registration/password entry, capabilities, Device admission and full V3 acceptance remain incomplete.
 
 Account-entry admission uses independent fixed-window state for the five native endpoints.
 A singleton writer lock serializes new bucket/challenge capacity and advances a durable
@@ -295,3 +295,17 @@ the coordinator's complete proof/signature validation and same-transaction busin
 Exact historical confirmation consumes only its new challenge and adds no duplicate success
 audit. Expiry after waiting or before commit requires rollback of staged business state and
 a separately confirmed denial audit. Storage helpers alone expose no Account-entry route.
+
+The native Account request-challenge HTTP route uses its own shared durable admission state.
+It charges the actual peer before body collection, then rejects duplicate scalar metadata,
+forbidden credentials/query, unsupported media/encoding and a mismatched supplied Origin.
+The published strict JSON reader runs before any challenge lookup. Device admission never
+queries Account existence. Storage preflights the bounded response and persists only independent
+attempt/nonce digests with trusted origin, kind, intent, operation and Device bindings. No
+response secret is disclosed before confirmed commit. Source and private rate rejections have
+mandatory deployment audit; audit failure overrides a reportable denial. Responses carry the
+fixed no-store/no-cache profile, without cookies or CORS. Unsupported methods return the same
+bounded problem format. The worker calls indexed admission/challenge retirement with shutdown
+cancellation; storage serializes cleanup frequency and time across replicas. Challenge issuance
+alone creates no Account, Device, password credential, session or sync authority. The remaining
+registration/login/admission routes still require their atomic protocol coordinators.
