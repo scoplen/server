@@ -10,6 +10,7 @@ pub mod account_key_publication;
 pub mod account_keys;
 pub mod account_probe_key;
 pub mod account_profile;
+pub mod account_registration;
 pub mod account_request_challenges;
 pub mod account_used_ids;
 pub mod audit;
