@@ -18,6 +18,15 @@ Changes are recorded here for released or reviewable repository outcomes.
   includes all retained Accounts and canonical cross-role public keys. Unacknowledged business
   commits remain unknown; mounted HTTP, password login and new Device admission are separate work.
 
+- Add durable password options/login and digest-only admission capabilities on SQLite/PostgreSQL.
+  Strict shared DTOs, retained Kprobe, synthetic unknown-user probes, fixed-size verifier checks,
+  complete signed bootstrap validation, quota admission and mandatory audit share confirmed
+  transaction outcomes. A rate rejection retains the attempt and admitted debt. Preparation
+  timeout acknowledges rollback; uncertain commits disclose no token or bootstrap. Capability
+  capacity is bounded globally and per Account; Account deletion preserves permanent used-id
+  digests. Indexed retirement shares the existing once-per-second worker gate. Mounted HTTP,
+  Device admission and cross-surface inactive Account enforcement remain separate work.
+
 - Advance the SQLite container recovery probe to the Account-id retention migration while
   preserving its pinned historical source and pre-upgrade recovery boundary.
 

@@ -123,6 +123,20 @@ two minutes and can be consumed with business state and deployment audit in one 
 Bounded indexed maintenance removes expired transient state without discarding live debt.
 The storage helpers do not mount Account registration or password sign-in routes.
 
+Durable password options and login coordinators strictly decode published requests, read the
+already initialized probe key, and commit transient state and mandatory audits together.
+Options retain the attempt/origin digests plus canonical username/profile/salt bindings for two
+minutes, at most 168 application bytes per row.
+Login compares the shared fixed-size verifier, consumes a matching attempt, validates the full
+current signed bootstrap, and issues a five-minute digest-only admission capability after
+confirmed commit. Unknown usernames use stable synthetic salt/verifier derivations. Capacity is
+16,384 retained attempts, 4,096 capabilities, and four capabilities per Account. Rate rejection
+preserves the attempt while retaining admitted quota debt. Preparation timeouts acknowledge
+rollback; COMMIT is never cancelled. Account deletion cascades capabilities without deleting
+permanent used-id digests. The existing once-per-second worker gate retires at most 100 indexed
+due rows from each transient table. Device admission, Account inactive-state enforcement across
+all authenticated surfaces, mounted password HTTP and complete V3 acceptance remain separate.
+
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
 serving projection and audit in the same transaction. The bounded storage reader requires exact
 agreement with every current field, signature and wrap. Existing projection-only rows remain
