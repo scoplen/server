@@ -74,11 +74,11 @@ self-hosted server, host agent, administration CLI, and web console.
   transitions and preserve legitimate exact replay. Caller-owned challenge/proof verification,
   admission, receipts, protocol consumption and audit remain required in the same transaction;
   these helpers never commit or issue authority. Protocol coordinators own their enclosing
-  audited transactions; new Device admission remains open.
+  audited transactions; complete Account-entry acceptance remains open.
   Independent bounded Account-entry admission and digest-only request challenges use durable
   database time and shared replica capacity. Transaction-local consumption requires mandatory
   audit with its owning mutation, while receipt-only confirmation adds no duplicate success
-  audit. New Device admission and complete Account-entry acceptance remain open.
+  audit. Mounted Device admission and complete Account-entry acceptance remain open.
   The separate registration coordinator verifies fresh possession and owns one complete business
   transaction, mandatory audit and immutable bounded receipts. Explicit historical confirmation
   survives later revocation or registration closure, but supplies no current authority or negative
@@ -99,7 +99,18 @@ self-hosted server, host agent, administration CLI, and web console.
   Native password HTTP composes these coordinators with strict metadata, zeroizing bounded bodies,
   source admission and the same nonwaiting proof semaphore as registration. Unconfirmed options
   or login transactions disclose no attempt, token or bootstrap. Cross-surface inactive Account
-  enforcement, new Device admission and complete V3 acceptance remain open.
+  enforcement and complete V3 acceptance remain open.
+  Independent Device admission now revalidates a real password capability against the complete
+  transaction-current bootstrap before Account/Device proof and established Account admission.
+  Stale CAS invalidates the capability without claiming old-root proof verification or charging
+  Account quota. Success commits only one new Device/certificate/wrap, its signed next PUT,
+  immutable receipt and challenge/capability consumption with mandatory audit. Invalid proof,
+  rate and unchanged capacity denials preserve their explicit claim/debt semantics. Historical
+  confirmation uses only exact receipt facts and the original root/Device keys; it neither
+  restores authority nor repeats success audit. Full response bounds and both final expiries
+  precede an uncancelled COMMIT. Shared receipt/freshness helpers preserve the registration
+  boundary. The schema has no Account active/suspended state; that enforcement, mounted
+  admission HTTP and complete identity acceptance remain independent gaps.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
@@ -112,7 +123,7 @@ self-hosted server, host agent, administration CLI, and web console.
   attestations or server observation timestamps. Retired Personal invitation/enrollment and
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
-  and Personal sync continue. New Device admission and complete password-account acceptance
+  and Personal sync continue. Device-admission HTTP and complete password-account acceptance
   remain incomplete. The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

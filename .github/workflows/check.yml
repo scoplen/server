@@ -141,6 +141,8 @@ jobs:
 
       - name: Check durable Account password login and admission capabilities
         run: cargo test --locked -p scoplen-store --test account_password_login --features postgres-integration -- --test-threads=1
+      - name: Check independent Device admission and exact historical confirmation
+        run: cargo test --locked -p scoplen-store --test account_device_admission --features postgres-integration -- --test-threads=1
       - name: Check native Account entry HTTP and startup on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2

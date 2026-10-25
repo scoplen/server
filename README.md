@@ -77,7 +77,7 @@ Operator tokens retain the published inert legacy scope claim; it authorizes no 
 operation or Account/Device entry. Existing
 Accounts and Devices keep authentication and sync. Native Account registration, exact
 historical confirmation and password options/login are mounted. Password login supplies only
-encrypted bootstrap and a Device-admission capability; new Device admission remains incomplete.
+encrypted bootstrap and a Device-admission capability; Device-admission HTTP remains incomplete.
 `scoplen-identity` retains the maintained
 Operator passkey verifier. A separate SQLite/PostgreSQL
 device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
@@ -151,7 +151,7 @@ rollback; COMMIT is never cancelled. Account deletion cascades capabilities with
 permanent used-id digests. The existing once-per-second worker gate retires at most 100 indexed
 due rows from each transient table. Password HTTP shares the registration proof-work limit,
 strict native metadata and bounded zeroizing body handling. An unconfirmed options or login
-commit returns no attempt, token or bootstrap. Device admission, Account inactive-state
+commit returns no attempt, token or bootstrap. Device-admission HTTP, Account inactive-state
 enforcement across all authenticated surfaces and complete V3 acceptance remain separate.
 
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
@@ -176,7 +176,7 @@ available. These helpers never commit, authorize an operation or issue a session
 Their caller must atomically verify the live challenge and both possession proofs, enforce
 deployment-wide Device/key freshness and admission, add the terminal receipt, consume protocol
 state and append mandatory audit. A staged snapshot can be disclosed only after confirmed
-commit. Device admission and complete V3 acceptance remain incomplete.
+commit. Device-admission HTTP and complete V3 acceptance remain incomplete.
 
 The registration storage coordinator owns strict structural decoding, decoded Device admission,
 fresh challenge and Account/Device proofs, D-129 reservation, the complete new aggregate,
@@ -192,6 +192,26 @@ fresh proof and confirms only the original receipt, even after Device revocation
 changes or registration closure. It issues no session or current authority and cannot recreate
 a deleted Account. A new `submit` never turns into historical confirmation.
 
+The independent Device-admission coordinator claims a real password-login capability and fresh
+challenge under the Account-entry and Account locks, then revalidates the complete current
+bootstrap. Changed snapshot state invalidates that capability with a checked conflict; this
+branch does not claim to have verified an old-root signature or select an Account quota.
+Matching current state requires the additional Account signature, signed next K-4 PUT,
+root-signed new certificate and fresh Device signing proof before Account quota admission.
+Success adds exactly one active Device, certificate and wrap, preserving every old encrypted
+root, recovery/password artifact, wrap, generation and Personal epoch. The complete next
+snapshot, future login envelope, GET capacity and confirmation JSON are preflighted.
+Receipt, challenge/capability consumption and mandatory audit commit together. Invalid proofs
+keep the capability while consuming the challenged denial; rate rejection restores both
+provisional claims. A confirmed unchanged capacity denial preserves the capability and rate
+debt, consumes the challenge and requires a fresh challenge for an explicit retry.
+Only a failed new-business COMMIT reports an unknown outcome. Explicit historical confirmation
+uses the original receipt root and Device points, requires no current snapshot or capability,
+and neither reactivates a Device nor repeats its success audit. Preparation rollback precedes a
+separate five-second failure-audit preparation budget; attempted COMMIT is never cancelled.
+The mounted admission route, full inactive Account enforcement and complete V3 acceptance
+remain separate work. The current schema does not represent active/suspended Account state.
+
 Receipts retain the exact request digest, original ids, canonical original Device public points,
 Account signing root, revision and trusted time: 275 application bytes each, at most 65,536
 per Account, deleted with that Account. No encrypted bundle, verifier or bearer is copied into
@@ -200,8 +220,8 @@ revocations and admission rows, including legacy Accounts and cross-role SEC1 eq
 Without a legacy canonical-key index, it streams bounded artifacts across retained state with
 constant application memory; work grows with total statements. The HTTP deadline and bounded
 proof concurrency remain necessary. Legacy statement replacement shares the global singleton
-before Account locks. Password login and new Device admission remain separate implementation
-work; storage coordinator completion does not establish complete V3 acceptance.
+before Account locks. Registration and Device admission share these immutable receipt/freshness
+helpers; storage coordinator completion does not establish complete V3 acceptance.
 
 Account-id retention has a separate SQLite/PostgreSQL storage boundary. Explicit initialization
 reserves existing Account ids before enabling registration and durably admits a ceiling (default
@@ -571,8 +591,8 @@ SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator logi
 device challenge/token exchange, authenticated account-profile and device-statement reads,
 Personal session/key reads, encrypted signed host write, download verification/decryption, and
 durable ACK. They use the production API router and verify its deployment audit chain.
-Native password-account entry, new Device admission and desktop two-device acceptance remain
-separate roadmap work.
+Independent native password-account entry, Device-admission HTTP and desktop two-device
+acceptance remain separate roadmap work.
 
 PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The device-token
 keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.

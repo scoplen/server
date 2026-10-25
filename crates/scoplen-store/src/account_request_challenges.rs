@@ -40,6 +40,10 @@ pub struct ClaimedAccountRequestChallenge {
 }
 
 impl ClaimedAccountRequestChallenge {
+    pub(crate) fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
     /// Compare the supplied nonce with the retained digest before verifying possession.
     #[must_use]
     pub fn nonce_matches(&self) -> bool {

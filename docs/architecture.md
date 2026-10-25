@@ -81,9 +81,9 @@ The UI uses local Inter, Lora and JetBrains Mono fonts without third-party reque
 `scoplen-identity` exposes the maintained Operator passkey verifier. Retired Personal
 invitation/enrollment and pairing modules, routes, privileges and worker cleanup are absent.
 Historical schema and data remain intact and unused by runtime. Existing Devices continue to
-use public authentication and Personal sync. Account password registration/sign-in
-and new Device admission remain incomplete; consuming their published contracts does not mount
-those endpoints. Tests directly seed real signed artifacts only into owned fixture databases.
+use public authentication and Personal sync. Native Account registration/password HTTP is mounted;
+Device-admission HTTP and complete independent password-entry acceptance remain incomplete.
+Legacy sync tests directly seed real signed artifacts only into owned fixture databases.
 
 First-run material is created exclusively and flushed before success. On Unix, new files have
 owner read/write permissions from creation, before any secret is written. Existing files,
@@ -280,7 +280,7 @@ Device/key freshness, preflight the complete protocol response, add its immutabl
 consume the relevant protocol state and append mandatory audit in the same transaction.
 Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
 confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
-Device admission and full V3 acceptance remain incomplete.
+Mounted Device-admission HTTP and full V3 acceptance remain incomplete.
 
 Account-entry admission uses independent fixed-window state for the five native endpoints.
 A singleton writer lock serializes new bucket/challenge capacity and advances a durable
@@ -334,8 +334,8 @@ original Account signature and fresh Device possession against the receipt's ori
 keys. It requires explicit `confirm`, never current Device authorization or enabled registration,
 never emits a second success event and cannot fall through to creation after receipt deletion.
 
-New registration checks Device ids and both canonical 65-byte P-256 points across current
-certificates, revocations, admission rows and retained receipts, across all Accounts. Receipt
+Registration and Device admission check Device ids and both canonical 65-byte P-256 points
+across current certificates, revocations, admission rows and retained receipts, across all Accounts. Receipt
 lookups are indexed. Legacy certificate/admission state has no canonical-point index: one SQL
 stream at a time projects only 1..65,536-byte blobs, rejects bad types/sizes before transfer and
 holds no accumulated result set. Work is linear in total retained statements; application memory
@@ -344,6 +344,47 @@ deadlines are operational bounds, not evidence of a large-deployment performance
 statement writers take the same singleton before Account locks, and transaction-local bootstrap
 creation requires its caller to hold it and enforce freshness. No permanent Device/key cache is
 introduced; only D-129's Account-id digest survives Account deletion.
+
+The Device-admission coordinator strictly decodes the complete body before claiming its fresh
+challenge. Decoded Device admission commits separately. The owning business transaction claims
+the challenge under Account-entry serialization, then claims the password-login capability in a
+savepoint and acquires exclusive Account serialization before identity/credential locks and the
+complete bootstrap read. The original capability Account/generation/snapshot and raw-token
+digest must match the stable payload. A changed current snapshot or unsupported current
+credential/root/Personal state spends the capability with conflict audit, without claiming
+old-root proof verification or selecting an established Account rate bucket.
+
+On a matching current snapshot, Account authorization, new certificate, signed next K-4 PUT and
+fresh Device signing proof precede established Account admission. Complete semantic validation
+requires exactly the next revision, unchanged old artifacts/wraps, and one new recipient.
+Deployment-wide retained Device/key freshness then precedes three insertions and a revision-CAS
+update of only signature/accepted PUT/revision/time. Existing roots, ciphertexts, wraps, password
+metadata, revocations and Personal epochs remain untouched. Full next bootstrap, worst-case
+login JSON envelope, each GET response and confirmation JSON are checked before audit/expiry.
+The exact staged bootstrap is read back before appending the fixed receipt.
+
+Invalid proof rolls back the capability savepoint and consumes the challenged denial with
+mandatory audit. Rate rejection rolls back both claims while preserving earlier source/Device
+debt. Checked quota exhaustion rolls back business and capability consumption, restores the
+authenticated Account charge, and commits challenge consumption plus denial audit; a fresh
+challenge is required for an explicit retry. A later audit/storage failure overrides the denial
+and rolls the provisional transaction back. Final audit is followed by one authoritative final
+clock check for both challenge and capability, then an immediate COMMIT with no intervening
+awaited work. Observed expiry rolls back all business state and preserves the trusted time
+high-water mark in a separate denial transaction; a still-live matched challenge is consumed
+there, while an expired challenge remains for indexed retirement. Preparation cancellation
+explicitly rolls back; the separate five-second denial budget covers preparation only. No
+attempted COMMIT is cancelled, read back or supplemented with another audit after acknowledgement failure.
+New-business uncertainty is `auth.commit_outcome_unknown`; confirmation, private admission or
+denial uncertainty is storage-unavailable without an Account/Device business-change claim.
+
+Explicit admission confirmation reads only its exact immutable receipt, verifies the original
+Account signature and fresh Device possession under the retained root/points, and consumes its
+fresh challenge without a second success audit. It neither reads current bootstrap/capability
+state nor reactivates a Device. Missing/deleted receipts never create state or establish a
+negative result for the original unknown operation. Registration and admission use the same
+crate-private receipt reader/appender and bounded-memory retained-material freshness helpers.
+No migration is needed: the existing immutable receipt schema already supports both kinds.
 
 Password options/login own their durable transactions after source admission by HTTP. They read
 retained Kprobe without initialization, strictly decode public DTOs, and charge the attempt's
