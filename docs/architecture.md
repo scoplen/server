@@ -280,3 +280,18 @@ consume the relevant protocol state and append mandatory audit in the same trans
 Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
 confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
 HTTP entry routes, capabilities, Device admission and full V3 acceptance remain incomplete.
+
+Account-entry admission uses independent fixed-window state for the five native endpoints.
+A singleton writer lock serializes new bucket/challenge capacity and advances a durable
+database-time high-water mark before any business or deployment-audit lock. Username keys
+use the published Kprobe derivation; only verified credentials, receipts or capabilities may
+select an established Account bucket. Device ids need only pass structural decoding, so
+unknown identities receive the same quotas. A worker may retire at most 100 indexed due rows
+per table per second, preserving live fixed-window counts and cooldown debt at capacity.
+Request challenges persist only domain-separated attempt/nonce/origin digests and fixed
+bindings. Their transaction-local claim consumes a live attempt before authenticating bindings;
+wrong canonical bindings or nonce must commit a denial audit. Successful finish requires
+the coordinator's complete proof/signature validation and same-transaction business state.
+Exact historical confirmation consumes only its new challenge and adds no duplicate success
+audit. Expiry after waiting or before commit requires rollback of staged business state and
+a separately confirmed denial audit. Storage helpers alone expose no Account-entry route.

@@ -5,10 +5,12 @@
 
 pub mod account_bootstrap;
 pub mod account_devices;
+pub mod account_entry_admission;
 pub mod account_key_publication;
 pub mod account_keys;
 pub mod account_probe_key;
 pub mod account_profile;
+pub mod account_request_challenges;
 pub mod account_used_ids;
 pub mod audit;
 pub mod deployment_audit;
