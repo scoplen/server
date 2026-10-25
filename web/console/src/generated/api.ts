@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/439b956158b386a7eb6c951a22e4dd5ce43335d5/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/a604b726881292509a8ced5ff32f718ef52f76eb/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -53,13 +53,24 @@ export interface components {
     CertificateIssuanceResponse: CertificateIssuanceResponse;
     AccountProfile: AccountProfile;
     AccountDeviceStatements: AccountDeviceStatements;
-    PersonalInvitationRequest: PersonalInvitationRequest;
-    PersonalInvitationResponse: PersonalInvitationResponse;
-    PersonalEnrollmentRequest: PersonalEnrollmentRequest;
-    PersonalEnrollmentResponse: PersonalEnrollmentResponse;
-    PersonalRateLimitedProblem: PersonalRateLimitedProblem;
-    PersonalStorageUnavailableProblem: PersonalStorageUnavailableProblem;
-    PersonalCommitOutcomeUnknownProblem: PersonalCommitOutcomeUnknownProblem;
+    AccountRequestChallengeRequest: AccountRequestChallengeRequest;
+    AccountRequestChallengeResponse: AccountRequestChallengeResponse;
+    AccountPasswordOptionsRequest: AccountPasswordOptionsRequest;
+    AccountPasswordOptionsResponse: AccountPasswordOptionsResponse;
+    AccountPasswordLoginRequest: AccountPasswordLoginRequest;
+    AccountPasswordLoginResponse: AccountPasswordLoginResponse;
+    AccountRegistrationRequest: AccountRegistrationRequest;
+    AccountDeviceAdmissionRequest: AccountDeviceAdmissionRequest;
+    AccountCommittedConfirmation: AccountCommittedConfirmation;
+    AccountEntryInvalidRequestProblem: AccountEntryInvalidRequestProblem;
+    AccountEntryAuthenticationRequiredProblem: AccountEntryAuthenticationRequiredProblem;
+    AccountEntryPolicyDeniedProblem: AccountEntryPolicyDeniedProblem;
+    AccountEntryMediaTypeProblem: AccountEntryMediaTypeProblem;
+    AccountEntryRateLimitedProblem: AccountEntryRateLimitedProblem;
+    AccountEntryRegistrationDeniedProblem: AccountEntryRegistrationDeniedProblem;
+    AccountEntryAdmissionConflictProblem: AccountEntryAdmissionConflictProblem;
+    AccountEntryBodyTooLargeProblem: AccountEntryBodyTooLargeProblem;
+    AccountEntryStorageUnavailableProblem: AccountEntryStorageUnavailableProblem;
     Account: Resource;
     Device: Resource;
     Organization: Resource;
@@ -129,67 +140,6 @@ export interface AccountDeviceStatements {
   [extension: string]: unknown;
 }
 // END GENERATED AccountDeviceStatements
-// BEGIN GENERATED PersonalEnrollment
-export type PersonalInvitationRequest = Record<string, never>;
-
-export interface PersonalInvitationResponse {
-  invitation_url: string;
-  expires_at: string;
-  [extension: string]: unknown;
-}
-
-export interface PersonalEnrollmentRequest {
-  invitation_token: string;
-  account_id: string;
-  personal_vault_id: string;
-  account_signing_public_key: string;
-  account_kem_public_key: string;
-  key_bundle_update: string;
-  device_certificate: string;
-  wrapped_personal_vault_key: string;
-  device_signature: string;
-}
-
-export interface PersonalEnrollmentResponse {
-  account_id: string;
-  device_id: string;
-  personal_vault_id: string;
-  [extension: string]: unknown;
-}
-
-export interface PersonalRateLimitHeaders {
-  /** Decimal 1..300 seconds; RateLimit.t equals this delay. */
-  "Retry-After": string;
-  "RateLimit-Policy": '"personal";q=30;w=60';
-  RateLimit: string;
-  "Cache-Control": "no-store";
-  Pragma: "no-cache";
-  "Referrer-Policy": "no-referrer";
-}
-
-export type PersonalRateLimitedProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & {
-  status: 429;
-  code: "auth.rate_limited";
-  changed: false;
-  retryable: true;
-};
-
-export type PersonalStorageUnavailableProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & {
-  status: 503;
-  code: "auth.storage_unavailable";
-  changed: false;
-  retryable: true;
-};
-
-export type PersonalCommitOutcomeUnknownProblem = Omit<ProblemDetails, "status" | "code" | "changed" | "retryable"> & {
-  status: 503;
-  code: "auth.commit_outcome_unknown";
-  changed: true;
-  retryable: false;
-};
-
-export type PersonalStorageFailureProblem = PersonalStorageUnavailableProblem | PersonalCommitOutcomeUnknownProblem;
-// END GENERATED PersonalEnrollment
 // BEGIN GENERATED ProblemDetails
 export interface ProblemDetails {
   type: string;
@@ -471,28 +421,110 @@ export type OperatorLogoutCommitOutcomeUnknownProblem = Omit<ProblemDetails, "st
 export type OperatorLogoutStorageFailureProblem = AuthStorageUnavailableProblem | OperatorLogoutCommitOutcomeUnknownProblem;
 // END GENERATED OperatorAuthentication
 
-// BEGIN GENERATED Pairing
-export type PairingCreateRequest = { device_id: string; };
+// BEGIN GENERATED AccountAdmission
+export interface AccountRequestChallengeRequest {
+  kind: "register" | "admit";
+  intent: "submit" | "confirm";
+  operation_id: string;
+  device_id: string;
+}
 
-export type PairingContext = { origin: string; pairing_id: string; initiator_device_id: string | null; responder_device_id: string; expires_at: string; [extension: string]: unknown; };
+export interface AccountRequestChallengeResponse {
+  attempt_id: string;
+  nonce: string;
+  expires_at_ms: string;
+  [extension: string]: unknown;
+}
 
-export type PairingCreateResponse = { context: PairingContext; new_device_token: string; [extension: string]: unknown; };
+export interface AccountPasswordOptionsRequest {
+  username: string;
+}
 
-export type PairingClaimRequest = Record<string, never>;
+export interface AccountPasswordOptionsResponse {
+  attempt_id: string;
+  profile: 1;
+  salt: string;
+  expires_at_ms: string;
+  [extension: string]: unknown;
+}
 
-export type PairingClaimResponse = { context: PairingContext; [extension: string]: unknown; };
+export interface AccountPasswordLoginRequest {
+  attempt_id: string;
+  auth_secret: string;
+}
 
-export type PairingStep = "initiator_share" | "responder_share" | "responder_confirmation" | "initiator_confirmation" | "new_device" | "handoff" | "acceptance";
+export interface AccountPasswordLoginResponse {
+  admission_token: string;
+  expires_at_ms: string;
+  snapshot: string;
+  [extension: string]: unknown;
+}
 
-export type PairingMessageRequest = { step: "initiator_share"; payload: string; } | { step: "responder_share"; payload: string; } | { step: "responder_confirmation"; payload: string; } | { step: "initiator_confirmation"; payload: string; } | { step: "new_device"; payload: string; } | { step: "handoff"; payload: string; } | { step: "acceptance"; payload: string; };
+export interface AccountRegistrationRequest {
+  intent: "submit" | "confirm";
+  payload: string;
+  account_signature: string;
+  attempt_id: string;
+  nonce: string;
+  device_proof: string;
+}
 
-export type PairingRelayMessage = { step: "initiator_share"; payload: string; [extension: string]: unknown; } | { step: "responder_share"; payload: string; [extension: string]: unknown; } | { step: "responder_confirmation"; payload: string; [extension: string]: unknown; } | { step: "initiator_confirmation"; payload: string; [extension: string]: unknown; } | { step: "new_device"; payload: string; [extension: string]: unknown; } | { step: "handoff"; payload: string; [extension: string]: unknown; } | { step: "acceptance"; payload: string; [extension: string]: unknown; };
+export type AccountDeviceAdmissionRequest =
+  | (AccountDeviceAdmissionFields & { intent: "submit"; admission_token: string })
+  | (AccountDeviceAdmissionFields & { intent: "confirm"; admission_token: null });
 
-export type PairingMessageAck = { step: PairingStep; [extension: string]: unknown; };
+export interface AccountDeviceAdmissionFields {
+  payload: string;
+  account_signature: string;
+  attempt_id: string;
+  nonce: string;
+  device_proof: string;
+}
 
-export type PairingReceipt = { account_id: string; device_id: string; revision: number; [extension: string]: unknown; };
+export interface AccountCommittedConfirmation {
+  outcome: "committed";
+  kind: "register" | "admit";
+  operation_id: string;
+  request_digest: string;
+  account_id: string;
+  personal_vault_id: string;
+  device_id: string;
+  admitted_key_revision: string;
+  [extension: string]: unknown;
+}
 
-export type PairingSnapshot = { context: PairingContext; state: "waiting" | "exchanging" | "ready" | "completed" | "cancelled" | "expired"; messages: (PairingRelayMessage)[]; receipt: PairingReceipt | null; [extension: string]: unknown; };
+export type AccountEntryInvalidRequestProblem = ProblemDetails & { status: 400; code: "auth.invalid_request"; changed: false; retryable: false; };
 
-export type PairingCompleteRequest = { device_certificate: string; key_bundle_update: string; new_device_signature: string; };
-// END GENERATED Pairing
+export type AccountEntryAuthenticationRequiredProblem = ProblemDetails & { status: 401; code: "auth.authentication_required"; changed: false; retryable: false; };
+
+export type AccountEntryPolicyDeniedProblem = ProblemDetails & { status: 403; code: "policy.denied"; changed: false; retryable: false; };
+
+export type AccountEntryMediaTypeProblem = ProblemDetails & { status: 415; code: "auth.invalid_request"; changed: false; retryable: false; };
+
+export type AccountEntryRateLimitedProblem = ProblemDetails & { status: 429; code: "auth.rate_limited"; changed: false; retryable: true; };
+
+export type AccountEntryRegistrationDeniedProblem = ProblemDetails & { status: 409; code: "auth.registration_denied"; changed: false; retryable: false; };
+
+export type AccountEntryAdmissionConflictProblem = ProblemDetails & { status: 409; code: "auth.admission_conflict"; changed: false; retryable: false; };
+
+export type AccountEntryBodyTooLargeProblem = ProblemDetails & { status: 413; code: "auth.invalid_request"; changed: false; retryable: false; };
+
+export type AccountEntryStorageUnavailableProblem = ProblemDetails & { status: 503; code: "auth.storage_unavailable"; changed: false; retryable: true; };
+
+export type AccountEntryTooLargeProblem =
+  | (ProblemDetails & { status: 413; code: "auth.invalid_request"; changed: false; retryable: false; })
+  | (ProblemDetails & { status: 413; code: "auth.quota_exceeded"; changed: false; retryable: false; });
+
+export type AccountEntryStorageFailureProblem =
+  | (ProblemDetails & { status: 503; code: "auth.storage_unavailable"; changed: false; retryable: true; })
+  | (ProblemDetails & { status: 503; code: "auth.commit_outcome_unknown"; changed: true; retryable: false; });
+
+export interface AccountEntryRateLimitHeaders {
+  "Retry-After": string;
+  "RateLimit-Policy": '"authentication";q=30;w=60';
+  RateLimit: string;
+  "Cache-Control": "no-store";
+  Pragma: "no-cache";
+}
+
+// END GENERATED AccountAdmission

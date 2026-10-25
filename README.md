@@ -70,23 +70,14 @@ database deadlines and capped 100 ms to five-second backoff. Hints carry no obje
 are validated before dispatch and remain best effort: reconnect and pull changes, or poll every
 60 seconds while unavailable. A lost COMMIT reply can still accompany a committed hint; the HTTP
 result remains uncertain and must never trigger automatic batch replay. Shared-vault mutations
-remain unmounted. The
-`scoplen-identity` crate verifies a decoded D-101 first-device
-enrollment's K-4 account signature, K-2 device certificate, and origin-bound P-256 possession
-proof. It returns a redacted, read-only verified value with the invitation-token digest and exact
-canonical artifacts. `scoplen-store` now persists one-use, 24-hour Personal invitations and
-atomically redeems a verified enrollment into a null-email account, active first device,
-revision-one K-4 bundle, Personal vault, consumed invitation, and deployment audit event on
-SQLite or PostgreSQL. Existing K-4 and vault identifiers are rejected without consuming the
-invitation. The API listener mounts anonymous `POST /api/v1/auth/personal-enroll` with strict
-JSON and artifact validation, configured-origin checks, device possession verification, durable
-source and invitation-digest admission, failure auditing, and one-use redemption. It returns a
-uniform denial for unknown, expired, consumed, or conflicting invitations. A lost commit
-acknowledgement returns `auth.commit_outcome_unknown` so the client can retain its identity and
-attempt device authentication. `POST /api/v1/admin/personal-invitations` issues one-use invitations
-for current Operator sessions with the exact `personal-invitation:issue` scope, protected DPoP,
-durable replay claims and the published Cedar policy. It rechecks and locks the current Operator,
-credential and refresh family inside the issuance transaction. A separate SQLite/PostgreSQL
+remain unmounted. The retired Personal invitation/enrollment and pairing entry points are
+removed from the server, including their verifier, storage adapters, authorization and worker
+maintenance. Historical migrations and tables remain intact and unused by runtime.
+Operator tokens retain the published inert legacy scope claim; it authorizes no current business
+operation or Account/Device entry. Existing
+Accounts and Devices keep authentication and sync; new Account password registration/sign-in,
+bootstrap and device admission remain incomplete. `scoplen-identity` retains the maintained
+Operator passkey verifier. A separate SQLite/PostgreSQL
 device access-token keyring stores an encrypted Ed25519 seed, exposes only public verification
 keys, rotates the active key after 30 days with a seven-day verification overlap, and audits
 creation and rotation in the same transaction. The API listener mounts
@@ -107,8 +98,7 @@ Operator and credential authorization can be rechecked inside an administration 
 transaction. Complete token JSON and the scoped secure cookie are validated before commit, and
 an uncertain commit returns no session secrets. The API listener mounts the strict Operator
 setup and login options/finish routes, and dispatches Operator browser refresh cookies to their
-independent verifier and family store. The Personal console connects setup, fresh Passkey login
-and Personal invitation issuance, with explicit current-session server sign out distinct from
+independent verifier and family store. The Operator console connects setup and fresh Passkey login, with explicit current-session server sign out distinct from
 local tab locking. A dedicated Operator keyring uses
 independent Ed25519 seeds, `operator-` key identifiers, and purpose-bound encrypted envelopes,
 with the same audited 30-day rotation
@@ -127,12 +117,12 @@ remains available. Restart and ordinary token-key rotation preserve Kprobe.
 This boundary is not yet connected to Account password routes; credentials, bootstrap snapshots
 and independent password sign-in remain incomplete. Intentional Kprobe replacement is not exposed.
 
-Verified first-device enrollment, key publication and pairing now retain the complete accepted
-canonical signed K-4 PUT with their serving projection and audit in the same transaction. The
-bounded storage reader requires exact agreement with every current field, signature and wrap.
-Existing projection-only rows remain without acceptance evidence. Lower-level new revisions
-invalidate prior evidence, and exact replay does not backfill it. This is a storage prerequisite
-for complete bootstrap; it adds no Account password route or credentials to existing Accounts.
+Account-key publication retains the complete accepted canonical signed K-4 PUT with its
+serving projection and audit in the same transaction. The bounded storage reader requires exact
+agreement with every current field, signature and wrap. Existing projection-only rows remain
+without acceptance evidence; historical accepted evidence is preserved. Lower-level new revisions
+invalidate prior evidence, and exact replay does not backfill it. This storage prerequisite adds
+no Account password route or credentials to existing Accounts.
 
 The worker retires expired device and Operator refresh credentials in one atomic transaction
 per 30-second heartbeat, independently of later authentication requests. For each kind it
@@ -142,54 +132,11 @@ unbounded cascading deletion. Unexpired families and spent digests, including re
 remain intact until absolute expiry. Expiry is rechecked after family locks, shutdown cancels
 a blocked pass, and logs contain only confirmed counts or fixed failures. This retirement
 reuses database pages; it does not vacuum or promise a smaller database file.
-All server Rust proto dependencies and
-the console's generated public API types are pinned to `proto@439b956` for shared
-authentication, Operator token, scope,
-object-signature, complete account-device statement, D-114 pairing and notification scope lookup
-contracts, D-115 account-key problem vectors and RUSTSEC-2026-0387 dependency fixes.
-The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`. D-123 adds the
-secretless keyboard-interactive Credential descriptor to the model, a breaking pre-Stable
-K-1 extension rejected by older readers. HTTP/API and K-2 artifacts are unchanged. The sync
-service retains encrypted object envelopes without reading
-their Credential fields. The source also includes D-121 asynchronous interactive authentication
-in `scoplen-ssh`, which the server does not consume. Server-hosted SSH and agent execution remain
-separate roadmap work.
-The server lock also resolves patched `crypto-bigint` 0.7.6 and `ctutils` 0.4.5;
-those dependency fixes preserve published K-2 formats.
-The stores also provide independent durable pairing admission for each method/route:
-30 mutation attempts or 120 reads per actual source, 30 mutations or 60 reads per verified
-capability, and 30 mutations or 120 reads per current authenticated account per 60 seconds.
-Denial cooldowns double from one to 300 seconds; authenticated success or ten minutes without
-failure clears the streak while preserving window counts. Failure audit and denial updates
-commit together; success clearing participates in its business transaction. Bounded cleanup
-and source normalization apply on both databases.
-The durable relay stores only a capability digest and seven ordered, role-specific opaque
-slots. Five-minute expiry, bounded cleanup, a 1,000-live/10,000-retained session limit and a
-256 MiB aggregate payload limit serialize across replicas. Cancellation and durable expiry
-transitions erase payloads in their transaction and retain terminal metadata until original
-expiry plus 24 hours.
-The worker also runs one maintenance batch per 30-second heartbeat, independently of pairing
-requests: at most 256 live sessions expire and at most 256 retention-expired sessions are
-removed. It samples time after serialization locks and commits each transition with its audit.
-It preserves unexpired sessions and retained completion receipts, leaves further work for the
-next heartbeat, and cancels an active maintenance pass during shutdown. Logs contain only
-committed counts and fixed error categories.
-Second-device completion rechecks current authorization and verifies the exact signed
-certificate, complete next K-4 bundle, certified/unrevoked recipient set and context-bound
-new-device acceptance in one transaction. It commits identity, keys, response-capacity checks,
-payload erasure, a 24-hour receipt/fingerprint and deployment audit together. Exact completion
-replay returns its retained receipt after current authorization, and never reactivates a later
-revoked device. Unconfirmed commit outcomes disclose no receipt.
-The API listener mounts all six `/api/v1/auth/pairings` operations with strict bounded JSON,
-canonical session ids, native configured-origin checks and no-store/no-cache/no-referrer
-responses. Creation is anonymous; the new role uses its verified session capability, and the
-old role requires a current enrolled-device token, durable token-bound DPoP and exact
-`keys:write`. Source admission precedes parsing; only verified roles select private quotas.
-Failure-audit storage is fail-closed, and an uncertain business commit returns
-`auth.commit_outcome_unknown` without a success body or capability. The public `/pair` page
-only explains how to paste the full fragment-bearing link into Scoplen; it has no password
-field, script or network action. Pairing routes reject cookies, mixed credentials, queries,
-idempotency and conditional cache headers, and never publish credentialed CORS access.
+All Rust protocol consumers, route-contract CI and generated console API types use published
+`proto@a604b726`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`.
+The published Account password and device-admission contracts are not yet server endpoints.
+The sync service retains encrypted object envelopes without reading their Credential fields.
+Server-hosted SSH and agent execution remain separate roadmap work.
 
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
@@ -251,8 +198,7 @@ settings. Other route body limits remain roadmap work.
 The SQLite and PostgreSQL stores atomically provision one personal vault per account with an opaque
 ARK-wrapped initial key. Both scope personal-key reads to the owner and list the account's personal
 vault and current shared memberships. The authenticated K-4 vault-key route delivers that key only
-to its owner using the shared `{keys}` response shape on either backend. Personal enrollment and
-device authentication use these primitives; Personal vault-key rotation remains open.
+to its owner using the shared `{keys}` response shape on either backend. Existing Device authentication uses these primitives; Personal vault-key rotation remains open.
 Both stores also atomically create a shared vault with its admin membership and epoch-one wrap,
 list current shared memberships in vault-id order, and return only a member's non-retired wraps.
 Both stores publish the next epoch for exactly the current member set, add members with every
@@ -292,7 +238,7 @@ exact certificate and DPoP key binding while receiving the bounded body. The SQL
 transaction or PostgreSQL account lock rechecks that binding and current authorization, verifies
 the current account-root signature and complete certified-minus-revoked recipient set (including
 inactive admission rows), and commits revision CAS, all wraps, projected responses and a deployment
-audit event together. It serializes with pairing completion and account identity/statement changes.
+audit event together. It serializes with account identity/statement changes.
 The original token must remain valid after lock acquisition and before COMMIT, for new updates
 and exact replays alike; a slow body or lock wait cannot extend its authorization lifetime.
 Authenticated exact replay compares the complete stored signed request before checking a new
@@ -309,16 +255,16 @@ ARK rotation or device revocation workflows.
 ## Repository shape
 
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.
-`web/console` is the React and strict TypeScript Personal console. `deploy/` and `docs/`
+`web/console` is the React and strict TypeScript Operator console. `deploy/` and `docs/`
 hold deployment and operational material as those roadmap gates become implementable.
 
 ## Personal container trial
 
 Follow [the Personal container procedure](docs/personal-container.md) for the source-built
-single-node Compose entry. It builds and carries the Personal console, persists SQLite and keys
+single-node Compose entry. It builds and carries the Operator console, persists SQLite and keys
 in a private Docker volume, and serves direct HTTPS using an external certificate matching the
 configured DNS name and public port. The runtime is distroless and non-root; ordinary setup uses
-the existing one-time link, fresh Passkey sign-in, and Personal invitation flow. Deployment and
+the one-time Operator setup link, fresh Passkey sign-in, and explicit server sign out. Deployment and
 release gates remain Incomplete; this entry does not establish signed release artifacts,
 backup/restore, physical Passkey interoperability, or every `all`-role workflow.
 The disposable container check also runs a populated pre-migration SQLite database through the
@@ -355,7 +301,7 @@ separate verification.
 For independent Personal integration tests, build the registered
 `personal_live_bootstrap` example and follow [the disposable HTTPS fixture procedure](docs/live-personal-fixture.md).
 It prepares a private localhost TLS configuration, then performs real public Operator
-setup/login/invitation against the production server. SQLite is the default; PostgreSQL takes
+Operator setup/login/logout and retired-route absence against the production server. SQLite is the default; PostgreSQL takes
 a private disposable-database configuration. The caller owns the server process and database.
 
 The maintained WebAuthn verifier builds vendored OpenSSL. Install Perl and a native C toolchain
@@ -461,14 +407,12 @@ credential only in the cookie with the exact Origin and `{}` body; it rotates th
 inside the proof/replay/session/audit transaction. Wrong proof keys or reused DPoP proofs cannot
 revoke a family. Authenticated matching-token reuse revokes it. Native JSON refresh remains a
 device-only surface. An uncertain login or refresh commit returns no token or cookie and must
-restart passkey login with a fresh ceremony. The Personal console implements first-passkey setup,
-fresh discoverable sign-in, and authenticated Personal invitation requests through these public
-APIs. It scrubs the setup fragment immediately, keeps its non-extractable P-256 proof key and
+restart passkey login with a fresh ceremony. The Operator console implements first-passkey setup, fresh discoverable sign-in and explicit
+server sign out through these public APIs. It scrubs the setup fragment immediately, keeps its non-extractable P-256 proof key and
 access token only in memory, and never exports private key material. Reloading requires passkey
 login; it does not try an old refresh cookie with a new proof key. Refresh is serialized using
 Web Locks. Unknown setup outcomes retain the passkey and offer sign-in; unknown login/refresh
-outcomes restart login; an unknown invitation outcome requires an explicit new invitation and
-cannot recover the earlier URL. Lock this tab clears its in-memory sign-in; it does not revoke
+outcomes restart login. Lock this tab clears its in-memory sign-in; it does not revoke
 the server session.
 
 `POST /api/v1/auth/operator/logout` accepts exactly `{}` as complete UTF-8 JSON of at most
@@ -479,7 +423,7 @@ allows 30 attempts per minute; only a transaction-current Operator/family bindin
 independent ten-per-minute Operator bucket. SQLite and PostgreSQL serialize current-state
 validation, family revocation and its deployment audit. Confirmed success returns exactly
 `{"revoked":true}`; an eligible fresh-proof retry can confirm the same already-revoked family
-without another revocation audit. Other browser sessions and completed invitations remain valid.
+without another revocation audit. Other browser sessions and existing Device credentials remain valid.
 All responses omit `Set-Cookie` and use no-store/no-cache/no-referrer headers.
 
 An unknown logout commit returns `503 auth.commit_outcome_unknown` with `changed: true` and
@@ -490,23 +434,6 @@ does not settle the old family's outcome. Only strict server confirmation clears
 Lock this tab can discard them locally while clearly leaving server sign out unconfirmed.
 Same-tab operations are serialized and local locking fences late responses.
 
-The Personal enrollment route
-requires an already issued invitation and no existing session or cookie. It rejects
-`Authorization`, `DPoP`, and `Idempotency-Key` headers. It
-admits at most 30 attempts per peer address and five attempts per decoded invitation digest in
-each fixed 60-second window, with a bounded cooldown after an admitted denial. These counters
-are shared through the configured SQLite or PostgreSQL database. A reverse proxy without a
-verified peer-address resolver causes callers to share the proxy's address quota. The current
-invitation-issuance route accepts exactly `{}` as JSON (at most 256 bytes), rejects query strings
-and idempotency headers, and requires any supplied Origin to match the configured trusted origin.
-Its independent durable quotas allow 30 requests per source and ten per authenticated Operator
-in each fixed 60-second window. Device credentials and Operator tokens without the required
-scope receive `policy.denied`; revoked sessions cannot issue. The one-time invitation URL and
-expiry are returned only after the invitation and mandatory deployment audit commit. An
-unconfirmed commit returns `auth.commit_outcome_unknown` with `changed: true` and
-`retryable: false`, without a URL or cookie. Its URL cannot be recovered: an Operator must
-explicitly decide whether to issue another invitation. Successes and failures are non-cacheable
-and use `Referrer-Policy: no-referrer`.
 Enrolled devices can request a 120-second challenge, sign it with their registered P-256 key,
 and receive a ten-minute DPoP-bound access token and a single-use refresh credential. The API
 listener returns no-store JSON and RFC 9457 problems. Device and refresh admission is durable
@@ -525,28 +452,29 @@ Unknown commit outcomes retain their separate non-retryable device-challenge rec
 `account:read` scope. It rechecks the account, device, proof key, certificate publication and
 revocation inside the read transaction, and returns only the caller's bounded account Resource.
 The HTTP ETag equals the stable strong body tag; responses disable caching and preserve
-`email: null` for invitation-created accounts. Stored email is returned exactly when valid;
+`email: null` for legacy Accounts without email. Stored email is returned exactly when valid;
 missing or corrupt state and storage failures disclose no profile. Origin is optional for
 native callers and must match the deployment exactly when supplied; GET bodies are rejected.
-Profiles currently have no mutation endpoint, so both timestamps come from persisted enrollment
+Profiles currently have no mutation endpoint, so both timestamps come from persisted identity
 time. Profile mutation and email verification remain separate work.
 `GET /api/v1/accounts/me/devices` uses the same exact `account:read` boundary and returns the
 complete signed certificate and revocation snapshot for that account. Each artifact is at most
 64 KiB, their combined decoded size is at most 4 MiB, and the JSON response is at most 6 MiB.
 The read transaction rechecks caller admission and verifies every stored signature, account
-binding and device-id uniqueness; inactive peer enrollment rows do not remove signed statements.
+binding and device-id uniqueness; inactive peer identity rows do not remove signed statements.
 Missing key state, corrupt collections and capacity failures return a non-cacheable 503 without
 partial data. The read accepts no body, query, `Idempotency-Key` or `If-Match`, and returns no ETag
 or pagination fields. Names and platforms remain signed account claims. Remaining device
 lifecycle mutations remain separate work. The protected Personal
 sync subset above also uses these credentials; other control-plane APIs remain unmounted.
 
-Server integration tests exercise the complete public Personal path on SQLite and PostgreSQL:
-passkey setup, fresh Operator login, invitation issuance, signed first-device enrollment,
+Server integration tests seed real signed legacy Account/Device artifacts directly into owned
+SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator login, public
 device challenge/token exchange, authenticated account-profile and device-statement reads,
 Personal session/key reads, encrypted signed host write, download verification/decryption, and
-durable ACK. They use the production API router and verify its deployment audit chain. Native
-desktop two-device acceptance remains separate roadmap work.
+durable ACK. They use the production API router and verify its deployment audit chain.
+New Account registration, device admission and native desktop two-device acceptance remain
+separate roadmap work.
 
 PostgreSQL tests use `SCOPLEN_TEST_DATABASE_URL` for disposable databases. The device-token
 keyring suite intentionally leaves a corrupt encrypted seed after checking fail-closed behavior.

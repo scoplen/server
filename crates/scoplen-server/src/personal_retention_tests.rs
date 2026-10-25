@@ -21,7 +21,7 @@ async fn worker(f: &Fixture) {
 }
 
 async fn retention_flow(mut f: Fixture) {
-    let PersonalBootstrap { receipt, token, client, .. } = bootstrap_personal(&mut f).await;
+    let LegacyDeviceSession { receipt, token, client, .. } = legacy_device_session(&mut f).await;
     sync_object(&f, &receipt, &token, &client).await;
     let vault = receipt.personal_vault_id;
     let changes_path = format!("/sync/v1/vaults/{vault}/changes?after=0&limit=10");

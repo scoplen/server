@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 const PATH: &str = "/sync/v1/keys";
 type Tls = tokio_rustls::client::TlsStream<TcpStream>;
 
-async fn accepted_put(f: &Fixture, identity: &PersonalBootstrap) -> Option<Vec<u8>> {
+async fn accepted_put(f: &Fixture, identity: &LegacyDeviceSession) -> Option<Vec<u8>> {
     let account = identity.receipt.account_id.into_bytes();
     match &f.backend {
         AuthBackend::Sqlite(store) => store.read_accepted_account_key_put(account).await,
@@ -34,7 +34,7 @@ fn sign(update: &mut SyncAccountKeyBundleUpdate, root: &Ed25519SigningKey) {
         root.sign(&update.signature_input().expect("canonical signing input")).to_vec();
 }
 
-fn update(identity: &PersonalBootstrap, revision: u64) -> SyncAccountKeyBundleUpdate {
+fn update(identity: &LegacyDeviceSession, revision: u64) -> SyncAccountKeyBundleUpdate {
     let mut update = SyncAccountKeyBundleUpdate {
         revision,
         device_wraps: vec![SyncAccountDeviceWrap {
@@ -82,7 +82,7 @@ fn denied(reply: &Reply, status: u16, code: &str, changed: bool, retryable: bool
 
 async fn request(
     listener: &Listener,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     method: &str,
     body: &[u8],
     token: &str,
@@ -119,20 +119,20 @@ async fn request(
 
 async fn put(
     listener: &Listener,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     update: &SyncAccountKeyBundleUpdate,
 ) -> Reply {
     request(listener, identity, "PUT", &update.to_cbor().expect("canonical PUT"), &identity.token)
         .await
 }
 
-async fn pending(listener: &Listener, identity: &PersonalBootstrap, body: &[u8]) -> Tls {
+async fn pending(listener: &Listener, identity: &LegacyDeviceSession, body: &[u8]) -> Tls {
     pending_with_token(listener, identity, body, &identity.token).await
 }
 
 async fn pending_with_token(
     listener: &Listener,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     body: &[u8],
     token: &str,
 ) -> Tls {
@@ -172,7 +172,7 @@ async fn release(mut tls: Tls, body: &[u8]) -> Reply {
     Reply { status, headers, body: bytes[boundary + 4..].to_vec() }
 }
 
-async fn own(f: &Fixture, identity: &PersonalBootstrap) -> Vec<u8> {
+async fn own(f: &Fixture, identity: &LegacyDeviceSession) -> Vec<u8> {
     f.backend
         .current_principal(identity.receipt.device_id.into_bytes())
         .await
@@ -182,7 +182,7 @@ async fn own(f: &Fixture, identity: &PersonalBootstrap) -> Vec<u8> {
 }
 
 fn certificate(
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     device: Uuid,
     root: &Ed25519SigningKey,
     name: &str,
@@ -205,7 +205,7 @@ fn certificate(
 
 async fn statements(
     f: &Fixture,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     certificates: &[Vec<u8>],
     revocations: &[Vec<u8>],
 ) {
@@ -234,7 +234,7 @@ async fn statements(
 
 async fn identity_certificate(
     f: &Fixture,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     certificate: &[u8],
     root: &Ed25519SigningKey,
 ) {
@@ -277,7 +277,7 @@ async fn identity_certificate(
 
 #[allow(clippy::too_many_lines)]
 async fn contract(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let listener = Listener::start(&mut f).await;
     let mut candidate = update(&identity, 2);
     let before = f.count("SELECT COUNT(*) FROM deployment_audit_events").await;
@@ -398,7 +398,7 @@ async fn contract(mut f: Fixture) {
 }
 
 async fn original_binding_and_roots(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let listener = Listener::start(&mut f).await;
     let original = own(&f, &identity).await;
     let candidate = update(&identity, 2);
@@ -461,36 +461,9 @@ async fn original_binding_and_roots(mut f: Fixture) {
     f.cleanup().await;
 }
 
-async fn pairing_race(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
-    let created = pairing::create(&f).await;
-    let completion = pairing::ready(&f, &identity, &created).await;
-    let listener = Listener::start(&mut f).await;
-    let candidate = update(&identity, 2);
-    let body = candidate.to_cbor().expect("PUT");
-    let tls = pending(&listener, &identity, &body).await;
-    let path = format!("/api/v1/auth/pairings/{}/complete", created.context.pairing_id);
-    let response = protected(
-        &f,
-        "POST",
-        &path,
-        &completion.to_json().expect("complete JSON"),
-        &identity.token,
-        &identity.client,
-    )
-    .await;
-    assert_eq!(response.status, 200);
-    denied(&release(tls, &body).await, 409, "sync.conflict", false, true);
-    assert_eq!(f.count("SELECT COUNT(*) FROM identity_devices").await, 2);
-    assert_eq!(f.count("SELECT COUNT(*) FROM sync_account_key_device_wraps").await, 2);
-    assert_eq!(f.count("SELECT revision FROM sync_account_key_bundles").await, 2);
-    drop(listener);
-    f.cleanup().await;
-}
-
 async fn rollback(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
-    let original_put = accepted_put(&f, &identity).await.expect("accepted enrollment PUT");
+    let identity = legacy_device_session(&mut f).await;
+    let original_put = accepted_put(&f, &identity).await.expect("seeded legacy accepted PUT");
     let listener = Listener::start(&mut f).await;
     let candidate = update(&identity, 2);
     let before = f.count("SELECT COUNT(*) FROM deployment_audit_events").await;
@@ -539,7 +512,7 @@ async fn rollback(mut f: Fixture) {
     f.cleanup().await;
 }
 
-async fn expiring_token(f: &Fixture, identity: &PersonalBootstrap, expires_at: u64) -> String {
+async fn expiring_token(f: &Fixture, identity: &LegacyDeviceSession, expires_at: u64) -> String {
     let kms = LocalKeyFile::load(f.directory.join("deployment.key")).expect("KMS");
     let keyring = f.backend.keyring(&kms).await.expect("signing keys");
     let mut trusted = TrustedDeviceAccessTokenKeys::new(ORIGIN).expect("issuer");
@@ -576,7 +549,7 @@ async fn wait_for_expiry(expires_at: u64) {
 }
 
 async fn body_expiry(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let listener = Listener::start(&mut f).await;
     let candidate = update(&identity, 2);
     let body = candidate.to_cbor().expect("PUT");
@@ -601,7 +574,7 @@ async fn body_expiry(mut f: Fixture) {
 
 #[cfg(feature = "postgres-integration")]
 async fn locked_expiry(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let listener = Listener::start(&mut f).await;
     let AuthBackend::Postgres(store) = &f.backend else { unreachable!() };
     let candidate = update(&identity, 2);
@@ -676,10 +649,6 @@ async fn sqlite_https_personal_key_original_binding_and_old_root_replay() {
     original_binding_and_roots(Fixture::sqlite().await).await;
 }
 #[tokio::test]
-async fn sqlite_https_personal_key_pairing_publication_race() {
-    pairing_race(Fixture::sqlite().await).await;
-}
-#[tokio::test]
 async fn sqlite_https_personal_key_audit_and_capacity_rollback() {
     rollback(Fixture::sqlite().await).await;
 }
@@ -695,11 +664,6 @@ async fn postgres_https_personal_key_original_binding_and_old_root_replay() {
 }
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
-async fn postgres_https_personal_key_pairing_publication_race() {
-    pairing_race(Fixture::postgres().await).await;
-}
-#[cfg(feature = "postgres-integration")]
-#[tokio::test]
 async fn postgres_https_personal_key_audit_and_capacity_rollback() {
     rollback(Fixture::postgres().await).await;
 }
@@ -709,7 +673,7 @@ async fn postgres_https_personal_key_audit_and_capacity_rollback() {
 async fn postgres_https_personal_key_lost_commit_ack_and_explicit_replay() {
     use std::sync::atomic::Ordering;
     let mut f = Fixture::postgres().await;
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let (_, schema) = f.postgres.as_ref().expect("owned schema");
     let mut url =
         Url::parse(&std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("owned PG database"))

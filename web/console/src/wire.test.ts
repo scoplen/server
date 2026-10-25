@@ -8,7 +8,6 @@ import {
   jsonResponse,
   timestamp,
   sessionResponse,
-  invitationResponse,
   logoutResponse,
 } from "./wire.ts";
 
@@ -100,26 +99,7 @@ test("browser session rejects native refresh credentials and invalid lifetimes",
     assert.throws(() => sessionResponse({ ...session, ...patch }));
 });
 
-test("invitation stays on exact trusted origin and carries only canonical fragment token", () => {
-  const input = {
-    invitation_url: `https://operator.example/invite#token=${encoded(new Uint8Array(32))}`,
-    expires_at: "2030-01-02T03:04:05Z",
-  };
-  assert.deepEqual(
-    invitationResponse(input, "https://operator.example"),
-    input,
-  );
-  for (const url of [
-    input.invitation_url.replace("operator.example", "operator.example.evil"),
-    input.invitation_url + "&extra=1",
-    input.invitation_url.replace("/invite#", "/invite?#"),
-  ])
-    assert.throws(() =>
-      invitationResponse(
-        { ...input, invitation_url: url },
-        "https://operator.example",
-      ),
-    );
+test("timestamps reject normalized dates and noncanonical spellings", () => {
   for (const date of [
     "2030-02-30T00:00:00Z",
     "2030-01-01T00:00:00.000Z",

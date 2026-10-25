@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useEffect, useRef, useState } from "react";
-import type { PersonalInvitationResponse } from "./generated/api.ts";
 import { ConsoleFailure, type OperatorClient } from "./operator.ts";
 
 function failureText(error: unknown): string {
@@ -28,8 +27,6 @@ function failureText(error: unknown): string {
   }
   if (error.uncertain && error.operation === "setup")
     return "Registration may have completed. Keep the passkey you created and sign in with it. Do not create another passkey automatically.";
-  if (error.uncertain && error.operation === "invitation")
-    return "An invitation may have been created, but its link cannot be recovered. Choose Create another invitation to issue a different link.";
   if (error.uncertain)
     return "The session response could not be confirmed. Sign in again with a fresh passkey request; the previous request will not be repeated.";
   switch (error.code) {
@@ -62,7 +59,7 @@ export function App({
   invalidLink: boolean;
   unavailable?: string;
 }) {
-  const [step, setStep] = useState<"setup" | "login" | "invitation" | "logout">(
+  const [step, setStep] = useState<"setup" | "login" | "session" | "logout">(
     client.canSetup ? "setup" : "login",
   );
   const [busy, setBusy] = useState(false);
@@ -73,9 +70,6 @@ export function App({
       : "",
   );
   const [error, setError] = useState(invalidLink);
-  const [invitation, setInvitation] = useState<PersonalInvitationResponse>();
-  const [another, setAnother] = useState(false);
-  const [copied, setCopied] = useState(false);
   const [logoutExpired, setLogoutExpired] = useState(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
 
@@ -92,8 +86,6 @@ export function App({
     running.current = true;
     setBusy(true);
     setStep("logout");
-    setInvitation(undefined);
-    setCopied(false);
     setError(false);
     setLogoutExpired(false);
     setMessage("Signing out of this session…");
@@ -132,44 +124,18 @@ export function App({
         await client.register();
         setStep("login");
         setMessage(
-          "Your passkey was created. Sign in with it to open the Personal console.",
+          "Your passkey was created. Sign in with it to open the Operator console.",
         );
       } else if (step === "login") {
         await client.signIn();
-        setStep("invitation");
+        setStep("session");
         setMessage("Signed in as a deployment Operator.");
-      } else {
-        setInvitation(undefined);
-        setCopied(false);
-        setInvitation(await client.invite());
-        setAnother(true);
-        setMessage(
-          "Invitation created. Copy the link before closing this tab.",
-        );
       }
     } catch (failure) {
       setError(true);
       setMessage(failureText(failure));
       if (failure instanceof ConsoleFailure) {
         if (step === "setup" && failure.uncertain) setStep("login");
-        if (
-          step === "invitation" &&
-          failure.uncertain &&
-          failure.operation === "invitation"
-        )
-          setAnother(true);
-        if (
-          step === "invitation" &&
-          (failure.operation === "refresh" ||
-            [
-              "auth.authentication_required",
-              "sign_in_required",
-              "auth.invalid_dpop_proof",
-            ].includes(failure.code))
-        ) {
-          client.lock();
-          setStep("login");
-        }
       }
     } finally {
       running.current = false;
@@ -179,7 +145,6 @@ export function App({
 
   function lock() {
     client.lock();
-    setInvitation(undefined);
     setStep("login");
     setError(false);
     setMessage(
@@ -194,7 +159,7 @@ export function App({
         ? "Sign in to your deployment"
         : step === "logout"
           ? "Sign out of this session"
-          : "Connect your Personal account";
+          : "Signed in as an Operator";
   const action =
     step === "setup"
       ? "Create passkey"
@@ -202,9 +167,7 @@ export function App({
         ? "Sign in with passkey"
         : step === "logout"
           ? "Retry sign out"
-          : another
-            ? "Create another invitation"
-            : "Create Personal invitation";
+          : "Sign out";
   return (
     <div className="console-shell">
       <a className="skip-link" href="#main">
@@ -212,20 +175,9 @@ export function App({
       </a>
       <header className="console-header">
         <span className="wordmark">Scoplen</span>
-        <span className="context">Personal console</span>
-        {(step === "invitation" || step === "logout") && (
+        <span className="context">Operator console</span>
+        {(step === "session" || step === "logout") && (
           <div className="session-actions">
-            {step === "invitation" && (
-              <button
-                className="secondary"
-                onClick={() => {
-                  void signOut();
-                }}
-                disabled={busy}
-              >
-                Sign out
-              </button>
-            )}
             <button className="quiet" onClick={lock} disabled={busy}>
               Lock this tab
             </button>
@@ -241,7 +193,7 @@ export function App({
                 ? "Operator access"
                 : step === "logout"
                   ? "Operator session"
-                  : "Personal invitation"}
+                  : "Operator session"}
           </p>
           <h1 id="title" ref={titleRef} tabIndex={-1}>
             {title}
@@ -253,7 +205,7 @@ export function App({
                 ? "Use the passkey registered for this deployment. Your device will ask you to verify."
                 : step === "logout"
                   ? "Sign out ends this browser session. Other browser sessions stay signed in. Lock this tab only removes access from this tab."
-                  : "Create a one-use invitation to set up a Personal account in the Scoplen desktop app."}
+                  : "Your Operator passkey controls this deployment. You can sign out of this browser session or lock this tab locally."}
           </p>
           {unavailable && (
             <div className="notice error" role="alert">
@@ -272,65 +224,15 @@ export function App({
           </div>
           {step === "logout" && logoutExpired && (
             <p className="notice error" role="alert">
-              The retry window has expired. Server sign out remains
-              unconfirmed. Use Lock this tab to remove local access.
+              The retry window has expired. Server sign out remains unconfirmed.
+              Use Lock this tab to remove local access.
             </p>
-          )}
-          {invitation && (
-            <section className="invitation" aria-labelledby="invitation-label">
-              <h2 id="invitation-label">Your invitation link</h2>
-              <p>
-                Anyone with this link can create one Personal account and enroll
-                its first device. Share it only with the intended person.
-              </p>
-              <label htmlFor="invitation-link">Invitation URL</label>
-              <textarea
-                id="invitation-link"
-                readOnly
-                value={invitation.invitation_url}
-                rows={3}
-                spellCheck={false}
-              />
-              <div className="link-actions">
-                <button
-                  className="secondary"
-                  onClick={() => {
-                    void navigator.clipboard
-                      .writeText(invitation.invitation_url)
-                      .then(
-                        () => setCopied(true),
-                        () => {
-                          setError(true);
-                          setMessage(
-                            "Clipboard access was unavailable. Select and copy the invitation link above.",
-                          );
-                        },
-                      );
-                  }}
-                >
-                  {copied ? "Copied" : "Copy invitation link"}
-                </button>
-                <span>
-                  Expires{" "}
-                  <time dateTime={invitation.expires_at}>
-                    {new Intl.DateTimeFormat(undefined, {
-                      dateStyle: "medium",
-                      timeStyle: "short",
-                    }).format(new Date(invitation.expires_at))}
-                  </time>
-                </span>
-              </div>
-              <p className="caption">
-                The link is shown once. Keep it until it has been opened in the
-                desktop app.
-              </p>
-            </section>
           )}
           <div className="actions">
             <button
               className="primary-button"
               onClick={() => {
-                if (step === "logout") void signOut();
+                if (step === "logout" || step === "session") void signOut();
                 else void act();
               }}
               disabled={
@@ -343,9 +245,7 @@ export function App({
               {busy
                 ? step === "logout"
                   ? "Signing out…"
-                  : step === "invitation"
-                    ? "Creating invitation…"
-                    : "Waiting for your passkey…"
+                  : "Waiting for your passkey…"
                 : action}
             </button>
             {step === "login" && client.canReturnToSetup && (
@@ -379,13 +279,13 @@ export function App({
           <p className="caption">
             {step === "logout"
               ? "Wait for the server to confirm sign out. No retry runs automatically. Other browser sessions are unaffected."
-              : step === "invitation"
-                ? "Creating another invitation issues a new one. It does not replace or recover an earlier link."
-                : "A passkey authenticates the deployment Operator. Your Personal account is created separately in the desktop app."}
+              : step === "session"
+                ? "Sign out revokes this session on the server. Lock this tab only removes credentials from this tab."
+                : "A passkey authenticates the deployment Operator. Account sign-in in the desktop app is separate."}
           </p>
         </section>
         <aside className="guide" aria-labelledby="guide-title">
-          <h2 id="guide-title">A short path to your devices</h2>
+          <h2 id="guide-title">Your Operator session</h2>
           <ol className="steps">
             <li aria-current={step === "setup" ? "step" : undefined}>
               <span className="step-number">01</span>
@@ -401,11 +301,11 @@ export function App({
                 <p>Verify with your saved passkey.</p>
               </div>
             </li>
-            <li aria-current={step === "invitation" ? "step" : undefined}>
+            <li aria-current={step === "session" ? "step" : undefined}>
               <span className="step-number">03</span>
               <div>
-                <h3>Create a Personal invitation</h3>
-                <p>Open the one-use link in the Scoplen desktop app.</p>
+                <h3>End this session</h3>
+                <p>Sign out when you finish administering this deployment.</p>
               </div>
             </li>
           </ol>

@@ -146,7 +146,7 @@ impl SqliteStore {
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
-        self.claim_job_filtered(None, owner, now_ms, lease_ms).await
+        self.claim_job_filtered(None, owner, now_ms, now_ms, lease_ms).await
     }
 
     /// Claim the oldest eligible job of one kind under an atomic SQLite write transaction.
@@ -161,18 +161,39 @@ impl SqliteStore {
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
+        self.claim_job_kind_available_through(kind, owner, now_ms, now_ms, lease_ms).await
+    }
+
+    /// Claim one kind with a fixed availability cutoff and an independently current lease clock.
+    ///
+    /// Jobs deferred beyond `available_through_ms` remain for a later sweep even when `now_ms`
+    /// advances. Lease expiry and the new lease are evaluated at `now_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or database error when the claim cannot be committed.
+    pub async fn claim_job_kind_available_through(
+        &self,
+        kind: &str,
+        owner: &str,
+        available_through_ms: i64,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
         validate_kind(kind)?;
-        self.claim_job_filtered(Some(kind), owner, now_ms, lease_ms).await
+        self.claim_job_filtered(Some(kind), owner, available_through_ms, now_ms, lease_ms).await
     }
 
     async fn claim_job_filtered(
         &self,
         kind: Option<&str>,
         owner: &str,
+        available_through_ms: i64,
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
         validate_owner(owner)?;
+        validate_timestamp(available_through_ms)?;
         validate_timestamp(now_ms)?;
         validate_lease(lease_ms)?;
         let lease_until_ms =
@@ -189,7 +210,7 @@ impl SqliteStore {
                AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
              ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1"
         };
-        let mut query = sqlx::query(query).bind(now_ms).bind(now_ms);
+        let mut query = sqlx::query(query).bind(available_through_ms).bind(now_ms);
         if let Some(kind) = kind {
             query = query.bind(kind);
         }
@@ -440,7 +461,7 @@ impl PostgresStore {
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
-        self.claim_job_filtered(None, owner, now_ms, lease_ms).await
+        self.claim_job_filtered(None, owner, now_ms, now_ms, lease_ms).await
     }
 
     /// Claim the oldest eligible PostgreSQL job of one kind.
@@ -455,18 +476,39 @@ impl PostgresStore {
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
+        self.claim_job_kind_available_through(kind, owner, now_ms, now_ms, lease_ms).await
+    }
+
+    /// Claim one PostgreSQL kind with separate availability and lease clocks.
+    ///
+    /// Jobs deferred beyond `available_through_ms` remain for a later sweep even when `now_ms`
+    /// advances. Lease expiry and the new lease are evaluated at `now_ms`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation or database error when the claim cannot be committed.
+    pub async fn claim_job_kind_available_through(
+        &self,
+        kind: &str,
+        owner: &str,
+        available_through_ms: i64,
+        now_ms: i64,
+        lease_ms: i64,
+    ) -> Result<Option<Job>, JobQueueError> {
         validate_kind(kind)?;
-        self.claim_job_filtered(Some(kind), owner, now_ms, lease_ms).await
+        self.claim_job_filtered(Some(kind), owner, available_through_ms, now_ms, lease_ms).await
     }
 
     async fn claim_job_filtered(
         &self,
         kind: Option<&str>,
         owner: &str,
+        available_through_ms: i64,
         now_ms: i64,
         lease_ms: i64,
     ) -> Result<Option<Job>, JobQueueError> {
         validate_owner(owner)?;
+        validate_timestamp(available_through_ms)?;
         validate_timestamp(now_ms)?;
         validate_lease(lease_ms)?;
         let lease_until_ms =
@@ -483,7 +525,7 @@ impl PostgresStore {
                AND (lease_until_ms IS NULL OR lease_until_ms <= $2)
              ORDER BY available_at_ms ASC, created_at_ms ASC, id ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
         };
-        let mut query = sqlx::query(query).bind(now_ms).bind(now_ms);
+        let mut query = sqlx::query(query).bind(available_through_ms).bind(now_ms);
         if let Some(kind) = kind {
             query = query.bind(kind);
         }

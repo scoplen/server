@@ -270,7 +270,7 @@ macro_rules! retention {
                     let mut eligible = None;
                     if let Some(account) = candidate {
                         if $postgres {
-                            // Account-key publication/pairing take this same seed-0 lock exclusively.
+                            // Account-key publication takes this same seed-0 lock exclusively.
                             sqlx::query(&sql(
                                 "SELECT pg_advisory_xact_lock_shared(hashtextextended(encode(?, 'hex'), 0))",
                             ))

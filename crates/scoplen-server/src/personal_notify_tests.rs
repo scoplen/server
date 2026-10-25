@@ -264,56 +264,114 @@ async fn no_event<S: AsyncRead + AsyncWrite + Unpin>(socket: &mut WebSocketStrea
     );
 }
 
-async fn paired(f: &Fixture, identity: &PersonalBootstrap) -> String {
-    let created = pairing::create(f).await;
-    let request = pairing::ready(f, identity, &created).await;
-    let reply = protected(
-        f,
-        "POST",
-        &format!("/api/v1/auth/pairings/{}/complete", created.context.pairing_id),
-        &request.to_json().expect("approval"),
-        &identity.token,
-        &identity.client,
+async fn second_device(f: &Fixture, identity: &LegacyDeviceSession) -> String {
+    let account = identity.receipt.account_id;
+    let device = Uuid::now_v7();
+    let client = key(4);
+    let root = Ed25519SigningKey::from_bytes(&[7; 32]).expect("Account signing key");
+    let kem = scoplen_crypto::DeviceKemKeyPair::from_private_bytes(&[5; 32]).expect("Device KEM");
+    let certificate = DeviceCertificate::issue(
+        &root,
+        device,
+        account,
+        client.public_key_sec1(),
+        kem.public_key().to_vec(),
+        "Existing second Device".into(),
+        "test".into(),
+        1,
     )
-    .await;
-    assert_eq!(reply.status, 200);
-    authenticate_device(f, created.context.responder_device_id, &key(4)).await
+    .expect("signed Device certificate")
+    .encode()
+    .expect("certificate bytes");
+    let wrap = scoplen_crypto::DeviceArkWrap::seal(
+        account,
+        device,
+        kem.public_key(),
+        &SecretBytes::new([11; 32]),
+    )
+    .expect("second Device ARK wrap")
+    .encode()
+    .to_vec();
+    let accepted = match &f.backend {
+        AuthBackend::Sqlite(store) => {
+            store.read_accepted_account_key_put(account.into_bytes()).await
+        }
+        AuthBackend::Postgres(store) => {
+            store.read_accepted_account_key_put(account.into_bytes()).await
+        }
+    }
+    .expect("stored legacy PUT")
+    .expect("accepted legacy PUT");
+    let mut update = SyncAccountKeyBundleUpdate::from_cbor(&accepted).expect("valid legacy PUT");
+    update.revision += 1;
+    update
+        .device_wraps
+        .push(SyncAccountDeviceWrap { device_id: device, wrapped_ark: wrap.clone() });
+    update.device_wraps.sort_by_key(|item| item.device_id);
+    update.signature = root.sign(&update.signature_input().expect("complete recipients")).to_vec();
+    let accepted = update.to_cbor().expect("signed legacy PUT");
+    macro_rules! seed_peer {
+        ($pool:expr, $device_sql:literal, $wrap_sql:literal, $certificate_sql:literal, $bundle_sql:literal) => {{
+            let mut tx = $pool.begin().await.expect("owned Device fixture transaction");
+            sqlx::query($device_sql)
+                .bind(device.as_bytes().as_slice())
+                .bind(account.as_bytes().as_slice())
+                .bind(&certificate)
+                .execute(&mut *tx)
+                .await
+                .expect("existing Device seed");
+            sqlx::query($wrap_sql)
+                .bind(account.as_bytes().as_slice())
+                .bind(device.as_bytes().as_slice())
+                .bind(&wrap)
+                .execute(&mut *tx)
+                .await
+                .expect("existing Device ARK wrap");
+            sqlx::query($certificate_sql)
+                .bind(account.as_bytes().as_slice())
+                .bind(&certificate)
+                .execute(&mut *tx)
+                .await
+                .expect("existing Device statement");
+            sqlx::query($bundle_sql)
+                .bind(&update.signature)
+                .bind(&accepted)
+                .bind(account.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await
+                .expect("complete accepted PUT seed");
+            tx.commit().await.expect("existing Device fixture committed");
+        }};
+    }
+    match &f.backend {
+        AuthBackend::Sqlite(store) => seed_peer!(
+            store.pool(),
+            "INSERT INTO identity_devices (device_id,account_id,certificate,active,created_at_ms) VALUES (?,?,?,true,1)",
+            "INSERT INTO sync_account_key_device_wraps (account_id,device_id,wrapped_ark) VALUES (?,?,?)",
+            "INSERT INTO sync_account_key_certificates (account_id,certificate) VALUES (?,?)",
+            "UPDATE sync_account_key_bundles SET revision=2,signature=?,accepted_put_cbor=? WHERE account_id=?"
+        ),
+        AuthBackend::Postgres(store) => seed_peer!(
+            store.pool(),
+            "INSERT INTO identity_devices (device_id,account_id,certificate,active,created_at_ms) VALUES ($1,$2,$3,true,1)",
+            "INSERT INTO sync_account_key_device_wraps (account_id,device_id,wrapped_ark) VALUES ($1,$2,$3)",
+            "INSERT INTO sync_account_key_certificates (account_id,certificate) VALUES ($1,$2)",
+            "UPDATE sync_account_key_bundles SET revision=2,signature=$1,accepted_put_cbor=$2 WHERE account_id=$3"
+        ),
+    }
+    authenticate_device(f, device, &client).await
 }
 
-async fn another_account(f: &Fixture, identity: &PersonalBootstrap) -> (String, P256SigningKey) {
-    let reply = protected(
-        f,
-        "POST",
-        "/api/v1/admin/personal-invitations",
-        b"{}",
-        &identity.operator_token,
-        &identity.operator_key,
-    )
-    .await;
-    assert_eq!(reply.status, 201);
-    let invitation = PersonalInvitationResponse::from_json(&reply.body).expect("invitation");
-    let token = URL_SAFE_NO_PAD
-        .decode(invitation.invitation_url.split("#token=").nth(1).expect("fragment"))
-        .expect("token")
-        .try_into()
-        .expect("32 bytes");
+async fn another_account(f: &Fixture) -> (String, P256SigningKey) {
     let client = key(6);
-    let request = enrollment(token, &client);
-    let reply = http(
-        f.address,
-        "/api/v1/auth/personal-enroll",
-        &request.to_json().expect("enrollment"),
-        &[("Content-Type", "application/json")],
-    )
-    .await;
-    assert_eq!(reply.status, 201);
-    (authenticate_device(f, request.device_certificate.device_id, &client).await, client)
+    let receipt = seed_legacy_device(f, &client).await;
+    (authenticate_device(f, receipt.device_id, &client).await, client)
 }
 
 async fn delivery(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
-    let second = paired(&f, &identity).await;
-    let (foreign, foreign_key) = another_account(&f, &identity).await;
+    let identity = legacy_device_session(&mut f).await;
+    let second = second_device(&f, &identity).await;
+    let (foreign, foreign_key) = another_account(&f).await;
     let listener = Listener::start(&mut f).await;
     assert!(listener.hub.is_available());
     let mut first = listener.get().await;
@@ -365,7 +423,7 @@ async fn delivery(mut f: Fixture) {
 
 #[allow(clippy::too_many_lines)]
 async fn denials(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let missing_scope = account_profile::signed_token(
         &f,
         &identity,
@@ -460,7 +518,7 @@ async fn denials(mut f: Fixture) {
 
 async fn signed_expiring_token(
     f: &Fixture,
-    identity: &PersonalBootstrap,
+    identity: &LegacyDeviceSession,
     expires_at: u64,
 ) -> String {
     let kms = LocalKeyFile::load(f.directory.join("deployment.key")).expect("KMS");
@@ -493,7 +551,7 @@ async fn signed_expiring_token(
 }
 
 async fn expiry(mut f: Fixture) {
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let listener = Listener::start(&mut f).await;
     let mut socket = listener.get().await;
     let now = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock").as_secs();
@@ -516,7 +574,7 @@ async fn expiry(mut f: Fixture) {
 #[tokio::test]
 async fn supervised_shutdown_fences_ready_h2_connect_before_listener_exit() {
     let mut f = Fixture::sqlite().await;
-    let identity = bootstrap_personal(&mut f).await;
+    let identity = legacy_device_session(&mut f).await;
     let rcgen::CertifiedKey { cert, key_pair } =
         rcgen::generate_simple_self_signed(vec!["setup.example.com".into()])
             .expect("owned TLS certificate");
@@ -623,7 +681,7 @@ async fn postgres_real_tls_notifications_token_expiry() {
 }
 
 #[cfg(feature = "postgres-integration")]
-async fn rewrite(f: &Fixture, identity: &PersonalBootstrap, base: u64) -> Reply {
+async fn rewrite(f: &Fixture, identity: &LegacyDeviceSession, base: u64) -> Reply {
     let path =
         format!("/sync/v1/vaults/{}/changes?after=0&limit=10", identity.receipt.personal_vault_id);
     let reply = protected(f, "GET", &path, &[], &identity.token, &identity.client).await;
@@ -669,8 +727,8 @@ async fn advanced<S: AsyncRead + AsyncWrite + Unpin>(
 #[allow(clippy::too_many_lines)]
 async fn postgres_independent_instances_commit_rollback_reconnect_and_revocation() {
     let mut f = Fixture::postgres().await;
-    let identity = bootstrap_personal(&mut f).await;
-    let (foreign, foreign_key) = another_account(&f, &identity).await;
+    let identity = legacy_device_session(&mut f).await;
+    let (foreign, foreign_key) = another_account(&f).await;
     let first_store = match &f.backend {
         AuthBackend::Postgres(store) => store.clone(),
         AuthBackend::Sqlite(_) => unreachable!(),
