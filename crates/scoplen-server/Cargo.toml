@@ -28,8 +28,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "439b956158b386a7eb6c951a22e4dd5ce43335d5" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "439b956158b386a7eb6c951a22e4dd5ce43335d5" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "a604b726881292509a8ced5ff32f718ef52f76eb" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "a604b726881292509a8ced5ff32f718ef52f76eb" }
 scoplen-identity = { path = "../scoplen-identity" }
 scoplen-store = { path = "../scoplen-store" }
 scoplen-sync = { path = "../scoplen-sync" }
@@ -44,7 +44,6 @@ rustls-acme.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 scoplen-audit = { path = "../scoplen-audit" }
-scoplen-control = { version = "0.1.0", path = "../scoplen-control" }
 
 [lints]
 workspace = true
@@ -58,7 +57,7 @@ ciborium = "0.2.2"
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 hyper = { version = "1.12.0", features = ["client", "http2"] }
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "439b956158b386a7eb6c951a22e4dd5ce43335d5" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "a604b726881292509a8ced5ff32f718ef52f76eb" }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio-tungstenite = "0.26.2"
 url = "2.5.8"

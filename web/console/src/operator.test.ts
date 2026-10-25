@@ -19,10 +19,6 @@ const token = {
   expires_in: 900,
   refresh_expires_in: 2592000,
 };
-const invitation = {
-  invitation_url: `${origin}/invite#token=${setupToken}`,
-  expires_at: expires,
-};
 const loginOptions = {
   ceremony_id: id,
   expires_at: expires,
@@ -158,12 +154,12 @@ test("actual non-extractable WebCrypto key signs public-only ES256 proofs with e
   const key = await BrowserProofKey.create();
   const first = await key.proof(
     origin,
-    "/api/v1/admin/personal-invitations",
+    "/api/v1/auth/operator/logout",
     "access",
   );
   const second = await key.proof(
     origin,
-    "/api/v1/admin/personal-invitations",
+    "/api/v1/auth/operator/logout",
     "access",
   );
   const [header, payload, signature] = first.split(".");
@@ -173,7 +169,7 @@ test("actual non-extractable WebCrypto key signs public-only ES256 proofs with e
   assert.equal(h.typ, "dpop+jwt");
   assert.equal(h.alg, "ES256");
   assert.deepEqual(Object.keys(h.jwk).sort(), ["crv", "kty", "x", "y"]);
-  assert.equal(p.htu, `${origin}/api/v1/admin/personal-invitations`);
+  assert.equal(p.htu, `${origin}/api/v1/auth/operator/logout`);
   assert.equal(p.htm, "POST");
   assert.equal(
     p.ath,
@@ -200,12 +196,15 @@ test("actual non-extractable WebCrypto key signs public-only ES256 proofs with e
   );
 });
 
-test("setup, fresh sign-in, and invitation require separate explicit operations", async () => {
+test("setup, fresh sign-in, and sign out require separate explicit operations", async () => {
   const paths: string[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     const path = new URL(url).pathname;
     paths.push(path);
-    assert.equal(init.credentials, "same-origin");
+    assert.equal(
+      init.credentials,
+      path.endsWith("/logout") ? "omit" : "same-origin",
+    );
     assert.equal(init.redirect, "error");
     assert.equal(init.cache, "no-store");
     assert.equal(init.referrerPolicy, "no-referrer");
@@ -219,12 +218,13 @@ test("setup, fresh sign-in, and invitation require separate explicit operations"
       return response({ operator_id: id }, 201);
     if (path.endsWith("login/options")) return response(loginOptions);
     if (path.endsWith("login/finish")) return response(token);
+    assert.equal(path, "/api/v1/auth/operator/logout");
     assert.equal(
       new Headers(init.headers).get("Authorization"),
       "DPoP signed-access",
     );
     assert.equal(init.body, "{}");
-    return response(invitation, 201);
+    return response({ revoked: true });
   });
   const client = new OperatorClient(origin, setupToken);
   await client.register();
@@ -232,10 +232,9 @@ test("setup, fresh sign-in, and invitation require separate explicit operations"
   assert.equal(client.canSetup, false);
   await client.signIn();
   assert.equal(paths.length, 4);
-  assert.deepEqual(await client.invite(), invitation);
+  await client.signOut();
   assert.equal(paths.length, 5);
-  client.lock();
-  await assert.rejects(client.invite(), failure("invitation", false));
+  await assert.rejects(client.signOut(), failure("logout", false));
   assert.equal(paths.length, 5);
 });
 
@@ -301,7 +300,7 @@ test("malformed options and cancelled passkeys never submit a finish", async () 
   assert.equal(calls, 2);
 });
 
-test("browser refresh is serialized and uses cookie-only carriage before invitation", async () => {
+test("browser refresh uses cookie-only carriage before initial sign out", async () => {
   let refreshes = 0;
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
     if (url.endsWith("login/options")) return response(loginOptions);
@@ -309,19 +308,21 @@ test("browser refresh is serialized and uses cookie-only carriage before invitat
       return response({ ...token, expires_in: 10 });
     if (url.endsWith("/refresh")) {
       refreshes++;
+      assert.equal(init.credentials, "same-origin");
       assert.equal(init.body, "{}");
       assert.equal(new Headers(init.headers).get("Authorization"), null);
       return response({ ...token, access_token: "rotated-access" });
     }
+    assert.ok(url.endsWith("/auth/operator/logout"));
     assert.equal(
       new Headers(init.headers).get("Authorization"),
       "DPoP rotated-access",
     );
-    return response(invitation, 201);
+    return response({ revoked: true });
   });
   const client = new OperatorClient(origin);
   await client.signIn();
-  await Promise.all([client.invite(), client.invite()]);
+  await client.signOut();
   assert.equal(refreshes, 1);
 });
 
@@ -336,58 +337,17 @@ test("uncertain refresh drops session and a reload cannot refresh an old cookie 
   });
   const client = new OperatorClient(origin);
   await client.signIn();
-  await assert.rejects(client.invite(), failure("refresh", true));
+  await assert.rejects(client.signOut(), failure("refresh", true));
   assert.equal(calls, 3);
-  await assert.rejects(client.invite(), failure("invitation", false));
+  await assert.rejects(client.signOut(), failure("logout", false));
   await assert.rejects(
-    new OperatorClient(origin).invite(),
-    failure("invitation", false),
+    new OperatorClient(origin).signOut(),
+    failure("logout", false),
   );
   assert.equal(calls, 3);
 });
 
-test("invitation unknown outcome never retries and changed denials are not unknown success", async () => {
-  let calls = 0;
-  let code = "auth.commit_outcome_unknown";
-  mock.method(globalThis, "fetch", async (url: string) => {
-    calls++;
-    if (url.endsWith("login/options")) return response(loginOptions);
-    if (url.endsWith("login/finish")) return response(token);
-    return response(
-      { status: 503, code, changed: true, retryable: false },
-      503,
-    );
-  });
-  const client = new OperatorClient(origin);
-  await client.signIn();
-  await assert.rejects(client.invite(), failure("invitation", true));
-  assert.equal(calls, 3);
-  code = "policy.denied";
-  await assert.rejects(client.invite(), failure("invitation", false));
-  assert.equal(calls, 4);
-});
-
-test("authentication denial clears access and malformed problem details stay uncertain", async () => {
-  let calls = 0;
-  mock.method(globalThis, "fetch", async (url: string) => {
-    calls++;
-    if (url.endsWith("login/options")) return response(loginOptions);
-    if (url.endsWith("login/finish")) return response(token);
-    return response(
-      {
-        status: 401,
-        code: "auth.authentication_required",
-        changed: false,
-        retryable: false,
-      },
-      401,
-    );
-  });
-  const client = new OperatorClient(origin);
-  await client.signIn();
-  await assert.rejects(client.invite(), failure("invitation", false));
-  await assert.rejects(client.invite(), failure("invitation", false));
-  assert.equal(calls, 3);
+test("malformed login problem details remain uncertain", async () => {
   mock.method(globalThis, "fetch", async (url: string) => {
     if (url.endsWith("login/options")) return response(loginOptions);
     return response([], 503);
@@ -442,7 +402,7 @@ test("sign out omits cookies, binds a fresh proof and clears only confirmed tab 
   await client.signIn();
   await client.signOut();
   assert.equal(client.logoutState, "idle");
-  await assert.rejects(client.invite(), failure("invitation", false));
+  await assert.rejects(client.signOut(), failure("logout", false));
   assert.equal(paths.length, 3);
 });
 
@@ -508,7 +468,6 @@ test("unknown, lost and malformed logout outcomes retain credentials for explici
     await client.signIn();
     await assert.rejects(client.signOut(), failure("logout", true));
     assert.equal(client.logoutState, "uncertain");
-    await assert.rejects(client.invite(), failure("invitation", false));
     await assert.rejects(client.signIn(), failure("login", false));
     assert.equal(attempts.length, 1);
     await client.signOut();
@@ -578,7 +537,7 @@ test("local Lock fences a late login response and permits a later independent si
       return late.promise;
     }
     if (url.endsWith("login/finish")) return response(token);
-    return response(invitation, 201);
+    return response({ revoked: true });
   });
   const client = new OperatorClient(origin);
   const first = client.signIn();
@@ -588,16 +547,15 @@ test("local Lock fences a late login response and permits a later independent si
   late.resolve(response(token));
   await assert.rejects(first, failure("login", false));
   await later;
-  assert.deepEqual(await client.invite(), invitation);
+  await client.signOut();
 });
 
-test("logout waits for a pending refresh and protected operation, then fences queued older actions", async () => {
+test("logout refresh completes once and confirmed sign out fences queued older actions", async () => {
   const waiting = deferred<void>();
   const refreshed = deferred<Response>();
   const paths: string[] = [];
   mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
-    const path = new URL(url).pathname;
-    paths.push(path);
+    paths.push(new URL(url).pathname);
     if (url.endsWith("login/options")) return response(loginOptions);
     if (url.endsWith("login/finish"))
       return response({ ...token, expires_in: 10 });
@@ -605,29 +563,24 @@ test("logout waits for a pending refresh and protected operation, then fences qu
       waiting.resolve();
       return refreshed.promise;
     }
-    if (url.endsWith("/logout")) {
-      assert.equal(
-        new Headers(init.headers).get("Authorization"),
-        "DPoP rotated-access",
-      );
-      return response({ revoked: true });
-    }
-    return response(invitation, 201);
+    assert.ok(url.endsWith("/logout"));
+    assert.equal(
+      new Headers(init.headers).get("Authorization"),
+      "DPoP rotated-access",
+    );
+    return response({ revoked: true });
   });
   const client = new OperatorClient(origin);
   await client.signIn();
-  const invite = client.invite();
-  await waiting.promise;
   const logout = client.signOut();
-  const queued = client.invite();
+  await waiting.promise;
+  const queued = client.signIn();
   assert.equal(paths.length, 3);
   refreshed.resolve(response({ ...token, access_token: "rotated-access" }));
-  await invite;
   await logout;
-  await assert.rejects(queued, failure("invitation", false));
+  await assert.rejects(queued, failure("login", false));
   assert.deepEqual(paths.slice(2), [
     "/api/v1/auth/refresh",
-    "/api/v1/admin/personal-invitations",
     "/api/v1/auth/operator/logout",
   ]);
 });
@@ -644,16 +597,16 @@ test("local Lock during refresh cannot invalidate a later queued independent sig
       waiting.resolve();
       return refreshed.promise;
     }
-    return response(invitation, 201);
+    return response({ revoked: true });
   });
   const client = new OperatorClient(origin);
   await client.signIn();
-  const old = client.invite();
+  const old = client.signOut();
   await waiting.promise;
   client.lock();
   const later = client.signIn();
   refreshed.resolve(response(token));
   await assert.rejects(old, failure("refresh", false));
   await later;
-  assert.deepEqual(await client.invite(), invitation);
+  await client.signOut();
 });

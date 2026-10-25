@@ -4,7 +4,7 @@ use super::*;
 
 type Authenticator = webauthn_authenticator_rs::WebauthnAuthenticator<passkey::ResidentPasskey>;
 
-#[path = "operator_personal_flow_tests.rs"]
+#[path = "legacy_device_flow_tests.rs"]
 mod personal_flow;
 
 #[path = "operator_logout_http_tests.rs"]

@@ -11,10 +11,7 @@ pub mod deployment_lease;
 mod device_auth;
 mod error;
 mod operator_auth;
-mod operator_invitation;
 mod operator_logout;
-mod pairing;
-mod personal_enrollment;
 mod personal_sync;
 mod private_material;
 mod roles;
@@ -23,6 +20,9 @@ mod runtime;
 #[path = "private_material/windows.rs"]
 mod windows_private_directory;
 
+#[cfg(test)]
+#[path = "../../scoplen-store/tests/support/legacy_identity.rs"]
+mod test_legacy_identity;
 #[cfg(all(test, feature = "postgres-integration"))]
 #[path = "../../scoplen-store/tests/support/lost_commit.rs"]
 mod test_lost_commit;

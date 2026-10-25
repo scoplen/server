@@ -5,8 +5,9 @@
 `personal_live_bootstrap` prepares an independent integration deployment from a clean server
 checkout. It uses the production `spl-server` binary, real localhost HTTPS, the maintained
 software passkey authenticator already used in server tests, and only public Operator
-setup/login/invitation APIs. It does not enroll a Personal device, seed identity tables, open
-SQL connections, manage a server process, create/drop a PostgreSQL database, or install a CA
+setup/login/logout APIs and verifies the eight retired invitation/enrollment/pairing API routes
+and the old `/pair` landing return 404. It does not enroll a Personal device, seed identity tables,
+open SQL connections, manage a server process, create/drop a PostgreSQL database, or install a CA
 in the operating system. Physical passkeys and browser interaction require separate coverage.
 
 Build both programs from this checkout; old cached example binaries are not a substitute:
@@ -28,7 +29,7 @@ deployment, passkey, account or database. TLS roots stay local to each test cons
 
 On Windows, preparation records ordinary absolute local-drive paths after canonicalizing the
 existing parent and confirming that removing Rust's verbatim drive prefix preserves the resolved
-directory. Bootstrap and restart checks use the same normalization and compare every configured
+directory. Bootstrap uses the same normalization and compares every configured
 fixture path exactly. UNC and device paths are rejected. Production Windows path and ACL
 admission still applies unchanged; preparation does not admit an existing data directory or
 repair its permissions.
@@ -148,11 +149,12 @@ The helper never carries database administrator privileges or drops data.
 
 ## Descriptor, privacy and failures
 
-On confirmed invitation success the helper publishes `descriptor.json`, at most 8192 bytes,
-with exactly `disposable: true`, `origin: "https://localhost:<port>"`, `invitation_url`, and
-`ca_certificate` (an absolute PEM path). Its invitation is one use. The independent consumer
-must enforce this boundary, use the fixture CA for this deployment only, and generate its own
-real first-device secrets. The file is private; do not print or attach its contents.
+After confirmed Operator setup, login, logout, eligible terminal logout confirmation and
+retired-route absence, the helper publishes `descriptor.json`, at most 8192 bytes, with exactly
+`disposable: true`, `origin: "https://localhost:<port>"`, `operator_lifecycle_verified: true`,
+and `ca_certificate` (an absolute PEM path). It contains no Account invitation or Device
+registration entitlement. Account registration/bootstrap and native Device restart acceptance
+require a later production implementation. Keep the descriptor private.
 
 The production file-TLS listener supports TLS 1.3 and HTTP/2. Bootstrap requires TLS 1.3
 and HTTP/2, validates `localhost` against only this fixture CA, bounds response headers and
@@ -162,12 +164,12 @@ certificate verification or rely on system trust or HTTP proxy configuration.
 `server.log` contains the one-time first-start setup link. Redirect both server streams inside
 the private directory before startup. For another private stdout filename, use
 `bootstrap <directory> --server-log <private-file>`. The helper accepts one exact-origin setup
-line; it never prints setup/invitation links, tokens, cookies, private keys or response bodies.
+line; it never prints setup links, tokens, cookies, private keys or response bodies.
 Its software passkey and proof key exist only for this process and are not exported.
 
 `bootstrap.started` is created exclusively before any API call. A failed, interrupted or
 uncertain attempt publishes no usable descriptor and cannot be replayed. Discard its deployment
-and prepare a fresh one, since setup/login/invitation may already have committed and the ephemeral
+and prepare a fresh one, since setup/login/logout may already have committed and the ephemeral
 passkey is gone. No automatic reissue, identity deletion, SQL repair or application-state rollback
 occurs. A prepare failure removes only the newly created fixture directory; a bootstrap failure
 leaves the caller's process/database untouched for private diagnosis and caller-owned cleanup.

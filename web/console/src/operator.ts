@@ -2,7 +2,6 @@
 import type {
   OperatorSetupFinishRequest,
   OperatorLoginFinishRequest,
-  PersonalInvitationResponse,
   BrowserAuthTokenResponse,
 } from "./generated/api.ts";
 import {
@@ -14,12 +13,10 @@ import {
   sessionResponse,
   creationOptions,
   requestOptions,
-  invitationResponse,
   logoutResponse,
 } from "./wire.ts";
 
-export type Operation =
-  "options" | "setup" | "login" | "refresh" | "invitation" | "logout";
+export type Operation = "options" | "setup" | "login" | "refresh" | "logout";
 export class ConsoleFailure extends Error {
   readonly operation: Operation;
   readonly code: string;
@@ -475,7 +472,7 @@ export class OperatorClient {
     this.#expiresAt = Date.now() + Math.min(session.expires_in, 86_400) * 1_000;
   }
 
-  async #accessToken(operation: Operation = "invitation"): Promise<string> {
+  async #accessToken(operation: Operation): Promise<string> {
     this.#assertCurrent(operation);
     if (!this.#token) throw new ConsoleFailure(operation, "sign_in_required");
     if (this.#expiresAt - Date.now() <= 30_000) {
@@ -505,41 +502,6 @@ export class OperatorClient {
     }
     if (!this.#token) throw new ConsoleFailure(operation, "sign_in_required");
     return this.#token;
-  }
-
-  async invite(): Promise<PersonalInvitationResponse> {
-    return this.#serialize("invitation", () => this.#invite());
-  }
-
-  async #invite(): Promise<PersonalInvitationResponse> {
-    if (this.#logoutAttempted)
-      throw new ConsoleFailure("invitation", "logout_unresolved");
-    const token = await this.#accessToken();
-    let result: unknown;
-    try {
-      result = await this.#request(
-        "invitation",
-        "/api/v1/admin/personal-invitations",
-        {},
-        201,
-        4_096,
-        token,
-      );
-    } catch (error) {
-      if (
-        error instanceof ConsoleFailure &&
-        ["auth.authentication_required", "auth.invalid_dpop_proof"].includes(
-          error.code,
-        )
-      )
-        this.lock();
-      throw error;
-    }
-    try {
-      return invitationResponse(result, this.origin);
-    } catch {
-      throw new ConsoleFailure("invitation", "invalid_response", true);
-    }
   }
 
   async signOut(): Promise<void> {

@@ -28,9 +28,10 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@b1748dd` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
-`scoplen-model`. D-123 adds the secretless interactive Credential descriptor, a breaking
-pre-Stable K-1 extension rejected by older readers. HTTP/API and K-2 artifacts are unchanged.
+`proto@a604b726` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
+`scoplen-model`. This revision includes the Account password and Device admission contracts
+and removes retired Personal invitation/enrollment and pairing formats. Consuming these
+contracts does not mount the new Account entry endpoints.
 The server stores encrypted object envelopes
 without inspecting Credential fields. D-121 interactive SSH authentication belongs to
 `scoplen-ssh`, which this workspace does not consume. Server SSH execution and host-agent
@@ -61,7 +62,7 @@ No business operation is retried or detached, and unknown refresh commit recover
 For a private diagnostic run, `RUST_LOG=info,scoplen_server::device_auth=debug` includes
 admission receipt; storage warnings are already visible at the default info level.
 
-The API role loads the React Personal console from `console.assets_dir`, defaulting to
+The API role loads the React Operator console from `console.assets_dir`, defaulting to
 `web/console/dist` relative to the working directory, with `SPL_CONSOLE_ASSETS_DIR` as an override.
 The production build records explicit paths, byte lengths and SHA-256 hashes. Startup reads only
 bounded manifest files inside the canonical directory, validates all bytes, and holds them in
@@ -71,19 +72,18 @@ fallback. A missing or invalid build disables only the console with an actionabl
 API and readiness checks continue independently. Edge-only listeners have no console routes.
 
 The entry flow uses public generated OpenAPI types for setup, fresh passkey login, browser
-refresh and Personal invitation requests. It scrubs the setup fragment before making requests,
+refresh before initial sign out and current-family logout. It scrubs the setup fragment before making requests,
 keeps its non-extractable proof key and access token in memory, and never resumes an old cookie
 after reload with a newly generated key. Web Locks serialize refresh. Unknown business outcomes
 require explicit recovery without automatic replay; locking a tab clears local session material.
 The UI uses local Inter, Lora and JetBrains Mono fonts without third-party requests.
 
-`scoplen-identity` consumes the bounded D-101 Personal enrollment request from `scoplen-api`.
-It validates the trusted canonical origin and three existing signatures, then exposes the token
-digest, bound origin and ids, and exact canonical K-4/K-2 artifacts through a read-only verified
-value. Structurally invalid input remains separate from identity or signature denial; neither
-error contains submitted material. This in-memory verification does not check invitation state,
-persist an account or device, grant a token, or mount an enrollment route. Those operations still
-require operator authentication and one durable identity transaction.
+`scoplen-identity` exposes the maintained Operator passkey verifier. Retired Personal
+invitation/enrollment and pairing modules, routes, privileges and worker cleanup are absent.
+Historical schema and data remain intact and unused by runtime. Existing Devices continue to
+use public authentication and Personal sync. Account password registration/sign-in, bootstrap
+and new Device admission remain incomplete; consuming their published contracts does not mount
+those endpoints. Tests directly seed real signed artifacts only into owned fixture databases.
 
 First-run material is created exclusively and flushed before success. On Unix, new files have
 owner read/write permissions from creation, before any secret is written. Existing files,
@@ -113,7 +113,7 @@ Personal account-key publication retains the original certificate and DPoP bindi
 the body. Its required authenticator commit hook reauthorizes inside the account transaction,
 verifies the current root signature and complete certified-unrevoked recipients, and atomically
 applies the revision, all wraps, response bounds and business audit. SQLite uses BEGIN IMMEDIATE;
-PostgreSQL shares the exclusive account lock with pairing and statement replacement, and locks
+PostgreSQL shares the exclusive account lock with statement replacement, and locks
 the identity rows against account/device changes. Exact replay reauthorizes and compares all
 signed bytes, without a new signature check or audit. New-update COMMIT uncertainty has
 `changed: true`, `retryable: false`; confirmed rollback and replay-close failures have no business
@@ -154,7 +154,7 @@ locking the vault, so concurrent joins across vaults cannot exceed the account l
 wraps cascade when a member is removed, and retired epochs stay unavailable to new writes.
 A migration error
 prevents startup. `/readyz` queries the database and returns 503 when the query fails. The API
-listener mounts Personal enrollment, device authentication, Operator setup/login/refresh and
+listener mounts existing Device authentication, Operator setup/login/refresh/logout and
 the authenticated Personal sync subset. The injected sync router selects one SQLite or PostgreSQL
 backend for its account-key, object-sync, and shared-vault operations.
 Object POST admission uses a separate short transaction before body collection. The store owns
@@ -187,17 +187,8 @@ storage boundary for local filesystem and S3-compatible stores, with validated k
 or multipart access. Database-backed roles initialize the configured object backend at startup and
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
-expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. The worker
-also runs one bounded pairing maintenance transaction per heartbeat before the sync-retention
-sweep. This shares the request-triggered SQLite/PostgreSQL cleanup: after taking the existing
-pairing serialization lock, it samples trusted time, expires at most 256 live sessions with
-payload erasure, then removes at most 256 sessions whose fixed retention has elapsed. Each
-transition and its deployment audit commit atomically. No-change passes roll back without
-creating an audit event. Missed heartbeats are skipped after a slow sweep; further eligible
-sessions wait for a later heartbeat. Shutdown cancels an active pass, with transaction and pool
-cleanup completing before normal lease release. Unexpired sessions and retained receipts remain
-unchanged; logs expose only committed counts and fixed errors.
-Retention scheduling visits every vault through strictly increasing id pages of at most 1,000
+expired leases; the `worker` role runs this cleanup from a 30-second heartbeat.
+Worker retention scheduling visits every vault through strictly increasing id pages of at most 1,000
 entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
 later appended ids, and restarts from the beginning on the next heartbeat to discover ids
 inserted behind its cursor.
@@ -214,7 +205,7 @@ retain the 180-day policy. Invalid signed state, mismatched current identities a
 the vault fail atomically and retain the job for retry. SQLite begins
 with its writer lock. PostgreSQL discovers the candidate owner, takes the shared seed-0 account-key
 lock, locks current identity and ownership rows, then locks the vault and rechecks ownership before
-reading ACKs. This serializes with exclusive account-key publication/pairing and follows the
+reading ACKs. This serializes with exclusive account-key publication and follows the
 account-before-vault order used by authenticated ACKs and object writes. The raw caller-supplied
 floor primitive and the worker entry share their backend's transaction-local purge SQL.
 Shared/organization membership-aware purging and policy filtering remain open. API/edge PostgreSQL

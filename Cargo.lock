@@ -148,6 +148,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.2.17",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -2930,50 +2931,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pakery-core"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b181aa224b059e14903b78438ab68d99562d2baeb68e9f7f92bea83a51081e92"
-dependencies = [
- "pkg-config",
- "rand_core 0.10.1",
- "rustversion",
- "subtle",
- "zeroize",
- "zeroize_derive",
-]
-
-[[package]]
-name = "pakery-cpace"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e31a4472fbeedd39c477e4b5a9959ea47f7612a7534469e35f6f3976d429f595"
-dependencies = [
- "pakery-core",
- "rand_core 0.10.1",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "pakery-crypto"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a70b3d1a9bae143cc38538d5116c821536cb9308930ea03d6b07e5e02d65868a"
-dependencies = [
- "curve25519-dalek 5.0.0",
- "digest 0.11.3",
- "hkdf 0.13.0",
- "hmac 0.13.0",
- "pakery-core",
- "pakery-cpace",
- "rand_core 0.10.1",
- "sha2 0.11.1",
- "subtle",
- "zeroize",
-]
-
-[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4014,9 +3971,10 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=439b956158b386a7eb6c951a22e4dd5ce43335d5#439b956158b386a7eb6c951a22e4dd5ce43335d5"
+source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
 dependencies = [
  "base64 0.22.1",
+ "cedar-policy",
  "prost",
  "prost-build",
  "prost-types",
@@ -4048,38 +4006,29 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-control"
 version = "0.1.0"
-dependencies = [
- "cedar-policy",
- "scoplen-api",
- "serde_json",
- "thiserror 2.0.21",
- "uuid",
-]
 
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=439b956158b386a7eb6c951a22e4dd5ce43335d5#439b956158b386a7eb6c951a22e4dd5ce43335d5"
+source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
 dependencies = [
  "argon2",
  "base64 0.22.1",
  "chacha20poly1305 0.10.1",
  "ed25519-dalek 2.2.0",
  "getrandom 0.3.4",
- "getrandom 0.4.3",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "hpke",
  "http",
  "p256",
- "pakery-cpace",
- "pakery-crypto",
- "rand_core 0.10.1",
  "scoplen-model",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.21",
+ "unicode-normalization",
  "uuid",
  "zeroize",
 ]
@@ -4103,11 +4052,9 @@ version = "0.1.0"
 dependencies = [
  "ciborium",
  "openssl",
- "scoplen-api",
  "scoplen-crypto",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 2.0.21",
  "tracing",
  "url",
@@ -4118,7 +4065,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=439b956158b386a7eb6c951a22e4dd5ce43335d5#439b956158b386a7eb6c951a22e4dd5ce43335d5"
+source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -4146,7 +4093,6 @@ dependencies = [
  "rustls-pemfile",
  "scoplen-api",
  "scoplen-audit",
- "scoplen-control",
  "scoplen-crypto",
  "scoplen-identity",
  "scoplen-model",
@@ -4945,7 +4891,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

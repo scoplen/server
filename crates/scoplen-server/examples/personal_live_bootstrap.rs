@@ -2,7 +2,6 @@
 //! Disposable, loopback-only public HTTPS bootstrap for independent integration consumers.
 
 use std::{
-    fmt::Write as _,
     fs,
     io::Read as _,
     net::{Ipv4Addr, SocketAddr, TcpListener},
@@ -20,36 +19,18 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use scoplen_api::{
-    ProblemDetails,
-    auth::{
-        AuthChallengeRequest, AuthChallengeResponse, AuthDeviceRequest, AuthRefreshRequest,
-        AuthTokenResponse, BrowserAuthTokenResponse,
-    },
+    auth::BrowserAuthTokenResponse,
     operator_auth::{
-        OperatorLoginFinishRequest, OperatorLoginOptionsResponse, OperatorSetupFinishRequest,
-        OperatorSetupFinishResponse, OperatorSetupOptionsRequest, OperatorSetupOptionsResponse,
-    },
-    personal_enrollment::{
-        PersonalEnrollmentRequest, PersonalEnrollmentResponse, PersonalInvitationResponse,
-    },
-    sync::{
-        SyncAccountDeviceWrap, SyncAccountKeyBundleUpdate, SyncAckRequest, SyncAckResponse,
-        SyncChangesResponse, SyncSessionRequest, SyncSessionResponse, SyncWrite, SyncWriteBatch,
-        SyncWriteBatchResponse,
+        OperatorLoginFinishRequest, OperatorLoginOptionsResponse, OperatorLogoutResponse,
+        OperatorSetupFinishRequest, OperatorSetupFinishResponse, OperatorSetupOptionsRequest,
+        OperatorSetupOptionsResponse,
     },
 };
-use scoplen_crypto::{
-    AccountKemKeyWrap, AccountSigningKeyWrap, DeviceArkWrap, DeviceAuthContext, DeviceCertificate,
-    DeviceKeys, DpopProof, DpopTarget, DpopToken, ObjectEnvelope, P256SigningKey,
-    PersonalEnrollmentArtifacts, PersonalEnrollmentContext, PersonalVaultKeyWrap, RecoveryBlob,
-    RecoveryKey, SymmetricKey, generate_account_keys, generate_device_keys, generate_symmetric_key,
-};
-use scoplen_model::{FieldEntry, FieldPath, Hlc, Object, ObjectType, cbor};
+use scoplen_crypto::{DpopProof, DpopTarget, DpopToken, P256SigningKey};
 use scoplen_server::{Config, TlsMode};
 use serde::{Deserialize, Serialize};
 use tokio_rustls::TlsConnector;
 use url::Url;
-use uuid::Uuid;
 use zeroize::Zeroizing;
 
 #[path = "../../scoplen-store/tests/support/passkey.rs"]
@@ -64,7 +45,7 @@ const SETUP_OPTIONS: &str = "/api/v1/auth/operator/setup/options";
 const SETUP_FINISH: &str = "/api/v1/auth/operator/setup/finish";
 const LOGIN_OPTIONS: &str = "/api/v1/auth/operator/login/options";
 const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
-const INVITATIONS: &str = "/api/v1/admin/personal-invitations";
+const LOGOUT: &str = "/api/v1/auth/operator/logout";
 
 #[derive(Parser)]
 #[command(about = "Disposable loopback HTTPS fixture; never use a real deployment or passkey")]
@@ -85,15 +66,13 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u16).range(1024..))]
         port: Option<u16>,
     },
-    /// Once only: perform public Operator setup/login and issue a Personal invitation.
+    /// Once only: verify public Operator setup/login/logout and retired entry absence.
     Bootstrap {
         directory: PathBuf,
         /// Private stdout capture from the first production server startup; defaults to server.log.
         #[arg(long)]
         server_log: Option<PathBuf>,
     },
-    /// Enroll, save a Host, and retain native credentials in RAM across a caller-owned restart.
-    CheckNativeRestart { directory: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -106,7 +85,7 @@ struct PostgresConfig {
 struct Descriptor<'a> {
     disposable: bool,
     origin: &'a str,
-    invitation_url: &'a str,
+    operator_lifecycle_verified: bool,
     ca_certificate: PathBuf,
 }
 
@@ -135,14 +114,6 @@ async fn run(command: Command) -> Result<()> {
         Command::Bootstrap { directory, server_log } => {
             bootstrap(&directory, server_log.as_deref()).await?;
             println!("fixture descriptor ready");
-        }
-        Command::CheckNativeRestart { directory } => {
-            tokio::time::timeout(Duration::from_secs(240), check_native_restart(&directory))
-                .await
-                .map_err(
-                    |_| "native restart check exceeded its deadline; abandon this fixture",
-                )??;
-            println!("native restart check passed");
         }
     }
     Ok(())
@@ -387,11 +358,11 @@ async fn bootstrap(directory: &Path, server_log: Option<&Path>) -> Result<()> {
         &directory.join("bootstrap.started"),
         "One attempt only; discard this fixture after any failure.",
     )?;
-    let invitation = public_flow(&https, token).await?;
+    public_flow(&https, token).await?;
     let descriptor = Descriptor {
         disposable: true,
         origin: &https.origin,
-        invitation_url: &invitation.invitation_url,
+        operator_lifecycle_verified: true,
         ca_certificate: directory.join("ca.pem"),
     };
     let json = Zeroizing::new(
@@ -411,7 +382,7 @@ async fn bootstrap(directory: &Path, server_log: Option<&Path>) -> Result<()> {
     result
 }
 
-async fn public_flow(https: &Https, token: [u8; 32]) -> Result<PersonalInvitationResponse> {
+async fn public_flow(https: &Https, token: [u8; 32]) -> Result<()> {
     let key =
         scoplen_crypto::generate_p256_signing_key().map_err(|_| "DPoP key generation failed")?;
     let mut authenticator = passkey::ResidentPasskey::authenticator();
@@ -472,400 +443,23 @@ async fn public_flow(https: &Https, token: [u8; 32]) -> Result<PersonalInvitatio
         std::str::from_utf8(&reply).map_err(|_| "login response is not UTF-8")?,
     )
     .map_err(|_| "login response invalid")?;
-    let reply = https.post(INVITATIONS, b"{}", &key, Some(&session.access_token), 201).await?;
-    let invitation =
-        PersonalInvitationResponse::from_json(&reply).map_err(|_| "invitation response invalid")?;
-    if !invitation.invitation_url.starts_with(&format!("{}/invite#token=", https.origin)) {
-        return Err("invitation origin does not match prepared fixture");
+    for _ in 0..2 {
+        let reply = https.post(LOGOUT, b"{}", &key, Some(&session.access_token), 200).await?;
+        OperatorLogoutResponse::from_json(&reply).map_err(|_| "logout confirmation invalid")?;
     }
-    Ok(invitation)
-}
-
-struct NativeDevice {
-    account: Uuid,
-    device: Uuid,
-    vault: Uuid,
-    keys: DeviceKeys,
-    vault_key: SymmetricKey,
-}
-
-impl NativeDevice {
-    fn enrollment(origin: &str, invitation: [u8; 32]) -> Result<(Self, PersonalEnrollmentRequest)> {
-        let account = Uuid::now_v7();
-        let device = Uuid::now_v7();
-        let vault = Uuid::now_v7();
-        let keys = generate_device_keys().map_err(|_| "device key generation failed")?;
-        let account_keys = generate_account_keys().map_err(|_| "account key generation failed")?;
-        let account_kem_public_key: [u8; 32] = account_keys
-            .kem
-            .public_key()
-            .try_into()
-            .map_err(|_| "account KEM public key invalid")?;
-        let ark = generate_symmetric_key().map_err(|_| "ARK generation failed")?;
-        let vault_key = generate_symmetric_key().map_err(|_| "vault key generation failed")?;
-        let mut bundle = SyncAccountKeyBundleUpdate {
-            revision: 1,
-            device_wraps: vec![SyncAccountDeviceWrap {
-                device_id: device,
-                wrapped_ark: DeviceArkWrap::seal(account, device, keys.kem.public_key(), &ark)
-                    .map_err(|_| "device ARK wrapping failed")?
-                    .encode()
-                    .to_vec(),
-            }],
-            account_signing_key: AccountSigningKeyWrap::seal(account, &ark, &account_keys.signing)
-                .map_err(|_| "account signing key wrapping failed")?
-                .encode()
-                .to_vec(),
-            account_kem_key: AccountKemKeyWrap::seal(account, &ark, &account_keys.kem)
-                .map_err(|_| "account KEM wrapping failed")?
-                .encode()
-                .to_vec(),
-            recovery_blob: RecoveryBlob::wrap(
-                &RecoveryKey::generate().map_err(|_| "recovery key generation failed")?,
-                account,
-                &ark,
-            )
-            .and_then(|blob| blob.encode())
-            .map_err(|_| "recovery wrapping failed")?,
-            signature: vec![0; 64],
-        };
-        bundle.signature = account_keys
-            .signing
-            .sign(&bundle.signature_input().map_err(|_| "account bundle signing input invalid")?)
-            .to_vec();
-        let certificate = DeviceCertificate::issue(
-            &account_keys.signing,
-            device,
-            account,
-            keys.signing.public_key_sec1(),
-            keys.kem.public_key().to_vec(),
-            "Disposable restart device".into(),
-            std::env::consts::OS.into(),
-            u64::try_from(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| "system clock invalid")?
-                    .as_millis(),
-            )
-            .map_err(|_| "device certificate clock exceeds its bound")?,
-        )
-        .map_err(|_| "device certificate signing failed")?;
-        let wrapped = PersonalVaultKeyWrap::seal(account, vault, 1, &ark, &vault_key)
-            .map_err(|_| "Personal vault key wrapping failed")?
-            .encode()
-            .to_vec();
-        let signature = PersonalEnrollmentContext::new(
-            origin,
-            &invitation,
-            account,
-            vault,
-            PersonalEnrollmentArtifacts {
-                account_signing_public_key: &account_keys.signing.public_key(),
-                account_kem_public_key: &account_kem_public_key,
-                key_bundle_update: &bundle
-                    .to_cbor()
-                    .map_err(|_| "account bundle encoding failed")?,
-                device_certificate: &certificate
-                    .encode()
-                    .map_err(|_| "certificate encoding failed")?,
-                wrapped_personal_vault_key: &wrapped,
-            },
-        )
-        .map_err(|_| "enrollment context invalid")?
-        .sign(&keys.signing)
-        .map_err(|_| "enrollment signing failed")?;
-        let request = PersonalEnrollmentRequest {
-            invitation_token: invitation,
-            account_id: account,
-            personal_vault_id: vault,
-            account_signing_public_key: account_keys.signing.public_key(),
-            account_kem_public_key,
-            key_bundle_update: bundle,
-            device_certificate: certificate,
-            wrapped_personal_vault_key: wrapped,
-            device_signature: signature,
-        };
-        Ok((Self { account, device, vault, keys, vault_key }, request))
+    for (method, path) in [
+        ("POST", "/api/v1/admin/personal-invitations"),
+        ("POST", "/api/v1/auth/personal-enroll"),
+        ("POST", "/api/v1/auth/pairings"),
+        ("GET", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
+        ("DELETE", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
+        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/claim"),
+        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/messages"),
+        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/complete"),
+        ("GET", "/pair"),
+    ] {
+        https.exchange(method, path, b"{}", None, 404).await?;
     }
-
-    async fn save_host(&self, https: &Https, token: &str) -> Result<(Object, Vec<u8>)> {
-        let mut object = Object::new(Uuid::now_v7(), ObjectType::HOST, 1)
-            .map_err(|_| "Host construction failed")?;
-        for (field, value) in [(1, "Restart acceptance"), (2, "restart.example.com")] {
-            object
-                .insert(
-                    FieldPath::field(field).map_err(|_| "Host field invalid")?,
-                    FieldEntry::new(
-                        cbor::Value::Text(value.into()),
-                        Hlc::at(1).map_err(|_| "Host clock invalid")?,
-                        self.device,
-                    )
-                    .map_err(|_| "Host field value invalid")?,
-                )
-                .map_err(|_| "Host field insertion failed")?;
-        }
-        let payload = ObjectEnvelope::encrypt(
-            self.vault,
-            1,
-            &object,
-            &self.vault_key,
-            self.device,
-            &self.keys.signing,
-        )
-        .and_then(|envelope| envelope.encode())
-        .map_err(|_| "Host encryption failed")?;
-        let writes = SyncWriteBatch {
-            writes: vec![SyncWrite {
-                object_id: object.id,
-                base_seq: None,
-                payload: payload.clone(),
-                tombstone: false,
-            }],
-        }
-        .to_cbor()
-        .map_err(|_| "Host write encoding failed")?;
-        let path = format!("/sync/v1/vaults/{}/objects", self.vault);
-        let reply = https
-            .exchange("POST", &path, &writes, Some((&self.keys.signing, Some(token))), 200)
-            .await?;
-        let assignments =
-            SyncWriteBatchResponse::from_cbor(&reply).map_err(|_| "Host write receipt invalid")?;
-        if assignments.assignments.len() != 1
-            || assignments.assignments[0].seq != 1
-            || assignments.assignments[0].object_id != object.id
-        {
-            return Err("Host write was not committed at the initial sequence");
-        }
-        self.read_host(https, token, &object, &payload, 1).await?;
-        Ok((object, payload))
-    }
-
-    async fn authenticate(&self, https: &Https) -> Result<(AuthTokenResponse, Zeroizing<String>)> {
-        let request = AuthChallengeRequest::new(self.device)
-            .and_then(|value| value.to_json())
-            .map_err(|_| "challenge request invalid")?;
-        let reply =
-            https.exchange("POST", "/api/v1/auth/challenge", request.as_bytes(), None, 200).await?;
-        let challenge = AuthChallengeResponse::from_json(
-            std::str::from_utf8(&reply).map_err(|_| "challenge response is not UTF-8")?,
-        )
-        .map_err(|_| "challenge response invalid")?;
-        let context = DeviceAuthContext::new(&https.origin, &challenge.nonce, self.device)
-            .map_err(|_| "device authentication context invalid")?;
-        let mut signature = String::with_capacity(128);
-        for byte in self.keys.signing.sign(&context.signature_input()) {
-            write!(signature, "{byte:02x}").map_err(|_| "device signature encoding failed")?;
-        }
-        let request = Zeroizing::new(
-            AuthDeviceRequest::new(self.device, challenge.nonce, signature)
-                .and_then(|value| value.to_json())
-                .map_err(|_| "device authentication request invalid")?,
-        );
-        let reply =
-            https.exchange("POST", "/api/v1/auth/device", request.as_bytes(), None, 200).await?;
-        Ok((native_tokens(&reply)?, request))
-    }
-
-    async fn refresh(&self, https: &Https, token: &str) -> Result<AuthTokenResponse> {
-        let request = Zeroizing::new(
-            AuthRefreshRequest::new(token)
-                .and_then(|value| value.to_json())
-                .map_err(|_| "native refresh request invalid")?,
-        );
-        let reply = https
-            .post("/api/v1/auth/refresh", request.as_bytes(), &self.keys.signing, None, 200)
-            .await?;
-        native_tokens(&reply)
-    }
-
-    async fn denied_refresh(&self, https: &Https, token: &str, changed: bool) -> Result<()> {
-        let request = Zeroizing::new(
-            AuthRefreshRequest::new(token)
-                .and_then(|value| value.to_json())
-                .map_err(|_| "native refresh request invalid")?,
-        );
-        let reply = https
-            .post("/api/v1/auth/refresh", request.as_bytes(), &self.keys.signing, None, 401)
-            .await?;
-        authentication_denied(&reply, changed)
-    }
-
-    async fn read_host(
-        &self,
-        https: &Https,
-        token: &str,
-        object: &Object,
-        payload: &[u8],
-        ack_cursor: u64,
-    ) -> Result<()> {
-        let session = SyncSessionRequest {
-            client_version: "0.1.0".into(),
-            model_version: 1,
-            device_id: self.device,
-        }
-        .to_cbor()
-        .map_err(|_| "sync session request invalid")?;
-        let proof = Some((&self.keys.signing, Some(token)));
-        let reply = https.exchange("POST", "/sync/v1/session", &session, proof, 200).await?;
-        let session =
-            SyncSessionResponse::from_cbor(&reply).map_err(|_| "sync session response invalid")?;
-        if session.vaults.len() != 1 || session.vaults[0].id != self.vault {
-            return Err("restarted session lost the enrolled Personal vault");
-        }
-        let path = format!("/sync/v1/vaults/{}/changes?after=0&limit=10", self.vault);
-        let reply = https.exchange("GET", &path, &[], proof, 200).await?;
-        let changes =
-            SyncChangesResponse::from_cbor(&reply).map_err(|_| "sync changes response invalid")?;
-        if changes.changes.len() != 1
-            || changes.next_cursor != 1
-            || changes.more
-            || changes.changes[0].payload != payload
-            || changes.changes[0].seq != 1
-            || changes.changes[0].object_id != object.id
-            || changes.changes[0].tombstone
-        {
-            return Err("restarted sync did not return the exact saved Host and sequence");
-        }
-        let downloaded = ObjectEnvelope::decode(&changes.changes[0].payload)
-            .and_then(|envelope| {
-                envelope.decrypt(
-                    self.vault,
-                    object.id,
-                    &self.vault_key,
-                    &self.keys.signing.public_key_sec1(),
-                )
-            })
-            .map_err(|_| "downloaded Host signature verification or decryption failed")?;
-        if downloaded.encode().map_err(|_| "downloaded Host encoding failed")?
-            != object.encode().map_err(|_| "saved Host encoding failed")?
-        {
-            return Err("downloaded Host differs from the saved object");
-        }
-        let ack =
-            SyncAckRequest { cursor: ack_cursor }.to_cbor().map_err(|_| "ACK encoding failed")?;
-        let path = format!("/sync/v1/vaults/{}/ack", self.vault);
-        let reply = https.exchange("POST", &path, &ack, proof, 200).await?;
-        if SyncAckResponse::from_cbor(&reply).map_err(|_| "ACK response invalid")?.cursor != 1 {
-            return Err("saved Host ACK was not retained");
-        }
-        Ok(())
-    }
-}
-
-fn native_tokens(reply: &[u8]) -> Result<AuthTokenResponse> {
-    let tokens = AuthTokenResponse::from_json(
-        std::str::from_utf8(reply).map_err(|_| "native token response is not UTF-8")?,
-    )
-    .map_err(|_| "native token response invalid")?;
-    tokens.validate().map_err(|_| "native token response invalid")?;
-    Ok(tokens)
-}
-
-fn authentication_denied(reply: &[u8], changed: bool) -> Result<()> {
-    let problem: ProblemDetails =
-        serde_json::from_slice(reply).map_err(|_| "authentication problem invalid")?;
-    if problem.code.as_str() != "auth.authentication_required"
-        || problem.changed != changed
-        || problem.retryable
-    {
-        return Err("authentication denial has unexpected recovery semantics");
-    }
-    Ok(())
-}
-
-async fn check_native_restart(directory: &Path) -> Result<()> {
-    let directory = canonical_fixture_directory(directory)?;
-    let config = fixture_config(&directory)?;
-    let origin = config.public_origin().map_err(|_| "prepared origin invalid")?;
-    let descriptor = read_bounded(&directory.join("descriptor.json"), 8_192)?;
-    let descriptor: serde_json::Value =
-        serde_json::from_str(&descriptor).map_err(|_| "descriptor invalid")?;
-    if descriptor["disposable"] != true
-        || descriptor["origin"] != origin
-        || descriptor["ca_certificate"].as_str() != directory.join("ca.pem").to_str()
-    {
-        return Err("descriptor does not match the prepared disposable fixture");
-    }
-    let invitation: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(
-            descriptor["invitation_url"]
-                .as_str()
-                .and_then(|url| url.strip_prefix(&format!("{origin}/invite#token=")))
-                .ok_or("fixture invitation origin invalid")?,
-        )
-        .map_err(|_| "fixture invitation invalid")?
-        .try_into()
-        .map_err(|_| "fixture invitation length invalid")?;
-    write_private(
-        &directory.join("native-restart.started"),
-        "One attempt only; discard this fixture after any failure.",
-    )?;
-    let https = Https::new(&directory, config.server.listen_port, origin)?;
-    let (device, request) = NativeDevice::enrollment(&https.origin, invitation)?;
-    let request = Zeroizing::new(request.to_json().map_err(|_| "enrollment encoding failed")?);
-    let reply = https.exchange("POST", "/api/v1/auth/personal-enroll", &request, None, 201).await?;
-    let receipt =
-        PersonalEnrollmentResponse::from_json(&reply).map_err(|_| "enrollment receipt invalid")?;
-    if receipt.account_id != device.account
-        || receipt.device_id != device.device
-        || receipt.personal_vault_id != device.vault
-    {
-        return Err("enrollment receipt changed the requested identity");
-    }
-    let (issued, _) = device.authenticate(&https).await?;
-    if issued.refresh_expires_in <= 240 {
-        return Err("fresh refresh lifetime cannot span the bounded restart check");
-    }
-    let (object, payload) = device.save_host(&https, &issued.access_token).await?;
-    println!("native restart check: Host saved and original refresh retained");
-    write_private(&directory.join("native-restart.ready"), "ready")?;
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            match fs::metadata(directory.join("native-restart.resume")) {
-                Ok(_) => {
-                    return read_bounded(&directory.join("native-restart.resume"), 16).and_then(
-                        |value| {
-                            if value.as_str() == "resume\n" {
-                                Ok(())
-                            } else {
-                                Err("invalid native restart resume signal")
-                            }
-                        },
-                    );
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(_) => return Err("could not inspect native restart resume signal"),
-            }
-        }
-    })
-    .await
-    .map_err(|_| "controller did not restart the server before the deadline")??;
-    // The first post-restart authentication operation must rotate this original credential.
-    println!("native restart check: original native refresh after restart");
-    let rotated = device.refresh(&https, &issued.refresh_token).await?;
-    if rotated.refresh_token == issued.refresh_token
-        || rotated.refresh_expires_in > issued.refresh_expires_in
-    {
-        return Err("native refresh did not preserve single-use absolute-expiry rotation");
-    }
-    // A lower ACK must return the persisted maximum; re-sending 1 could repair a lost ACK.
-    device.read_host(&https, &rotated.access_token, &object, &payload, 0).await?;
-    println!("native restart check: saved Host verified with refreshed access token");
-    device.denied_refresh(&https, &issued.refresh_token, true).await?;
-    // D-106 / server architecture section 2 sets a one-second first-denial cooldown.
-    // Wait before the successor's first attempt so a 429 cannot hide family-revocation behavior.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    device.denied_refresh(&https, &rotated.refresh_token, false).await?;
-    println!("native restart check: spent credential reuse revoked its family");
-    let (recovered, consumed_challenge) = device.authenticate(&https).await?;
-    let reply = https
-        .exchange("POST", "/api/v1/auth/device", consumed_challenge.as_bytes(), None, 401)
-        .await?;
-    authentication_denied(&reply, false)?;
-    device.read_host(&https, &recovered.access_token, &object, &payload, 1).await?;
-    println!("native restart check: fresh challenge recovered and consumed challenge rejected");
     Ok(())
 }
 
@@ -1003,6 +597,9 @@ impl Https {
                 "public fixture API rejected request; abandon the fixture and inspect only private server diagnostics",
             );
         }
+        if expected == 404 {
+            return Ok(Zeroizing::new(Vec::new()));
+        }
         let content_type = if expected >= 400 {
             "application/problem+json"
         } else if path.starts_with("/sync/") {
@@ -1015,13 +612,6 @@ impl Https {
                 != Some("no-store")
         {
             return Err("public fixture API response privacy headers invalid");
-        }
-        if matches!(
-            path,
-            "/api/v1/auth/device" | "/api/v1/auth/refresh" | "/api/v1/auth/personal-enroll"
-        ) && reply.headers().contains_key("set-cookie")
-        {
-            return Err("native device API unexpectedly returned a browser cookie");
         }
         let bytes = Limited::new(
             reply.into_body(),
@@ -1213,12 +803,12 @@ mod tests {
         let descriptor = Descriptor {
             disposable: true,
             origin: "https://localhost:18443",
-            invitation_url: "https://localhost:18443/invite#token=synthetic",
+            operator_lifecycle_verified: true,
             ca_certificate: PathBuf::from("/private/fixture/ca.pem"),
         };
         let value = serde_json::to_value(descriptor).unwrap();
         let mut keys: Vec<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["ca_certificate", "disposable", "invitation_url", "origin"]);
+        assert_eq!(keys, ["ca_certificate", "disposable", "operator_lifecycle_verified", "origin"]);
     }
 }

@@ -74,7 +74,7 @@ database and object store. The distroless image has no shell or curl; configurat
 is not a replacement for these readiness requests. The console at `/` and `/setup` must also
 load successfully. Missing/invalid console assets return 503 independently of `/readyz`.
 
-## First Operator and Personal invitation
+## First Operator session
 
 Read local bootstrap output with:
 
@@ -90,13 +90,16 @@ not attach them to an issue or paste them into a shared terminal.
    and Web Locks. Use its exact DNS name and port.
 2. Choose **Create passkey** and complete your authenticator's verification and save action.
 3. Choose **Sign in with passkey** and verify again. Setup itself creates no browser session.
-4. Choose **Create Personal invitation**. Copy the one-use link before closing the tab.
-5. Open Scoplen's desktop app and use that invitation to create the separate Personal account
-   and enroll its first device. The browser Operator is the deployment administrator.
+4. Use **Sign out** when finished. Confirmed server sign out revokes this browser session;
+   **Lock this tab** only discards local credentials.
+
+Account registration and new Device admission are not available through this console. Existing
+Device credentials continue to authenticate and sync.
 
 Cancellation can start a fresh ceremony. An uncertain registration result requires attempting
-fresh login with the saved Passkey; do not automatically register again. An uncertain invitation
-response cannot recover the earlier link; issuing another invitation is an explicit new action.
+fresh login with the saved Passkey; do not automatically register again. An uncertain sign-out
+response retains credentials for an explicit retry before expiry; local locking leaves server
+sign out unconfirmed.
 Reloading the console requires a fresh Passkey login.
 
 If a pending setup link is lost or expires, run the existing server-local recovery command:
@@ -116,7 +119,7 @@ docker compose --env-file deploy/.env -f deploy/compose.personal.yaml up --detac
 ```
 
 The image uses SIGINT so the existing supervisor closes its owned tasks gracefully. Restarting
-retains the original setup state, accounts, keys, invitations and objects. After replacing TLS
+retains the original setup state, accounts, keys and objects. After replacing TLS
 files, restart the container to load them. After changing source/assets, rebuild the image and
 recreate the service. `down` removes the service while retaining its named volume; `down --volumes`
 deletes the database and keys and must not be used for a deployment you intend to keep.
@@ -178,30 +181,18 @@ these observations do not establish the underlying cause.
 The check builds the production image, starts its own uniquely named Compose project, and
 checks image/data-volume permissions, non-root writes, TLS trust and hostname rejection,
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs
-one public setup, fresh resident software-passkey login and invitation issuance with the
-registered driver, rejects repeated bootstrap, then restarts the service and verifies the
-same public keyrings and completed setup state. Before that restart, the driver's
-`check-native-restart` command publicly enrolls a fresh device and saves an encrypted, signed
-Host with a confirmed write receipt, verified download and ACK. The same driver process retains
-its device proof key, vault key and still-unused native JSON refresh credential only in RAM.
-Fixed `native-restart.ready` and `native-restart.resume` files coordinate the existing controller's
-graceful stop and start; they contain no credentials. A failed or interrupted attempt cannot be
-replayed against that fixture.
+one public setup, fresh resident software-passkey login and current-session logout with the
+registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
+Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Repeated
+bootstrap is rejected. The controller then restarts the service and verifies unchanged public
+keyrings and completed setup state. Every HTTPS exchange has a whole-request deadline and
+operations are not retried automatically.
 
-After the real server process exits successfully and the restarted service reaches readiness,
-the driver's first authentication operation rotates the original refresh credential using a
-fresh DPoP proof from the same key. The new access token must retrieve the same Personal vault
-and exact Host envelope, sequence and decrypted object. Its first post-restart ACK submits
-the older cursor zero and must return the previously stored maximum one, so the check cannot
-repair a lost ACK before detecting it. A fresh proof reusing the old refresh credential must
-revoke that family. After the published one-second first-denial cooldown, the successor's
-first refresh attempt must also return an authentication denial. A new device challenge then
-recovers authentication and Host access; replaying that consumed challenge must fail. Every
-HTTPS exchange has a whole-request deadline, no operation is automatically retried, and identity
-and admission rows are never seeded or repaired by SQL.
-The controller aborts and reaps its own driver after a failed restart or readiness deadline.
-This is a server restart/authentication/synchronization acceptance case. It does not establish
-the cause of the historical native post-reopen refresh failure or native GUI/macOS acceptance.
+The check does not provision a new Account or Device, seed identity tables, or claim a native
+Device refresh/Host synchronization acceptance path. Existing Device authentication and sync
+are covered by integration tests using valid signed legacy artifacts in owned test databases.
+A new production Account registration/bootstrap path must precede restoring container Device
+restart acceptance. Physical authenticators and native GUI/macOS acceptance remain separate.
 
 The check also archives the pinned server revision
 `37af5126585254612e734f542cfd4e36670915d9` from local Git history and builds its original
@@ -223,7 +214,7 @@ rows and files; newer WAL/SHM files are excluded from the copy. CI fetches the r
 history so this fixed old revision is available. This is one Linux amd64 upgrade and offline
 recovery acceptance case, not a complete encrypted deployment backup or general restore tool.
 It does not seed identity tables. Independent
-desktop enrollment/SSH, physical authenticators, arm64 and full deployment/release gates need
+desktop Account registration/device admission/SSH, physical authenticators, arm64 and full deployment/release gates need
 their own evidence.
 
 Only resources bearing this check's unique ownership labels and matching IDs are stopped or

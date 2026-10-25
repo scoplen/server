@@ -4,6 +4,15 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Removed retired Personal invitation/enrollment and pairing production modules, routes,
+  privileges and worker maintenance. Historical migrations, tables and business data remain
+  intact. Existing Device authentication and Personal sync continue. Operator setup/login/logout
+  remain in the console, which no longer offers invitations. Rust, CI and generated console
+  contracts use published `proto@a604b726`. Retained tests seed valid signed legacy artifacts in
+  owned databases; the container check covers Operator lifecycle, retired-route absence and
+  TLS/SQLite recovery. New Account password registration/bootstrap and Device admission remain
+  incomplete.
+
 - Refresh retention-job claim and transition clocks after scheduling while retaining the fixed
   purge cutoff. A long scheduling sweep can no longer backdate a newly claimed lease before its
   job was created. Keep each sweep's availability cutoff separate from its advancing lease

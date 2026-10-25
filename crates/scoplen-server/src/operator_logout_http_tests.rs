@@ -105,22 +105,7 @@ async fn lifecycle(f: Fixture) {
     assert_eq!(f.count("SELECT COUNT(*) FROM operator_refresh_tokens").await, digests);
     f.refresh(&b.cookie(), &b_key).await.session();
     f.refresh(&a.cookie(), &a_key).await.problem(401, "auth.authentication_required", false, false);
-    let denied = http(
-        f.address,
-        "/api/v1/admin/personal-invitations",
-        b"{}",
-        &[
-            ("Content-Type", "application/json"),
-            ("Origin", ORIGIN),
-            ("Authorization", &format!("DPoP {}", token.access_token)),
-            (
-                "DPoP",
-                &protected_proof(&a_key, &token.access_token, "/api/v1/admin/personal-invitations"),
-            ),
-        ],
-    )
-    .await;
-    denied.problem(401, "auth.authentication_required", false, false);
+    assert!(!f.current(&verified).await);
     assert_eq!(
         f.count("SELECT COUNT(*) FROM operator_refresh_families WHERE revoked_at_ms IS NOT NULL")
             .await,
@@ -376,44 +361,12 @@ async fn request_guards(f: Fixture) {
 }
 
 async fn complete_api_profile(f: &mut Fixture) {
-    use scoplen_api::personal_enrollment::{
-        PersonalEnrollmentResponse, PersonalInvitationResponse,
-    };
     personal_flow::mount_complete_api(f).await;
     let browser = key(1);
     let (mut authenticator, _) = f.enroll(&browser).await;
     let token = f.login(&mut authenticator, &browser).await.session().access_token;
-    let route = "/api/v1/admin/personal-invitations";
-    let invitation = http(
-        f.address,
-        route,
-        b"{}",
-        &[
-            ("Origin", ORIGIN),
-            ("Content-Type", "application/json"),
-            ("Authorization", &format!("DPoP {token}")),
-            ("DPoP", &protected_proof(&browser, &token, route)),
-        ],
-    )
-    .await;
-    assert_eq!(invitation.status, 201, "{}", invitation.text());
-    let invitation = PersonalInvitationResponse::from_json(&invitation.body).unwrap();
-    let invitation_token = URL_SAFE_NO_PAD
-        .decode(invitation.invitation_url.split("#token=").nth(1).unwrap())
-        .unwrap()
-        .try_into()
-        .unwrap();
     let device_key = key(2);
-    let request = personal_flow::enrollment(invitation_token, &device_key);
-    let enrolled = http(
-        f.address,
-        "/api/v1/auth/personal-enroll",
-        &request.to_json().unwrap(),
-        &[("Origin", ORIGIN), ("Content-Type", "application/json")],
-    )
-    .await;
-    assert_eq!(enrolled.status, 201, "{}", enrolled.text());
-    let receipt = PersonalEnrollmentResponse::from_json(&enrolled.body).unwrap();
+    let receipt = personal_flow::seed_legacy_device(f, &device_key).await;
     let device_token = personal_flow::authenticate_device(f, receipt.device_id, &device_key).await;
     send(f, &device_token, &protected_proof(&device_key, &device_token, LOGOUT), b"{}", &[])
         .await
@@ -430,10 +383,7 @@ async fn complete_api_profile(f: &mut Fixture) {
     );
     f.reset_admission().await;
     confirmed(&send(f, &token, &protected_proof(&browser, &token, LOGOUT), b"{}", &[]).await);
-    assert_eq!(
-        f.count("SELECT COUNT(*) FROM personal_invitations WHERE consumed_at_ms IS NOT NULL").await,
-        1
-    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM identity_devices WHERE active=true").await, 1);
     let challenge =
         scoplen_api::auth::AuthChallengeRequest::new(receipt.device_id).unwrap().to_json().unwrap();
     assert_eq!(
@@ -450,7 +400,7 @@ async fn complete_api_profile(f: &mut Fixture) {
 }
 
 #[tokio::test]
-async fn sqlite_logout_public_api_rejects_device_profile_and_preserves_enrollment() {
+async fn sqlite_logout_public_api_rejects_device_profile_and_preserves_existing_device() {
     let mut f = Fixture::sqlite().await;
     complete_api_profile(&mut f).await;
     f.cleanup().await;
@@ -458,7 +408,7 @@ async fn sqlite_logout_public_api_rejects_device_profile_and_preserves_enrollmen
 
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
-async fn postgres_logout_public_api_rejects_device_profile_and_preserves_enrollment() {
+async fn postgres_logout_public_api_rejects_device_profile_and_preserves_existing_device() {
     let mut f = Fixture::postgres().await;
     complete_api_profile(&mut f).await;
     f.cleanup().await;
