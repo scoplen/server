@@ -116,6 +116,13 @@ an initialized singleton and changing its original creation metadata. Same-value
 remains available. Restart and ordinary token-key rotation preserve Kprobe.
 This key boundary is not connected to Account password routes. Intentional Kprobe replacement is not exposed.
 
+Account-entry admission and request-challenge storage is independent of Device and Operator
+authentication. Its five endpoint windows, cooldowns, bounded capacity and monotonic database
+time survive restart and are shared by replicas. Challenges retain only digests, expire after
+two minutes and can be consumed with business state and deployment audit in one transaction.
+Bounded indexed maintenance removes expired transient state without discarding live debt.
+The storage helpers do not mount Account registration or password sign-in routes.
+
 Account-key publication retains the complete accepted canonical signed K-4 PUT with its
 serving projection and audit in the same transaction. The bounded storage reader requires exact
 agreement with every current field, signature and wrap. Existing projection-only rows remain
