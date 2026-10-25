@@ -15,6 +15,12 @@ Changes are recorded here for released or reviewable repository outcomes.
   consumption and audit must commit atomically. Registration/login routes and Device admission
   remain incomplete; no capability or session is issued by these storage helpers.
 
+- Add independent bounded Account-entry rate/cooldown and digest-only request-challenge
+  storage on SQLite and PostgreSQL. Shared capacity and monotonic database time prevent
+  replica races, replay and backward-clock debt reset. Transaction-local claim/finish
+  helpers compose challenge consumption with mandatory audit and registration state.
+  These storage helpers alone do not enable Account registration or password sign-in.
+
 - Removed retired Personal invitation/enrollment and pairing production modules, routes,
   privileges and worker maintenance. Historical migrations, tables and business data remain
   intact. Existing Device authentication and Personal sync continue. Operator setup/login/logout
