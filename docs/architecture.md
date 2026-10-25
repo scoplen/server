@@ -295,3 +295,37 @@ the coordinator's complete proof/signature validation and same-transaction busin
 Exact historical confirmation consumes only its new challenge and adds no duplicate success
 audit. Expiry after waiting or before commit requires rollback of staged business state and
 a separately confirmed denial audit. Storage helpers alone expose no Account-entry route.
+
+The registration coordinator accepts only the native encoded body after the HTTP adapter's
+source/transport/concurrency admission. It uses the published structural decoder before
+claiming a challenge, commits decoded Device admission separately, then acquires the shared
+Account-entry singleton before D-129, Account and audit locks. Both proofs are verified within
+the business transaction. A savepoint rolls back aggregate/retention changes on a checked
+namespace or quota denial while retaining the proof claim for mandatory denial audit.
+Success commits aggregate, immutable receipt, challenge consumption and audit together; its
+complete response is encoded before the final expiry/audit check and immediate COMMIT.
+The caller supplies a monotonic precommit deadline. Deadline expiry explicitly rolls back
+staged work and permits up to five seconds for mandatory fixed failure audit; unavailable
+audit overrides denial as storage failure. The deadline is checked again immediately before
+COMMIT, and never wraps or cancels an already attempted business COMMIT.
+An error from that new-business COMMIT remains `auth.commit_outcome_unknown`; no readback
+changes the outcome. A failed confirmation COMMIT is storage-unavailable with no business change.
+
+`account_operation_receipts` retains at most 65,536 fixed records per Account, each 275
+application bytes and below the 512-byte bound. Global operation and Device uniqueness, fixed
+lengths, immutable contents and Account deletion lifetime are guarded in both backends.
+Confirmation constant-time compares the exact request digest and verifies the unchanged
+original Account signature and fresh Device possession against the receipt's original public
+keys. It requires explicit `confirm`, never current Device authorization or enabled registration,
+never emits a second success event and cannot fall through to creation after receipt deletion.
+
+New registration checks Device ids and both canonical 65-byte P-256 points across current
+certificates, revocations, admission rows and retained receipts, across all Accounts. Receipt
+lookups are indexed. Legacy certificate/admission state has no canonical-point index: one SQL
+stream at a time projects only 1..65,536-byte blobs, rejects bad types/sizes before transfer and
+holds no accumulated result set. Work is linear in total retained statements; application memory
+is independent of row count, apart from fixed driver prefetch. Native proof concurrency and
+deadlines are operational bounds, not evidence of a large-deployment performance gate. Legacy
+statement writers take the same singleton before Account locks, and transaction-local bootstrap
+creation requires its caller to hold it and enforce freshness. No permanent Device/key cache is
+introduced; only D-129's Account-id digest survives Account deletion.

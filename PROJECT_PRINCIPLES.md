@@ -78,6 +78,11 @@ self-hosted server, host agent, administration CLI, and web console.
   database time and shared replica capacity. Transaction-local consumption requires mandatory
   audit with its owning mutation, while receipt-only confirmation adds no duplicate success
   audit. Mounted registration, password login and their complete acceptance remain open.
+  The separate registration coordinator verifies fresh possession and owns one complete business
+  transaction, mandatory audit and immutable bounded receipts. Explicit historical confirmation
+  survives later revocation or registration closure, but supplies no current authority or negative
+  receipt. New-business commit uncertainty remains explicit; global Device freshness includes
+  legacy and retained receipt state, without an unbounded side cache.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;

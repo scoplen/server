@@ -8,6 +8,8 @@
 //! Any error requires rollback of the entire caller transaction; absence is no negative receipt.
 //! Password ownership is fixed on Account creation. Missing credential state on a password-owned
 //! Account fails closed and never reclassifies it as a legacy Account.
+//! Before creation, the protocol coordinator must hold the Account-entry singleton lock and
+//! validate deployment-wide Device/key freshness. It precedes D-129 and Account/vault locks.
 
 use scoplen_api::{
     account_admission::{

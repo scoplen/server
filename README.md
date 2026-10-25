@@ -147,6 +147,31 @@ deployment-wide Device/key freshness and admission, add the terminal receipt, co
 state and append mandatory audit. A staged snapshot can be disclosed only after confirmed
 commit. Mounted registration/login/admission and complete V3 acceptance remain incomplete.
 
+The registration storage coordinator owns strict structural decoding, decoded Device admission,
+fresh challenge and Account/Device proofs, D-129 reservation, the complete new aggregate,
+immutable receipt, challenge consumption and mandatory deployment audit in one business
+transaction. The native HTTP adapter must first admit the actual source and enforce transport
+metadata, its bounded proof permit and deadline. The coordinator preflights the complete JSON
+response and checks the caller's deadline before COMMIT. Precommit expiry rolls back business
+and makes a bounded mandatory failure-audit attempt. COMMIT itself is not canceled by this
+deadline; the encoded response is disclosed only after confirmed commit.
+An attempted new-business COMMIT without acknowledgement is an
+unknown outcome; a later read cannot turn it into a rollback. Explicit `confirm` consumes a
+fresh proof and confirms only the original receipt, even after Device revocation, current-root
+changes or registration closure. It issues no session or current authority and cannot recreate
+a deleted Account. A new `submit` never turns into historical confirmation.
+
+Receipts retain the exact request digest, original ids, canonical original Device public points,
+Account signing root, revision and trusted time: 275 application bytes each, at most 65,536
+per Account, deleted with that Account. No encrypted bundle, verifier or bearer is copied into
+them. Deployment-wide Device freshness covers retained receipts and all current certificates,
+revocations and admission rows, including legacy Accounts and cross-role SEC1 equivalence.
+Without a legacy canonical-key index, it streams bounded artifacts across retained state with
+constant application memory; work grows with total statements. The HTTP deadline and bounded
+proof concurrency remain necessary. Legacy statement replacement shares the global singleton
+before Account locks. Password login and new Device admission remain separate implementation
+work; storage coordinator completion does not establish complete V3 acceptance.
+
 Account-id retention has a separate SQLite/PostgreSQL storage boundary. Explicit initialization
 reserves existing Account ids before enabling registration and durably admits a ceiling (default
 1,048,576). Each retained row contains only the shared domain-separated digest. Database guards

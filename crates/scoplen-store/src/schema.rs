@@ -2005,6 +2005,91 @@ const ACCOUNT_PASSWORD_BOOTSTRAP: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ACCOUNT_OPERATION_RECEIPTS: TableSpec = TableSpec {
+    name: "account_operation_receipts",
+    columns: &[
+        ColumnSpec {
+            name: "operation_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "personal_vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "request_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "kind",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "device_signing_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "device_kem_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_signing_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "admitted_key_revision",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "committed_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[
+        IndexSpec { name: "account_operation_receipts_account", columns: &["account_id"] },
+        IndexSpec {
+            name: "account_operation_receipts_signing",
+            columns: &["device_signing_public_key"],
+        },
+        IndexSpec { name: "account_operation_receipts_kem", columns: &["device_kem_public_key"] },
+    ],
+};
+
 const ACCOUNT_USED_IDS: TableSpec = TableSpec {
     name: "account_used_ids",
     columns: &[ColumnSpec {
@@ -2210,6 +2295,7 @@ const ACCOUNT_REQUEST_CHALLENGES: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    ACCOUNT_OPERATION_RECEIPTS,
     ACCOUNT_PASSWORD_BOOTSTRAP,
     ACCOUNT_ENTRY_STATE,
     ACCOUNT_ENTRY_ADMISSION,
@@ -2718,6 +2804,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025060000_account_entry_state.sql");
     const POSTGRES_ACCOUNT_ENTRY_STATE: &str =
         include_str!("../migrations/postgres/20261025060000_account_entry_state.sql");
+    const SQLITE_ACCOUNT_OPERATION_RECEIPTS: &str =
+        include_str!("../migrations/sqlite/20261025070000_account_operation_receipts.sql");
+    const POSTGRES_ACCOUNT_OPERATION_RECEIPTS: &str =
+        include_str!("../migrations/postgres/20261025070000_account_operation_receipts.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2766,6 +2856,7 @@ mod tests {
             SQLITE_ACCOUNT_USED_IDS,
             SQLITE_ACCOUNT_PASSWORD_BOOTSTRAP,
             SQLITE_ACCOUNT_ENTRY_STATE,
+            SQLITE_ACCOUNT_OPERATION_RECEIPTS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2794,6 +2885,7 @@ mod tests {
             POSTGRES_ACCOUNT_USED_IDS,
             POSTGRES_ACCOUNT_PASSWORD_BOOTSTRAP,
             POSTGRES_ACCOUNT_ENTRY_STATE,
+            POSTGRES_ACCOUNT_OPERATION_RECEIPTS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

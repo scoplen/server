@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add atomic SQLite/PostgreSQL Account registration and explicit immutable-receipt confirmation.
+  Fresh proofs, complete aggregate, D-129 reservation, receipts, challenge consumption and audit
+  commit together. Historical confirmation remains available after revocation or registration
+  closure, grants no current authority and cannot recreate deleted Accounts. Device freshness
+  includes all retained Accounts and canonical cross-role public keys. Unacknowledged business
+  commits remain unknown; mounted HTTP, password login and new Device admission are separate work.
+
 - Advance the SQLite container recovery probe to the Account-id retention migration while
   preserving its pinned historical source and pre-upgrade recovery boundary.
 
