@@ -126,6 +126,8 @@ jobs:
         run: cargo test -p scoplen-store --test account_keys --features postgres-integration postgres_account_key_
       - name: Check PostgreSQL device access-token keyring
         run: cargo test -p scoplen-store --test device_token_keys --features postgres-integration postgres_ -- --test-threads=1
+      - name: Check independent Account password probe-key storage
+        run: cargo test --locked -p scoplen-store --test account_probe_key --features postgres-integration
       - name: Check Personal invitation enrollment and rollback
         run: cargo test -p scoplen-store --test personal_enrollment --features postgres-integration postgres_ -- --test-threads=1
       - name: Check pairing relay and atomic second-device enrollment

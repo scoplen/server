@@ -68,6 +68,10 @@ self-hosted server, host agent, administration CLI, and web console.
   retry cannot authorize other operations. Uncertain logout outcomes preserve the original
   browser credentials for explicit retry before expiry; local Lock makes no server-revocation
   claim. Same-tab session actions are serialized and late responses are fenced after Lock.
+  The Account password probe-key storage boundary separately persists one random Kprobe under
+  KMS protection. Database-serialized initialization and same-value rewrapping are audit-atomic;
+  unknown commits return no key, and damaged/missing state never triggers silent replacement.
+  This storage boundary does not yet provide Account password HTTP or credential/bootstrap state.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;

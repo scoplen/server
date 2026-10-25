@@ -1894,7 +1894,34 @@ const SYNC_WRITE_ADMISSION_CLOCK: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ACCOUNT_PASSWORD_PROBE_KEY: TableSpec = TableSpec {
+    name: "account_password_probe_key",
+    columns: &[
+        ColumnSpec {
+            name: "singleton",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "encrypted_key",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
+    indexes: &[],
+};
+
 const TABLES: &[TableSpec] = &[
+    ACCOUNT_PASSWORD_PROBE_KEY,
     SYNC_WRITE_ADMISSION,
     SYNC_WRITE_ADMISSION_CLOCK,
     PAIRING_SESSIONS,
@@ -2372,6 +2399,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025000000_sync_write_admission.sql");
     const POSTGRES_SYNC_WRITE_ADMISSION: &str =
         include_str!("../migrations/postgres/20261025000000_sync_write_admission.sql");
+    const SQLITE_ACCOUNT_PASSWORD_PROBE_KEY: &str =
+        include_str!("../migrations/sqlite/20261025020000_account_password_probe_key.sql");
+    const POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY: &str =
+        include_str!("../migrations/postgres/20261025020000_account_password_probe_key.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2415,6 +2446,7 @@ mod tests {
             SQLITE_PAIRING_ADMISSION,
             SQLITE_PAIRING_SESSIONS,
             SQLITE_SYNC_WRITE_ADMISSION,
+            SQLITE_ACCOUNT_PASSWORD_PROBE_KEY,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2438,6 +2470,7 @@ mod tests {
             POSTGRES_PAIRING_ADMISSION,
             POSTGRES_PAIRING_SESSIONS,
             POSTGRES_SYNC_WRITE_ADMISSION,
+            POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -2487,7 +2520,7 @@ mod tests {
             .fetch_one(postgres.pool())
             .await
             .expect("read PostgreSQL migration history");
-        assert_eq!(migration_count, 22);
+        assert_eq!(migration_count, 24);
         postgres.pool().close().await;
         let reopened = crate::PostgresStore::connect(database_url)
             .await
@@ -2496,7 +2529,7 @@ mod tests {
             .fetch_one(reopened.pool())
             .await
             .expect("read replayed migration history");
-        assert_eq!(replay_count, 22);
+        assert_eq!(replay_count, 24);
 
         let invalid_organization =
             sqlx::query("INSERT INTO organizations (id, name, created_at_ms) VALUES ($1, $2, $3)")

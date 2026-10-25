@@ -12,6 +12,12 @@ Changes are recorded here for released or reviewable repository outcomes.
   Forward migrations preserve existing authentication admission debt and add independent logout
   quotas. The HTTP adapter and console adoption are separate outcomes.
 
+- Added the SQLite/PostgreSQL storage boundary for an independent Account password probe key.
+  Database-serialized initialization and same-value KMS rewrapping commit with deployment audit;
+  wrong keys, damaged ciphertext and missing singleton state fail without silent replacement.
+  Initialized singleton guards reject reset, removal and replacement through ordinary SQL writes.
+  Unconfirmed commits return no key. Account password routes and credentials remain separate work.
+
 - Updated protocol dependencies and generated console types to `proto@439b956`, including
   the current Operator-family logout wire and explicit authenticated operation requirements.
   Existing protected invitation handling requires the business-scope variant explicitly;

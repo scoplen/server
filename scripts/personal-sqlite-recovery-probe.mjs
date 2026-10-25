@@ -51,7 +51,7 @@ assert(
 assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
 
 const oldMigration = 20261024030000;
-const newMigration = 20261025010000;
+const newMigration = 20261025020000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
