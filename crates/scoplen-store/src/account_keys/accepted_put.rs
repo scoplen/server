@@ -43,7 +43,7 @@ macro_rules! accepted_put_reader {
         }
 
         #[allow(clippy::too_many_lines)]
-        async fn $read(
+        pub(crate) async fn $read(
             tx: &mut Transaction<'_, $db>,
             account_id: AccountId,
         ) -> Result<Option<Vec<u8>>, AccountKeyStoreError> {

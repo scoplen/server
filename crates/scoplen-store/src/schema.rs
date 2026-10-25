@@ -812,6 +812,12 @@ const IDENTITY_ACCOUNTS: TableSpec = TableSpec {
         },
         ColumnSpec { name: "email", kind: LogicalType::Text, nullable: true, primary_key: false },
         ColumnSpec {
+            name: "password_owned",
+            kind: LogicalType::Boolean,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
             name: "account_signing_public_key",
             kind: LogicalType::Bytes,
             nullable: false,
@@ -1926,6 +1932,79 @@ const ACCOUNT_PASSWORD_PROBE_KEY: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ACCOUNT_PASSWORD_BOOTSTRAP: TableSpec = TableSpec {
+    name: "account_password_bootstrap",
+    columns: &[
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "origin", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "username",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential_generation",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "password_profile",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "password_salt",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "verifier",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "password_ark",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "personal_vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_signing_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_kem_public_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[],
+};
+
 const ACCOUNT_USED_IDS: TableSpec = TableSpec {
     name: "account_used_ids",
     columns: &[ColumnSpec {
@@ -1965,6 +2044,7 @@ const ACCOUNT_ID_RETENTION_GUARD: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    ACCOUNT_PASSWORD_BOOTSTRAP,
     ACCOUNT_USED_IDS,
     ACCOUNT_ID_RETENTION_GUARD,
     ACCOUNT_PASSWORD_PROBE_KEY,
@@ -2046,6 +2126,7 @@ fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType,
     let declared = declared.trim().to_ascii_uppercase();
     match (table, column, declared.as_str()) {
         ("identity_devices", "active", "INTEGER")
+        | ("identity_accounts", "password_owned", "INTEGER")
         | ("sync_objects" | "sync_object_versions", "tombstone", "INTEGER")
         | ("sync_vaults", "rotation_pending", "INTEGER")
         | ("account_id_retention_guard", "maintenance", "INTEGER") => Ok(LogicalType::Boolean),
@@ -2060,6 +2141,7 @@ fn sqlite_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType,
 fn postgres_kind(table: &str, column: &str, declared: &str) -> Result<LogicalType, String> {
     match (table, column, declared) {
         ("identity_devices", "active", "boolean")
+        | ("identity_accounts", "password_owned", "boolean")
         | ("sync_objects" | "sync_object_versions", "tombstone", "boolean")
         | ("sync_vaults", "rotation_pending", "boolean")
         | ("account_id_retention_guard", "maintenance", "boolean") => Ok(LogicalType::Boolean),
@@ -2459,6 +2541,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025040000_account_used_ids.sql");
     const POSTGRES_ACCOUNT_USED_IDS: &str =
         include_str!("../migrations/postgres/20261025040000_account_used_ids.sql");
+    const SQLITE_ACCOUNT_PASSWORD_BOOTSTRAP: &str =
+        include_str!("../migrations/sqlite/20261025050000_account_password_bootstrap.sql");
+    const POSTGRES_ACCOUNT_PASSWORD_BOOTSTRAP: &str =
+        include_str!("../migrations/postgres/20261025050000_account_password_bootstrap.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2505,6 +2591,7 @@ mod tests {
             SQLITE_ACCOUNT_PASSWORD_PROBE_KEY,
             SQLITE_ACCEPTED_ACCOUNT_KEY_PUT,
             SQLITE_ACCOUNT_USED_IDS,
+            SQLITE_ACCOUNT_PASSWORD_BOOTSTRAP,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2531,6 +2618,7 @@ mod tests {
             POSTGRES_ACCOUNT_PASSWORD_PROBE_KEY,
             POSTGRES_ACCEPTED_ACCOUNT_KEY_PUT,
             POSTGRES_ACCOUNT_USED_IDS,
+            POSTGRES_ACCOUNT_PASSWORD_BOOTSTRAP,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
