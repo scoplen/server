@@ -1624,22 +1624,26 @@ mod tests {
     }
 
     async fn wait_for_deployment_lease_release(data_dir: &Path) -> DeploymentLease {
-        let probe = deployment_lease_probe(data_dir);
-        // Repeating full admission runs synchronous Windows ACL helpers on this test's
-        // single-thread executor, delaying the very cleanup whose lease release we await.
+        // Full admission can run synchronous Windows ACL helpers. Keep it off this
+        // test's single-thread executor and return the admitted lease without reopening.
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                match probe.try_lock() {
-                    Ok(()) => break,
-                    Err(fs::TryLockError::WouldBlock) => sleep(Duration::from_millis(20)).await,
-                    Err(error) => panic!("unexpected lease probe error: {error}"),
+                let data_dir = data_dir.to_path_buf();
+                let admission =
+                    tokio::task::spawn_blocking(move || DeploymentLease::try_exclusive(&data_dir))
+                        .await
+                        .expect("deployment lease admission worker");
+                match admission {
+                    Ok(lease) => break lease,
+                    Err(ServerError::DeploymentLeaseOccupied) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("offline admission after startup cleanup: {error}"),
                 }
             }
         })
         .await
-        .expect("detached startup drains and releases lease");
-        drop(probe);
-        DeploymentLease::try_exclusive(data_dir).expect("offline admission after startup cleanup")
+        .expect("detached startup drains and releases lease")
     }
 
     fn run_isolated_shutdown_test(test_name: &str, child_directory_variable: &str) {
