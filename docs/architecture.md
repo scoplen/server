@@ -235,8 +235,9 @@ registration, its receipt and audit. It uses the published shared digest, adds n
 Device, vault or operation-id collection, and never commits independently. Ordinary Account
 deletion cannot cascade into the retained set. Maintenance quiesces new registration writers;
 audited ceiling increases preserve every digest. These storage methods grant no operator
-authorization and expose no new HTTP route. Mounted registration, configuration/admission wiring,
-operator warning delivery and complete backup/restore acceptance remain separate roadmap work.
+authorization and expose no new HTTP route. API preparation and the registration adapter compose
+them under the configured ceiling with aggregate capacity warnings. Complete backup/restore
+acceptance remains separate roadmap work.
 
 Initial password Account persistence is a transaction-local storage prerequisite. The caller
 passes a validated public registration payload and trusted origin/time to the backend helper.
@@ -279,7 +280,7 @@ Device/key freshness, preflight the complete protocol response, add its immutabl
 consume the relevant protocol state and append mandatory audit in the same transaction.
 Every error requires whole-transaction rollback. Never disclose staged snapshot bytes before
 confirmed commit; later absence supplies no negative receipt after an uncertain outcome.
-Registration/password entry, capabilities, Device admission and full V3 acceptance remain incomplete.
+Device admission and full V3 acceptance remain incomplete.
 
 Account-entry admission uses independent fixed-window state for the five native endpoints.
 A singleton writer lock serializes new bucket/challenge capacity and advances a durable
@@ -308,7 +309,7 @@ fixed no-store/no-cache profile, without cookies or CORS. Unsupported methods re
 bounded problem format. The worker calls indexed admission/challenge retirement with shutdown
 cancellation; storage serializes cleanup frequency and time across replicas. Challenge issuance
 alone creates no Account, Device, password credential, session or sync authority. The remaining
-registration/login/admission routes still require their atomic protocol coordinators.
+Device-admission route still requires its mounted protocol adapter.
 
 The registration coordinator accepts only the native encoded body after the HTTP adapter's
 source/transport/concurrency admission. It uses the published structural decoder before
@@ -370,6 +371,29 @@ Late attempt expiry rolls back staged capability, success audit and streak clear
 consuming the matching attempt with mandatory denial audit, preserving the observed high-water
 mark and admitted debt. A retained expired binding still admits its username for common denial.
 An unconfirmed capability-only commit returns no token or bootstrap and supplies no terminal
-receipt. HTTP must bound concurrent proof/bootstrap operations before entering storage.
+receipt. Native password HTTP enforces strict metadata and actual-peer source admission before
+body collection. Login shares the registration semaphore and holds its nonwaiting permit through
+bootstrap/COMMIT; options has no proof/bootstrap job. Both collect fixed-capacity zeroizing input
+and pass a 15-second precommit deadline to storage without cancelling an attempted COMMIT.
+Only confirmed transactions disclose bounded JSON. Missing/corrupt probe state fails closed
+without initialization; current-state conflicts preserve their specific nonretryable response.
 The current Account model represents extant password-owned Accounts; full inactive-state
 enforcement across password, Device authentication, synchronization and admission remains open.
+
+Native registration HTTP collects at most the published encoded-body limit into one fixed-capacity
+zeroizing buffer; actual chunk lengths remain authoritative and trailers are rejected. Source
+admission precedes metadata and body handling. A nonwaiting semaphore admits at most 16 proof
+jobs; an excess request receives the common audited rate response without consuming its challenge.
+Body/precommit preparation has a 15-second monotonic budget. The coordinator retains responsibility
+for explicit rollback and immediate COMMIT, which the HTTP adapter never timeout-cancels.
+Confirmed creation and checked quota denial permit a bounded aggregate retention-pressure read. An unknown business
+commit returns its fixed conservative problem without supplemental reads or success disclosure.
+Audit/storage failure overrides a reportable pre-body denial.
+
+The `[accounts]` policy is independent of Operator, Device and tenant authority. API preparation
+initializes the retained Kprobe and audited used-id ceiling before serving. Worker/edge-only
+preparation leaves Account-entry initialization untouched. Restart must match the durable ceiling;
+an incorrect KMS key or corrupt probe prevents API preparation without silent replacement.
+Closing registration affects only new submits, while exact confirmation and existing authentication
+retain their independent authority. Ninety-percent and exhausted capacity emit only aggregate
+warnings; exhaustion does not disable existing access or exact confirmation.

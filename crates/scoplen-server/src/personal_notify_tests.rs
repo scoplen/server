@@ -92,6 +92,7 @@ impl Listener {
             scoplen_sync::http::WriteBodyLimits::default(),
             scoplen_sync::http::ReadBodyLimits::default(),
             hub.clone(),
+            crate::AccountSettings::default(),
         );
         let plain = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");
         f.address = plain.local_addr().expect("HTTP address");

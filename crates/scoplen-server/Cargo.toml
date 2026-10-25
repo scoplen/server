@@ -44,6 +44,7 @@ rustls-acme.workspace = true
 tokio-stream.workspace = true
 uuid.workspace = true
 scoplen-audit = { path = "../scoplen-audit" }
+zeroize.workspace = true
 
 [lints]
 workspace = true
@@ -63,4 +64,3 @@ tokio-tungstenite = "0.26.2"
 url = "2.5.8"
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
 webauthn-rs-core = "=0.5.5"
-zeroize.workspace = true

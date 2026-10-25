@@ -35,8 +35,8 @@ mod test_passkey;
 mod test_support;
 
 pub use config::{
-    Config, ConfigError, ConsoleSettings, KmsSettings, ObjectStorageSettings, SecretValue,
-    StorageSettings, TlsMode,
+    AccountSettings, Config, ConfigError, ConsoleSettings, KmsSettings, ObjectStorageSettings,
+    SecretValue, StorageSettings, TlsMode,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};

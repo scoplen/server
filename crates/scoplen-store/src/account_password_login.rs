@@ -4,8 +4,8 @@
 use std::{net::IpAddr, time::Duration};
 
 use scoplen_api::account_admission::{
-    AccountPasswordLoginRequest, AccountPasswordLoginResponse, AccountPasswordOptionsRequest,
-    AccountPasswordOptionsResponse,
+    AccountAdmissionCodecError, AccountPasswordLoginRequest, AccountPasswordLoginResponse,
+    AccountPasswordOptionsRequest, AccountPasswordOptionsResponse,
 };
 use scoplen_crypto::{
     AccountProbeKey as ProbeDerivation, PasswordVerifier, SecretVec, account_bootstrap_digest,
@@ -47,6 +47,8 @@ const FAILURE_AUDIT_BUDGET: Duration = Duration::from_secs(5);
 pub enum AccountPasswordLoginError {
     #[error("invalid Account password request")]
     InvalidRequest,
+    #[error("Account password request exceeds its bound")]
+    RequestTooLarge,
     #[error("Account authentication is required")]
     AuthenticationRequired,
     #[error("Account admission state conflicts")]
@@ -60,6 +62,15 @@ pub enum AccountPasswordLoginError {
 impl From<sqlx::Error> for AccountPasswordLoginError {
     fn from(_: sqlx::Error) -> Self {
         Self::StorageUnavailable
+    }
+}
+
+impl From<AccountAdmissionCodecError> for AccountPasswordLoginError {
+    fn from(error: AccountAdmissionCodecError) -> Self {
+        match error {
+            AccountAdmissionCodecError::TooLarge => Self::RequestTooLarge,
+            _ => Self::InvalidRequest,
+        }
     }
 }
 
@@ -194,9 +205,12 @@ macro_rules! password_store {
                 let probe=if decoded.is_ok(){Some(self.password_retained_probe(kms,deadline,endpoint,source).await?)}else{None};
                 password_transaction!(self,$begin,deadline,endpoint,source,tx,{
                     let _=$now(&mut tx).await?;
-                    let Ok(request)=decoded else {
-                        $audit(&mut tx,endpoint,source,AccountEntryFailureReason::InvalidRequest,&[]).await?;
-                        return Ok(Err(AccountPasswordLoginError::InvalidRequest));
+                    let request=match decoded {
+                        Ok(request)=>request,
+                        Err(error)=>{
+                            $audit(&mut tx,endpoint,source,AccountEntryFailureReason::InvalidRequest,&[]).await?;
+                            return Ok(Err(AccountPasswordLoginError::from(error)));
+                        }
                     };
                     let probe=probe.ok_or(AccountPasswordLoginError::StorageUnavailable)?;
                     let username=AccountUsernameBucket::new(&probe,origin,&request.username)?;
@@ -257,9 +271,12 @@ macro_rules! password_store {
                 let probe=if decoded.is_ok(){Some(self.password_retained_probe(kms,deadline,endpoint,source).await?)}else{None};
                 password_transaction!(self,$begin,deadline,endpoint,source,tx,{
                     let now=$now(&mut tx).await?;
-                    let Ok(request)=decoded else {
-                        $audit(&mut tx,endpoint,source,AccountEntryFailureReason::InvalidRequest,&[]).await?;
-                        return Ok(Err(AccountPasswordLoginError::InvalidRequest));
+                    let request=match decoded {
+                        Ok(request)=>request,
+                        Err(error)=>{
+                            $audit(&mut tx,endpoint,source,AccountEntryFailureReason::InvalidRequest,&[]).await?;
+                            return Ok(Err(AccountPasswordLoginError::from(error)));
+                        }
                     };
                     let digest=attempt_digest(request.attempt_id.as_bytes());
                     let length=$length;

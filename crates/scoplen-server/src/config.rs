@@ -29,6 +29,8 @@ pub struct Config {
     pub storage: StorageSettings,
     /// Sync cardinality and per-device write-rate limits.
     pub sync: SyncSettings,
+    /// Native Account registration and deployment-lifetime identity retention.
+    pub accounts: AccountSettings,
     /// API-role browser console assets.
     pub console: ConsoleSettings,
 }
@@ -146,6 +148,7 @@ impl Config {
             self.storage.kms.audit_key_file = Some(PathBuf::from(value));
         }
         self.sync.apply_environment()?;
+        self.accounts.apply_environment()?;
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -214,6 +217,7 @@ impl Config {
         self.sync.write_rate_limits()?;
         self.sync.write_body_limits()?;
         self.sync.read_body_limits()?;
+        self.accounts.validate()?;
         Ok(())
     }
 
@@ -293,6 +297,54 @@ fn invalid_public_host() -> ConfigError {
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+/// Native Account entry policy, independent of Operator and Organization authority.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct AccountSettings {
+    /// Permit new registration submits; exact historical confirmation remains available.
+    pub registration_enabled: bool,
+    /// Deployment-lifetime Account-id digest capacity, equal on every API replica.
+    pub used_account_id_limit: u64,
+}
+
+impl Default for AccountSettings {
+    fn default() -> Self {
+        Self {
+            registration_enabled: true,
+            used_account_id_limit: scoplen_store::account_used_ids::DEFAULT_ACCOUNT_ID_CEILING,
+        }
+    }
+}
+
+impl AccountSettings {
+    fn apply_environment(&mut self) -> Result<(), ConfigError> {
+        if let Some(value) = env_value("SPL_ACCOUNTS_REGISTRATION_ENABLED") {
+            self.registration_enabled = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_ACCOUNTS_REGISTRATION_ENABLED must be true or false".into(),
+                )
+            })?;
+        }
+        if let Some(value) = env_value("SPL_ACCOUNTS_USED_ACCOUNT_ID_LIMIT") {
+            self.used_account_id_limit = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_ACCOUNTS_USED_ACCOUNT_ID_LIMIT must be a positive integer".into(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn validate(self) -> Result<(), ConfigError> {
+        if self.used_account_id_limit == 0 || self.used_account_id_limit.checked_mul(32).is_none() {
+            return Err(ConfigError::Invalid(
+                "accounts.used_account_id_limit must be positive and its retained byte size must fit uint64".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Public listener and local data settings.
@@ -803,6 +855,29 @@ mod tests {
         assert_eq!(config.listen_address(), "127.0.0.1:8443");
         assert_eq!(config.public_origin().expect("public origin"), "https://localhost");
         assert_eq!(config.console.assets_dir, PathBuf::from("web/console/dist"));
+        assert!(config.accounts.registration_enabled);
+        assert_eq!(config.accounts.used_account_id_limit, 1_048_576);
+    }
+
+    #[test]
+    fn account_settings_preserve_closed_registration_and_validate_retention_capacity() {
+        let mut config: Config = toml::from_str(
+            "[accounts]\nregistration_enabled = false\nused_account_id_limit = 25\n",
+        )
+        .expect("Account settings");
+        config.validate().expect("closed registration with an admitted capacity");
+        assert!(!config.accounts.registration_enabled);
+        assert_eq!(config.accounts.used_account_id_limit, 25);
+        for invalid in [0, u64::MAX, u64::MAX / 32 + 1] {
+            config.accounts.used_account_id_limit = invalid;
+            assert!(
+                config
+                    .validate()
+                    .expect_err("invalid retention capacity")
+                    .to_string()
+                    .contains("accounts.used_account_id_limit")
+            );
+        }
     }
 
     #[test]
