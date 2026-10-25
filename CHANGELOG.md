@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Updated protocol dependencies and generated console types to `proto@439b956`, including
+  the current Operator-family logout wire and explicit authenticated operation requirements.
+  Existing protected invitation handling requires the business-scope variant explicitly;
+  an intrinsic requirement cannot grant invitation authority. Mounting logout is separate.
+
 - Added atomic worker retirement of expired device and Operator refresh credentials on SQLite
   and PostgreSQL. Each heartbeat examines at most 16 expired families per kind, removes at most
   256 digests and deletes only empty families. Unexpired and revoked-unexpired reuse evidence
