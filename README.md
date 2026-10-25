@@ -115,6 +115,15 @@ and seven-day overlap. Public `GET /.well-known/operator-jwks.json` exposes only
 the device JWKS remains separate. Both routes return a non-cacheable 503 if key storage,
 integrity, KMS validation, or a required audit write fails. Remaining console administration and
 control-plane authorization remain roadmap work.
+
+The Account password probe-key storage boundary provides independent random Kprobe initialization
+and same-value KMS rewrapping on SQLite and PostgreSQL. It stores only a purpose-bound encrypted
+key, serializes independent instances and commits every initialization/rewrap with deployment
+audit before returning. Missing singleton state, invalid ciphertext or an incorrect KMS key fails
+without generating a replacement. Restart and ordinary token-key rotation preserve Kprobe.
+This boundary is not yet connected to Account password routes; credentials, bootstrap snapshots
+and independent password sign-in remain incomplete. Intentional Kprobe replacement is not exposed.
+
 The worker retires expired device and Operator refresh credentials in one atomic transaction
 per 30-second heartbeat, independently of later authentication requests. For each kind it
 locks at most 16 expired families, removes at most 256 digests and removes only empty expired

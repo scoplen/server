@@ -6,6 +6,7 @@
 pub mod account_devices;
 pub mod account_key_publication;
 pub mod account_keys;
+pub mod account_probe_key;
 pub mod account_profile;
 pub mod audit;
 pub mod deployment_audit;

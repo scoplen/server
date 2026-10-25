@@ -59,6 +59,10 @@ self-hosted server, host agent, administration CLI, and web console.
   commits. Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
   independent database quotas, and transaction-local session authorization; one-time URLs are
   disclosed only after an audited confirmed commit.
+  The Account password probe-key storage boundary separately persists one random Kprobe under
+  KMS protection. Database-serialized initialization and same-value rewrapping are audit-atomic;
+  unknown commits return no key, and damaged/missing state never triggers silent replacement.
+  This storage boundary does not yet provide Account password HTTP or credential/bootstrap state.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;

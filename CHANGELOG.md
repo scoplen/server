@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added the SQLite/PostgreSQL storage boundary for an independent Account password probe key.
+  Database-serialized initialization and same-value KMS rewrapping commit with deployment audit;
+  wrong keys, damaged ciphertext and missing singleton state fail without silent replacement.
+  Unconfirmed commits return no key. Account password routes and credentials remain separate work.
+
 - Updated protocol dependencies and generated console types to `proto@439b956`, including
   the current Operator-family logout wire and explicit authenticated operation requirements.
   Existing protected invitation handling requires the business-scope variant explicitly;
