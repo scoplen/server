@@ -4014,7 +4014,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e2b881771e23923b602ceace1f15870cd7ec2144#e2b881771e23923b602ceace1f15870cd7ec2144"
+source = "git+https://github.com/scoplen/proto.git?rev=b1748dd92478cf1451ce468ff1f1c2ead7c0b32c#b1748dd92478cf1451ce468ff1f1c2ead7c0b32c"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -4059,7 +4059,7 @@ dependencies = [
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e2b881771e23923b602ceace1f15870cd7ec2144#e2b881771e23923b602ceace1f15870cd7ec2144"
+source = "git+https://github.com/scoplen/proto.git?rev=b1748dd92478cf1451ce468ff1f1c2ead7c0b32c#b1748dd92478cf1451ce468ff1f1c2ead7c0b32c"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4118,7 +4118,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=e2b881771e23923b602ceace1f15870cd7ec2144#e2b881771e23923b602ceace1f15870cd7ec2144"
+source = "git+https://github.com/scoplen/proto.git?rev=b1748dd92478cf1451ce468ff1f1c2ead7c0b32c#b1748dd92478cf1451ce468ff1f1c2ead7c0b32c"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

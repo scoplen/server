@@ -199,3 +199,7 @@ jobs:
         env:
           SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_personal_sync_ci
         run: cargo test --locked -p scoplen-server --lib --features postgres-integration personal_sync::tests::limits::postgres_listener_configurable_sync_limits_verify_real_device_signatures -- --exact
+      - name: Check PostgreSQL interactive credential envelope preservation
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_personal_sync_ci
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration personal_sync::tests::interactive_credential::postgres_listener_preserves_interactive_credential_envelope -- --exact
