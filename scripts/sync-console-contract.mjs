@@ -2,7 +2,7 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-export const revision = "b1748dd92478cf1451ce468ff1f1c2ead7c0b32c";
+export const revision = "439b956158b386a7eb6c951a22e4dd5ce43335d5";
 const source = `https://raw.githubusercontent.com/scoplen/proto/${revision}/crates/scoplen-api/openapi/types.ts`;
 const destination = new URL("../web/console/src/generated/api.ts", import.meta.url);
 const result = await fetch(source, { redirect: "error" });
