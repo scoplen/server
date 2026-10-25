@@ -28,6 +28,10 @@ mod pre_migration;
 mod schema;
 pub mod sync;
 pub mod sync_notifications;
+pub mod sync_write_admission;
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 
 pub use audit::{
     AuditChainHead, AuditCheckpoint, AuditEvent, AuditStoreError,

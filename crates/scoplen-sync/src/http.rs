@@ -8,11 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
-    time::Instant,
-};
+use std::sync::Arc;
 
 use crate::notify::NotificationHub;
 #[path = "notification.rs"]
@@ -46,54 +42,10 @@ pub const MAX_SESSION_REQUEST_BYTES: usize = 4 * 1024;
 const MAX_ACK_REQUEST_BYTES: usize = 1 + 7 + 9;
 // "after=" + 20-digit u64 + "&" + "limit=" + four-digit 1000, in either order.
 const MAX_SYNC_PAGE_QUERY_BYTES: usize = 6 + 20 + 1 + 6 + 4;
-/// Default authenticated object-write refill rate advertised by the session handshake.
-pub const WRITE_REQUESTS_PER_SECOND: u64 = 50;
-/// Default authenticated object-write burst advertised by the session handshake.
-pub const WRITE_BURST: u64 = 200;
-
-const TOKEN_SCALE: u128 = 1_000_000_000;
-
-/// Positive per-device object-write token bucket settings for one router.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct WriteRateLimits {
-    requests_per_second: u64,
-    burst: u64,
-}
-
-impl WriteRateLimits {
-    /// Validate and construct the effective write rate advertised to clients.
-    ///
-    /// # Errors
-    ///
-    /// Returns the invalid setting when either value is zero.
-    pub fn new(requests_per_second: u64, burst: u64) -> Result<Self, String> {
-        if requests_per_second == 0 {
-            return Err("sync.write_requests_per_second must be positive".into());
-        }
-        if burst == 0 {
-            return Err("sync.write_burst must be positive".into());
-        }
-        Ok(Self { requests_per_second, burst })
-    }
-
-    /// Requests added to one device's bucket per second.
-    #[must_use]
-    pub fn requests_per_second(self) -> u64 {
-        self.requests_per_second
-    }
-
-    /// Maximum requests that one device may spend without refilling.
-    #[must_use]
-    pub fn burst(self) -> u64 {
-        self.burst
-    }
-}
-
-impl Default for WriteRateLimits {
-    fn default() -> Self {
-        Self { requests_per_second: WRITE_REQUESTS_PER_SECOND, burst: WRITE_BURST }
-    }
-}
+use scoplen_store::sync_write_admission::{SyncWriteAdmissionDecision, SyncWriteAdmissionError};
+pub use scoplen_store::sync_write_admission::{
+    WRITE_BURST, WRITE_REQUESTS_PER_SECOND, WriteRateLimits,
+};
 
 /// Positive, platform-representable deployment bounds for the complete K-4 write exchange.
 #[allow(clippy::struct_field_names)]
@@ -212,50 +164,6 @@ impl ReadBodyLimits {
     #[must_use]
     pub fn max_body_bytes(self) -> u64 {
         self.0.max_body_bytes as u64
-    }
-}
-
-#[derive(Clone)]
-struct WriteRateLimiter {
-    buckets: Arc<Mutex<HashMap<storage::DeviceId, WriteBucket>>>,
-    limits: WriteRateLimits,
-}
-
-#[derive(Clone, Copy)]
-struct WriteBucket {
-    tokens: u128,
-    last_refill: Instant,
-}
-
-impl WriteRateLimiter {
-    fn new(limits: WriteRateLimits) -> Self {
-        Self { buckets: Arc::new(Mutex::new(HashMap::new())), limits }
-    }
-
-    fn try_acquire(&self, device_id: storage::DeviceId) -> Result<(), u64> {
-        self.try_acquire_at(device_id, Instant::now())
-    }
-
-    fn try_acquire_at(&self, device_id: storage::DeviceId, now: Instant) -> Result<(), u64> {
-        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        let bucket = buckets.entry(device_id).or_insert(WriteBucket {
-            tokens: u128::from(self.limits.burst).saturating_mul(TOKEN_SCALE),
-            last_refill: now,
-        });
-        let elapsed_nanos = now.duration_since(bucket.last_refill).as_nanos();
-        let refill = elapsed_nanos.saturating_mul(u128::from(self.limits.requests_per_second));
-        let capacity = u128::from(self.limits.burst).saturating_mul(TOKEN_SCALE);
-        bucket.tokens = bucket.tokens.saturating_add(refill).min(capacity);
-        bucket.last_refill = now;
-        if bucket.tokens >= TOKEN_SCALE {
-            bucket.tokens -= TOKEN_SCALE;
-            return Ok(());
-        }
-        let deficit = TOKEN_SCALE - bucket.tokens;
-        let rate = u128::from(self.limits.requests_per_second);
-        let refill_per_second = rate.saturating_mul(TOKEN_SCALE);
-        let wait_seconds = deficit.saturating_add(refill_per_second - 1) / refill_per_second;
-        Err(u64::try_from(wait_seconds).unwrap_or(u64::MAX).max(1))
     }
 }
 
@@ -580,6 +488,12 @@ impl SyncBackend {
     }
 
     backend_async!(
+        admit_sync_write(
+            device: storage::DeviceId,
+            limits: WriteRateLimits,
+        ) -> Result<SyncWriteAdmissionDecision, SyncWriteAdmissionError>
+    );
+    backend_async!(
         list_sync_vaults_for_account(
             account_id: key_storage::AccountId,
         ) -> Result<
@@ -742,7 +656,7 @@ pub fn personal_router_with_notifications<A: SyncAuthenticator>(
         store: store.into(),
         authenticator,
         notifications,
-        write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
+        write_rate_limits,
         write_body_limits,
         read_body_limits,
     };
@@ -776,7 +690,7 @@ pub fn router_with_notifications<A: SyncAuthenticator>(
 /// Build a sync router whose session advertises its enforced per-device write rate.
 ///
 /// `write_rate_limits` must be constructed with [`WriteRateLimits::new`] or its default. Each
-/// router owns a process-local bucket map; cross-instance admission is not provided here.
+/// router shares durable per-device admission with every instance using the same database.
 pub fn router_with_write_rate_limits<A: SyncAuthenticator>(
     store: impl Into<SyncBackend>,
     authenticator: A,
@@ -809,7 +723,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
         store: store.into(),
         authenticator,
         notifications,
-        write_rate_limiter: WriteRateLimiter::new(write_rate_limits),
+        write_rate_limits,
         write_body_limits,
         read_body_limits,
     };
@@ -837,7 +751,7 @@ struct SyncHttpState<A> {
     store: SyncBackend,
     authenticator: A,
     notifications: NotificationHub,
-    write_rate_limiter: WriteRateLimiter,
+    write_rate_limits: WriteRateLimits,
     write_body_limits: WriteBodyLimits,
     read_body_limits: ReadBodyLimits,
 }
@@ -932,8 +846,8 @@ async fn session<A: SyncAuthenticator>(
             max_objects_per_vault: cardinality_limits.max_objects_per_vault,
             max_shared_vaults_per_account: cardinality_limits.max_shared_vaults_per_account,
             max_members_per_shared_vault: cardinality_limits.max_members_per_shared_vault,
-            write_requests_per_second: state.write_rate_limiter.limits.requests_per_second(),
-            write_burst: state.write_rate_limiter.limits.burst(),
+            write_requests_per_second: state.write_rate_limits.requests_per_second(),
+            write_burst: state.write_rate_limits.burst(),
         },
         vaults,
     };
@@ -1459,10 +1373,7 @@ async fn objects<A: SyncAuthenticator>(
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let identity =
         authorize(&state, &method, &uri, &headers, vault, SyncOperation::Write, &instance).await?;
-    state
-        .write_rate_limiter
-        .try_acquire(identity.device_id)
-        .map_err(|seconds| SyncHttpError::rate_limited(&instance, seconds))?;
+    admit_object_write(&state, identity.device_id, &instance).await?;
     if state
         .store
         .sync_vault_kind(vault)
@@ -1544,6 +1455,22 @@ async fn objects<A: SyncAuthenticator>(
         publish_vault_advanced(&state, vault, seq).await;
     }
     Ok(cbor_response(response_body))
+}
+
+async fn admit_object_write<A: SyncAuthenticator>(
+    state: &SyncHttpState<A>,
+    device: storage::DeviceId,
+    instance: &str,
+) -> SyncResult<()> {
+    match state.store.admit_sync_write(device, state.write_rate_limits).await {
+        Ok(SyncWriteAdmissionDecision::Admitted) => Ok(()),
+        Ok(SyncWriteAdmissionDecision::RateLimited(seconds)) => {
+            Err(SyncHttpError::rate_limited(instance, seconds))
+        }
+        Ok(SyncWriteAdmissionDecision::PolicyPending) | Err(_) => {
+            Err(SyncHttpError::admission_unavailable(instance))
+        }
+    }
 }
 
 fn decode_write_batch(
@@ -2101,7 +2028,19 @@ impl SyncHttpError {
         )
     }
 
-    fn rate_limited(instance: &str, seconds: u64) -> Box<Self> {
+    fn admission_unavailable(instance: &str) -> Box<Self> {
+        Self::known(
+            instance,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sync.storage_unavailable",
+            "Sync service unavailable",
+            "The server could not confirm write admission; no object data changed. Retry with a fresh proof.",
+            false,
+            true,
+        )
+    }
+
+    fn rate_limited(instance: &str, seconds: u128) -> Box<Self> {
         let mut error = Self::known(
             instance,
             StatusCode::TOO_MANY_REQUESTS,
@@ -2696,41 +2635,6 @@ mod tests {
     }
 
     #[test]
-    fn write_rate_bucket_enforces_burst_refill_and_device_isolation() {
-        let limiter = WriteRateLimiter::new(WriteRateLimits::new(2, 3).expect("valid rate limits"));
-        let now = Instant::now();
-        for _ in 0..3 {
-            assert_eq!(limiter.try_acquire_at([1; 16], now), Ok(()));
-        }
-        assert_eq!(limiter.try_acquire_at([1; 16], now), Err(1));
-        assert_eq!(limiter.try_acquire_at([2; 16], now), Ok(()));
-        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_millis(500)), Ok(()));
-        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_millis(500)), Err(1));
-        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_secs(10)), Ok(()));
-    }
-
-    #[test]
-    fn write_rate_limits_reject_zero_and_support_positive_boundaries() {
-        assert!(WriteRateLimits::new(0, 1).unwrap_err().contains("write_requests_per_second"));
-        assert!(WriteRateLimits::new(1, 0).unwrap_err().contains("write_burst"));
-        let minimum = WriteRateLimits::new(1, 1).expect("minimum limits");
-        let now = Instant::now();
-        let limiter = WriteRateLimiter::new(minimum);
-        assert_eq!(limiter.try_acquire_at([1; 16], now), Ok(()));
-        assert_eq!(limiter.try_acquire_at([1; 16], now), Err(1));
-        assert_eq!(limiter.try_acquire_at([1; 16], now + Duration::from_secs(1)), Ok(()));
-
-        let maximum = WriteRateLimits::new(u64::MAX, u64::MAX).expect("unsigned limits");
-        assert_eq!(maximum.requests_per_second(), u64::MAX);
-        assert_eq!(maximum.burst(), u64::MAX);
-        let limiter =
-            WriteRateLimiter::new(WriteRateLimits::new(u64::MAX, 1).expect("maximum refill rate"));
-        assert_eq!(limiter.try_acquire_at([2; 16], now), Ok(()));
-        assert_eq!(limiter.try_acquire_at([2; 16], now), Err(1));
-        assert_eq!(limiter.try_acquire_at([2; 16], now + Duration::from_nanos(1)), Ok(()));
-    }
-
-    #[test]
     fn write_body_limits_reject_zero_and_overflow_and_allow_raised_limits() {
         let minimum = WriteBodyLimits::new(1, 1, 1).expect("positive minimum");
         assert_eq!(minimum.max_envelope_bytes(), 1);
@@ -3015,6 +2919,24 @@ mod tests {
         store.pool().close().await;
         drop(store);
         remove_test_directory(&directory).await;
+    }
+
+    #[tokio::test]
+    async fn admission_errors_preserve_business_flags_and_unsigned_retry_delay() {
+        let response = SyncHttpError::rate_limited("request", u128::MAX).into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], u128::MAX.to_string());
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&bytes).expect("problem");
+        assert!(!problem.changed);
+        assert!(problem.retryable);
+        let response = SyncHttpError::admission_unavailable("request").into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&bytes).expect("problem");
+        assert_eq!(problem.code.as_str(), "sync.storage_unavailable");
+        assert!(!problem.changed);
+        assert!(problem.retryable);
     }
 
     #[tokio::test]

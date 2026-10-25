@@ -31,7 +31,10 @@ self-hosted server, host agent, administration CLI, and web console.
   leased job queue with worker lease cleanup exist. The API listener mounts the Personal K-4
   subset on SQLite or PostgreSQL with enrolled-device tokens, durable DPoP replay protection,
   current certificates, scopes, vault ownership, signed envelopes, and transaction-local write
-  authorization. Configured rate limits apply across connections. Deployment-selected D-91 write
+  authorization. D-122 configured per-device rate limits persist across API instances and
+  restarts in both databases. Short pre-body admission, full unsigned fixed-point balances,
+  stored-policy transitions and bounded clock-safe retirement preserve token debt. Admission
+  failure never dispatches an object mutation. Deployment-selected D-91 write
   exchange limits apply consistently in HTTP and both stores, with exact encoded request
   admission, complete ordered responses and a fixed conflict cap. Independent
   D-93 read budgets can retain larger history after writes are lowered. Metadata admission

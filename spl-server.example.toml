@@ -39,7 +39,7 @@ max_objects_per_vault = 100000
 max_shared_vaults_per_account = 1000
 # Keep this at or below 1000 so a new epoch can include one wrap per member.
 max_members_per_shared_vault = 1000
-# Per-device object-write token bucket. Both values must be positive.
+# Durable per-device object-write token bucket. Keep replica settings equal; both are positive.
 write_requests_per_second = 50
 write_burst = 200
 

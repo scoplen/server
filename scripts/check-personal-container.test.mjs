@@ -26,6 +26,24 @@ import {
   prepareRecoveryProbeContext,
 } from "./check-personal-container.mjs";
 
+test("recovery probe follows the latest SQLite migration and preserves its old-image anchor", async () => {
+  const migrations = await readdir(
+    new URL("../crates/scoplen-store/migrations/sqlite/", import.meta.url),
+  );
+  const versions = migrations
+    .filter((name) => /^\d{14}_.+\.sql$/.test(name))
+    .map((name) => Number(name.slice(0, 14)));
+  const source = await readFile(
+    new URL("./personal-sqlite-recovery-probe.mjs", import.meta.url),
+    "utf8",
+  );
+  const old = Number(source.match(/const oldMigration = (\d+);/)[1]);
+  const current = Number(source.match(/const newMigration = (\d+);/)[1]);
+  assert.equal(old, 20261024030000, "matching historical image stays pinned");
+  assert(versions.includes(old));
+  assert.equal(current, Math.max(...versions), "new migrations must update the recovery consumer");
+});
+
 test("actual recovery probe reports a bounded failure before opening an invalid context", async () => {
   const { error, stdout, stderr } = await new Promise((accept) => {
     execFile(
