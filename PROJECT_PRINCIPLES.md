@@ -56,7 +56,11 @@ self-hosted server, host agent, administration CLI, and web console.
   audit-atomic browser-session creation, cookie rotation, matching-token reuse revocation and
   transaction-local current-session authorization. Strict setup/login HTTP routes and cookie-only
   Operator refresh enforce exact Origin, durable DPoP/admission and non-disclosure after unknown
-  commits. Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
+  commits. Current-family Operator logout is implemented at the storage boundary on both
+  databases, with current credential/key validation, post-wait expiry checks, atomic revocation
+  audit and fresh-proof terminal confirmation. It preserves other families and unexpired
+  digests. Public HTTP and console adoption remain separate outcomes.
+  Operator invitation HTTP issuance enforces exact scope and published Cedar policies,
   independent database quotas, and transaction-local session authorization; one-time URLs are
   disclosed only after an audited confirmed commit.
   Worker refresh retirement is atomic across device and Operator state: each heartbeat examines

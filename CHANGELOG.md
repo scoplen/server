@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added durable current-family Operator logout on SQLite and PostgreSQL. Revocation and its
+  deployment audit commit atomically; eligible fresh-proof retries confirm an already revoked
+  family without another revocation event. Other families and all retained refresh digests stay
+  intact. Current identity, credential, binding and expiry checks also apply after lock waits;
+  corrupt stored passkey keys fail closed through the maintained verifier's public-key checks.
+  Forward migrations preserve existing authentication admission debt and add independent logout
+  quotas. The HTTP adapter and console adoption are separate outcomes.
+
 - Added atomic worker retirement of expired device and Operator refresh credentials on SQLite
   and PostgreSQL. Each heartbeat examines at most 16 expired families per kind, removes at most
   256 digests and deletes only empty families. Unexpired and revoked-unexpired reuse evidence

@@ -951,3 +951,6 @@ async fn postgres_lost_finish_rotation_and_revocation_commit_acknowledgements() 
     drop(proxy);
     cleanup(store, pool, schema).await;
 }
+
+#[path = "support/operator_logout.rs"]
+mod logout;

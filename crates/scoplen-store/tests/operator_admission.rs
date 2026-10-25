@@ -139,6 +139,40 @@ macro_rules! quotas {
                 .expect("separate refresh window"),
             Decision::Admitted
         );
+        for _ in 0..10 {
+            assert_eq!(
+                first
+                    .admit_operator_auth_private(
+                        Endpoint::Logout,
+                        Private::AuthenticatedOperator(operator)
+                    )
+                    .await
+                    .expect("independent logout quota"),
+                Decision::Admitted
+            );
+        }
+        assert!(matches!(
+            second
+                .admit_operator_auth_private(
+                    Endpoint::Logout,
+                    Private::AuthenticatedOperator(operator)
+                )
+                .await,
+            Ok(Decision::RateLimited(_))
+        ));
+        for _ in 0..30 {
+            assert_eq!(
+                first
+                    .admit_operator_auth_source(Endpoint::Logout, source())
+                    .await
+                    .expect("logout source quota"),
+                Decision::Admitted
+            );
+        }
+        assert!(matches!(
+            second.admit_operator_auth_source(Endpoint::Logout, source()).await,
+            Ok(Decision::RateLimited(_))
+        ));
         assert!(matches!(
             first
                 .admit_operator_auth_private(Endpoint::LoginOptions, Private::SetupDigest(&digest))
