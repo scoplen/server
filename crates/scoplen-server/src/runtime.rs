@@ -1638,12 +1638,12 @@ mod tests {
                     Err(ServerError::DeploymentLeaseOccupied) => {
                         sleep(Duration::from_millis(20)).await;
                     }
-                    Err(error) => panic!("offline admission after startup cleanup: {error}"),
+                    Err(error) => panic!("offline admission after deployment cleanup: {error}"),
                 }
             }
         })
         .await
-        .expect("detached startup drains and releases lease")
+        .expect("detached cleanup drains and releases lease")
     }
 
     fn run_isolated_shutdown_test(test_name: &str, child_directory_variable: &str) {
@@ -2236,8 +2236,23 @@ mod tests {
             .expect("drain task")
             .expect("normal shutdown");
         drop(store);
-        let exclusive = DeploymentLease::try_exclusive(&data_dir)
-            .expect("completed write and closed pool release admission");
+        // SQLx returns connections on detached tasks, whose pool options retain the lease
+        // until those tasks drop their final pool references after close completes.
+        let exclusive = wait_for_deployment_lease_release(&data_dir).await;
+        let mut inspection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(data_dir.join("scoplen.sqlite"))
+                .read_only(true),
+        )
+        .await
+        .expect("inspect drained write under exclusive admission");
+        let committed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM lease_drain_probe WHERE value = 1")
+                .fetch_one(&mut inspection)
+                .await
+                .expect("read drained write");
+        assert_eq!(committed, 1, "normal shutdown must preserve the committed write");
+        inspection.close().await.expect("close drained write inspection");
         drop(exclusive);
         remove_test_directory(&data_dir).await;
     }
