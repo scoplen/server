@@ -26,6 +26,13 @@ inherit the parent's ACL; choose a parent limited to your Windows account before
 The helper does not restrict or validate Windows ACLs. Never use a shared directory or a real
 deployment, passkey, account or database. TLS roots stay local to each test consumer.
 
+On Windows, preparation records ordinary absolute local-drive paths after canonicalizing the
+existing parent and confirming that removing Rust's verbatim drive prefix preserves the resolved
+directory. Bootstrap and restart checks use the same normalization and compare every configured
+fixture path exactly. UNC and device paths are rejected. Production Windows path and ACL
+admission still applies unchanged; preparation does not admit an existing data directory or
+repair its permissions.
+
 ## Windows PowerShell
 
 Run these commands from the server checkout. Select an unused port; if another process wins

@@ -148,14 +148,57 @@ async fn run(command: Command) -> Result<()> {
     Ok(())
 }
 
+fn canonical_fixture_directory(directory: &Path) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        if let Some(Component::Prefix(prefix)) = directory.components().next()
+            && !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        {
+            return Err("fixture directory must resolve to an ordinary local-drive path");
+        }
+    }
+    let canonical = fs::canonicalize(directory).map_err(|_| "fixture directory missing")?;
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let mut components = canonical.components();
+        let drive = match components.next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+                _ => return Err("fixture directory must resolve to an ordinary local-drive path"),
+            },
+            _ => return Err("fixture directory must resolve to an ordinary local-drive path"),
+        };
+        // Rust canonicalization emits a verbatim prefix on Windows. Convert only
+        // drive paths and confirm ordinary Win32 resolution still names the same directory.
+        let mut ordinary = PathBuf::from(format!("{}:\\", char::from(drive)));
+        for component in components {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(name) => ordinary.push(name),
+                _ => return Err("fixture directory must resolve to an ordinary local-drive path"),
+            }
+        }
+        if fs::canonicalize(&ordinary).ok().as_ref() != Some(&canonical) {
+            return Err("fixture directory changes under ordinary local-drive path resolution");
+        }
+        Ok(ordinary)
+    }
+    #[cfg(not(windows))]
+    Ok(canonical)
+}
+
 fn prepare(directory: &Path, postgres_config: Option<&Path>, port: Option<u16>) -> Result<()> {
-    let parent = fs::canonicalize(
+    let parent = canonical_fixture_directory(
         directory
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new(".")),
     )
-    .map_err(|_| "fixture parent must already exist")?;
+    .map_err(|_| "fixture parent must already exist at a supported local path")?;
     if parent.ancestors().any(|path| path.join(".git").exists()) {
         return Err("fixture directory must be outside every Git checkout");
     }
@@ -288,6 +331,7 @@ fn fixture_config(directory: &Path) -> Result<Config> {
         || config.tls.mode != TlsMode::Files
         || config.tls.cert_file.as_deref() != Some(directory.join("localhost.pem").as_path())
         || config.tls.key_file.as_deref() != Some(directory.join("localhost-key.pem").as_path())
+        || config.console.assets_dir != directory.join("unused-console")
     {
         return Err("prepared config must retain its owned loopback HTTPS boundary");
     }
@@ -330,7 +374,7 @@ fn setup_token(log: &str, origin: &str) -> Result<[u8; 32]> {
 }
 
 async fn bootstrap(directory: &Path, server_log: Option<&Path>) -> Result<()> {
-    let directory = fs::canonicalize(directory).map_err(|_| "fixture directory missing")?;
+    let directory = canonical_fixture_directory(directory)?;
     let config = fixture_config(&directory)?;
     let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
     let log = read_bounded(server_log.unwrap_or(&directory.join("server.log")), 4_194_304)?;
@@ -730,7 +774,7 @@ fn authentication_denied(reply: &[u8], changed: bool) -> Result<()> {
 }
 
 async fn check_native_restart(directory: &Path) -> Result<()> {
-    let directory = fs::canonicalize(directory).map_err(|_| "fixture directory missing")?;
+    let directory = canonical_fixture_directory(directory)?;
     let config = fixture_config(&directory)?;
     let origin = config.public_origin().map_err(|_| "prepared origin invalid")?;
     let descriptor = read_bounded(&directory.join("descriptor.json"), 8_192)?;
@@ -1037,17 +1081,80 @@ mod tests {
     fn prepare_preserves_existing_directories_and_requires_owned_loopback_config() {
         let scratch = Scratch::new();
         prepare(&scratch.0, None, Some(18443)).expect("prepare");
-        let directory = fs::canonicalize(&scratch.0).expect("canonical fixture");
+        let directory = canonical_fixture_directory(&scratch.0).expect("canonical fixture");
         let config = fixture_config(&directory).expect("owned config");
         assert_eq!(config.public_origin().unwrap(), "https://localhost:18443");
         let key = fs::read(directory.join("localhost-key.pem")).expect("private key");
         assert!(prepare(&scratch.0, None, Some(18444)).is_err());
         assert_eq!(fs::read(directory.join("localhost-key.pem")).unwrap(), key);
         let path = directory.join("server.toml");
-        let config = fs::read_to_string(&path).unwrap().replace("127.0.0.1", "0.0.0.0");
-        fs::write(path, config).unwrap();
+        let source = fs::read_to_string(&path).unwrap();
+        fs::write(&path, source.replace("127.0.0.1", "0.0.0.0")).unwrap();
         assert!(fixture_config(&directory).is_err());
+        for (section, field) in [
+            ("server", "data_dir"),
+            ("tls", "cert_file"),
+            ("tls", "key_file"),
+            ("console", "assets_dir"),
+        ] {
+            let mut config: toml::Value = toml::from_str(&source).unwrap();
+            config[section][field] = directory.join("elsewhere").to_str().unwrap().into();
+            fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+            assert!(fixture_config(&directory).is_err(), "prepared path changed");
+        }
         assert!(!directory.join("descriptor.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_windows_paths_pass_public_admission_without_accepting_aliases() {
+        use std::path::{Component, Prefix};
+
+        let scratch = Scratch::new();
+        assert!(!scratch.0.exists());
+        let mut parent = Config::default();
+        parent.server.data_dir = scratch.0.clone();
+        drop(scoplen_server::admit_local_deployment(&parent).expect("new private fixture parent"));
+        let fixture = scratch.0.join("personal");
+        prepare(&fixture, None, Some(18443)).expect("prepare");
+        let directory = canonical_fixture_directory(&fixture).expect("ordinary fixture path");
+        let config = fixture_config(&directory).expect("exact owned config");
+        for path in [
+            &config.server.data_dir,
+            config.tls.cert_file.as_ref().unwrap(),
+            config.tls.key_file.as_ref().unwrap(),
+            &config.console.assets_dir,
+        ] {
+            assert!(
+                matches!(path.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+            );
+        }
+        assert!(!config.server.data_dir.exists());
+        let lease =
+            scoplen_server::admit_local_deployment(&config).expect("prepared public admission");
+        assert!(config.server.data_dir.is_dir());
+        drop(lease);
+        for rejected in [
+            fs::canonicalize(&config.server.data_dir).unwrap(),
+            directory.join("data."),
+            directory.join("data "),
+        ] {
+            let mut altered = config.clone();
+            altered.server.data_dir = rejected;
+            assert!(scoplen_server::admit_local_deployment(&altered).is_err());
+        }
+        drop(scoplen_server::admit_local_deployment(&config).expect("owned path remains admitted"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fixture_paths_refuse_unc_and_device_names_without_accessing_them() {
+        for path in [r"\\server\share", r"\\?\UNC\server\share", r"\\.\C:\fixture"] {
+            assert_eq!(
+                canonical_fixture_directory(Path::new(path)).unwrap_err(),
+                "fixture directory must resolve to an ordinary local-drive path"
+            );
+        }
     }
 
     #[test]
@@ -1083,7 +1190,7 @@ mod tests {
     async fn failed_bootstrap_publishes_nothing_and_cannot_repeat_an_uncertain_attempt() {
         let scratch = Scratch::new();
         prepare(&scratch.0, None, None).expect("prepare");
-        let directory = fs::canonicalize(&scratch.0).unwrap();
+        let directory = canonical_fixture_directory(&scratch.0).unwrap();
         let config = fixture_config(&directory).unwrap();
         let token = URL_SAFE_NO_PAD.encode([7; 32]);
         write_private(
