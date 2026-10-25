@@ -418,6 +418,9 @@ impl SqliteStore {
         validate_statements(certificates, "certificate")?;
         validate_statements(revocations, "revocation")?;
         let mut transaction = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        crate::account_entry_admission::sqlite_account_entry_now(&mut transaction)
+            .await
+            .map_err(|_| AccountKeyStoreError::CorruptRow("Account entry serialization"))?;
         if crate::account_bootstrap::sqlite_password_account(&mut transaction, &account_id).await? {
             return Err(AccountKeyStoreError::UnsupportedTransition);
         }
@@ -701,6 +704,9 @@ impl PostgresStore {
         validate_statements(certificates, "certificate")?;
         validate_statements(revocations, "revocation")?;
         let mut transaction = self.pool().begin().await?;
+        crate::account_entry_admission::postgres_account_entry_now(&mut transaction)
+            .await
+            .map_err(|_| AccountKeyStoreError::CorruptRow("Account entry serialization"))?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended(encode($1, 'hex'), 0))")
             .bind(account_id.as_slice())
             .execute(&mut *transaction)
