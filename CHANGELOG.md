@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Validate mounted control-plane routes against the same pinned public API contract used by
+  the server, with a regression check for CI checkout drift. Run team membership migrations
+  and HTTP failure paths in separate PostgreSQL test databases.
+
 - Mount Account-owned team creation and current-membership list/read on SQLite and PostgreSQL.
   Creation defaults to disabled and atomically persists one initial owner, organization audit
   and 24-hour idempotency receipt. Exact confirmation returns current team state without

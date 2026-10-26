@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: a604b726881292509a8ced5ff32f718ef52f76eb
+          ref: e6be4fa7bb3e265444b3fd26ee14af42337f1889
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -176,6 +176,20 @@ jobs:
         run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::key_publication::postgres_
       - name: Check PostgreSQL real TLS notification authentication and lifecycle
         run: cargo test --locked -p scoplen-server --lib --features postgres-integration operator_auth::tests::sessions::personal_flow::notifications::postgres_
+      - name: Create isolated team membership migration database
+        run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organization_migrations_ci'
+      - name: Check populated team membership forward migration
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
+        run: cargo test --locked -p scoplen-store --test organization_migrations --features postgres-integration postgres_team_upgrade_preserves_existing_account_and_personal_state -- --exact --test-threads=1
+      - name: Create isolated team HTTP database
+        run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organizations_http_ci'
+      - name: Check PostgreSQL team creation, discovery, receipts and uncertain commits
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organizations_http_ci
+        run: >-
+          cargo test --locked -p scoplen-server --lib --features postgres-integration
+          operator_auth::tests::sessions::personal_flow::organizations::postgres_ -- --test-threads=1
       - name: Check complete SQLite and PostgreSQL sync storage suite
         run: cargo test -p scoplen-store --test sync --features postgres-integration
       - name: Check PostgreSQL authenticated sync router
