@@ -362,17 +362,39 @@ macro_rules! terminal_quota {
         let store = &$store;
         let replica = &$replica;
         let (_, _, _, _, _, session, principal) = login!(store);
-        for attempt in 0..10 {
+        let mut before: Option<(i64, i64, i64, Option<i64>)> = None;
+        let mut limited = false;
+        // A real minute boundary may reset the window, including on the eleventh request.
+        for attempt in 0..21 {
             let current = if attempt % 2 == 0 { store } else { replica };
-            logout!(current, &session.browser().access_token, &principal).expect("each eligible confirmation consumes quota");
+            let result = logout!(current, &session.browser().access_token, &principal);
+            let after: (i64, i64, i64, Option<i64>) = sqlx::query_as("SELECT window_start_ms,attempts,failure_streak,cooldown_until_ms FROM operator_auth_admission WHERE endpoint=6 AND kind=4")
+                .fetch_one(store.pool()).await.expect("durable private window");
+            match result {
+                Ok(_) => {
+                    let expected = match before {
+                        Some(previous) if previous.0 == after.0 => previous.1 + 1,
+                        Some(previous) => {
+                            assert!(after.0 > previous.0, "window reset moves forward");
+                            1
+                        }
+                        None => 1,
+                    };
+                    assert_eq!(after, (after.0, expected, 0, None));
+                    assert!((1..=10).contains(&expected), "one window admits at most ten confirmations");
+                    before = Some(after);
+                }
+                Err(Error::RateLimited(_)) => {
+                    let previous = before.expect("ten admitted confirmations precede a denial");
+                    assert_eq!(previous.1, 10);
+                    assert_eq!(previous, after, "blocked quota is unchanged");
+                    limited = true;
+                    break;
+                }
+                Err(error) => panic!("eligible confirmation failed: {error}"),
+            }
         }
-        let before: (i64, i64, Option<i64>) = sqlx::query_as("SELECT attempts,failure_streak,cooldown_until_ms FROM operator_auth_admission WHERE endpoint=6 AND kind=4")
-            .fetch_one(store.pool()).await.expect("private window");
-        assert_eq!(before, (10, 0, None));
-        assert!(matches!(logout!(replica, &session.browser().access_token, &principal), Err(Error::RateLimited(_))));
-        let after: (i64, i64, Option<i64>) = sqlx::query_as("SELECT attempts,failure_streak,cooldown_until_ms FROM operator_auth_admission WHERE endpoint=6 AND kind=4")
-            .fetch_one(store.pool()).await.expect("blocked quota unchanged");
-        assert_eq!(before, after);
+        assert!(limited, "the eleventh confirmation in one window must be rate limited");
         let events: Vec<Vec<u8>> = sqlx::query_scalar("SELECT event_bytes FROM deployment_audit_events")
             .fetch_all(store.pool()).await.expect("one revocation audit");
         let prefix = [b"spl-operator-session-v1".as_slice(), &[7]].concat();
