@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Exercise two independent password Accounts through public registration, Device admission,
+  team settings and encrypted Personal sync in the production-container check. Compare foreign
+  and absent team read/update refusals, retain both owners' complete Resources and Hosts,
+  and require the same isolation after restart before publishing the acceptance receipts.
+
 - Extend the public Personal-container consumer through conditional team renaming, stale-ETag
   refusal and unchanged-name saves. Require the original creation confirmation and discovery
   to return the renamed Resource, and preserve its complete version through the real restart

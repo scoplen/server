@@ -224,11 +224,11 @@ It performs
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
 Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Its separate
-`verify-account --with-team --across-restart` invocation registers a randomly generated password Account and writes a signed,
-encrypted Host through the first enrolled Device. A fresh independent Device derives the same
-password credential, verifies and decrypts the complete signed bootstrap, completes admission,
-authenticates and refreshes its session. With the check's explicit creation opt-in, that Device
-confirms empty membership discovery, creates a team with its Account as the sole owner,
+`verify-account --with-team --across-restart` invocation registers two randomly generated password
+Accounts. For each, the first enrolled Device writes a signed, encrypted Host. A fresh independent
+Device derives that Account's password credential, verifies and decrypts the complete signed
+bootstrap, completes admission, authenticates and refreshes its session. With the check's
+explicit creation opt-in, that Device confirms empty membership discovery, creates a team with its Account as the sole owner,
 reads and lists the same team, and explicitly confirms the original idempotency key without
 creating another team. One conditional PATCH renames the team. A second request with the original
 ETag must return the exact unchanged/nonretryable stale-precondition problem; an unchanged-name
@@ -236,21 +236,25 @@ PATCH with the new ETag must preserve the complete Resource. Direct read, discov
 confirmation with the original creation key/body must return that renamed Resource.
 It refreshes its session again, then opens its own ARK and Personal vault-key wraps.
 It verifies and decrypts the retained Host, edits and uploads it with its own Device signature;
-the original Device refreshes and verifies the returned edit. Only these public HTTPS operations
-can produce the separate content-free `account-acceptance.json` receipt. Completing the team
-operations and subsequent Personal sync also produces a distinct content-free
-`team-acceptance.json` receipt with separate creation and name-settings success fields; the existing
-Account receipt and descriptor are unchanged.
-With `--across-restart`, the native process retains its Device keys, original unused refresh
-credential, renamed team Resource and expected Host in memory while the controller performs the same
+the original Device refreshes and verifies the returned edit. Each Account's discovery must
+contain only its own team. Both Accounts attempt GET and PATCH against the other team and a
+fresh absent id. Each response must be `404 organization.not_found`, with `changed: false` and
+`retryable: false`; the complete problem bodies must match after removing only the request
+instance, and failure headers must not disclose an ETag. Both owners then read and confirm
+their unchanged complete Resources, including ETags, and decrypt their unchanged Personal Hosts.
+Only these public HTTPS operations can produce the separate content-free
+`account-acceptance.json` receipt. Completing both Accounts' team operations and subsequent
+Personal sync also produces `team-acceptance.json`, requiring the creation, name-settings and
+`team_account_isolation_verified` success fields; the Account receipt and descriptor are unchanged.
+With `--across-restart`, the native process retains both Devices' keys, original unused refresh
+credentials, renamed team Resources and expected Hosts in memory while the controller performs the same
 graceful stop/start and readiness checks. Only fixed ready/resume markers cross the process
-boundary. Its first authentication request after restart refreshes that original credential,
-then direct team read, exact confirmation with the original creation request/idempotency key,
-and discovery must return the same renamed Account-bound Resource, including its ETag, update
-time and sole owner membership. The retained
-signed Host must still decrypt to the same content. These completed operations produce the
-distinct content-free `team-restart-acceptance.json` receipt with membership and name-settings
-success fields. No Account or Device is seeded
+boundary. Its first authentication requests after restart refresh those original credentials,
+then repeat both Accounts' own-team discovery, foreign-versus-absent refusals, exact creation
+confirmation and complete Resource comparisons, including ETags, update times and sole owner
+memberships. Both retained signed Hosts must still decrypt to the same content. These completed
+operations produce `team-restart-acceptance.json`, requiring membership, name-settings and
+`team_account_isolation_restart_verified` success fields. No Account or Device is seeded
 again, no credential is written to a fixture file, and failed operations are not retried.
 The coordinator bounds its wait and aborts/reaps its driver if readiness or the controller fails.
 Before startup, Compose rendering checks the default `false`, explicit `true` and unchanged
