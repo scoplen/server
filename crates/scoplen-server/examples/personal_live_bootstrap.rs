@@ -25,6 +25,7 @@ use scoplen_api::{
         OperatorSetupFinishRequest, OperatorSetupFinishResponse, OperatorSetupOptionsRequest,
         OperatorSetupOptionsResponse,
     },
+    organization::{OrganizationPage, OrganizationResource},
 };
 use scoplen_crypto::{DpopProof, DpopTarget, DpopToken, P256SigningKey};
 use scoplen_server::{Config, TlsMode};
@@ -76,7 +77,12 @@ enum Command {
         server_log: Option<PathBuf>,
     },
     /// Once only: verify public password entry and encrypted sync with two independent Devices.
-    VerifyAccount { directory: PathBuf },
+    VerifyAccount {
+        directory: PathBuf,
+        /// Also verify team creation/discovery and Personal sync after joining a team.
+        #[arg(long)]
+        with_team: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -119,7 +125,7 @@ async fn run(command: Command) -> Result<()> {
             bootstrap(&directory, server_log.as_deref()).await?;
             println!("fixture descriptor ready");
         }
-        Command::VerifyAccount { directory } => {
+        Command::VerifyAccount { directory, with_team } => {
             let directory = canonical_fixture_directory(&directory)?;
             let config = fixture_config(&directory)?;
             let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
@@ -128,11 +134,17 @@ async fn run(command: Command) -> Result<()> {
                 &directory.join("account-check.started"),
                 "One attempt only; discard this fixture after any failure.",
             )?;
-            account::verify(&https).await?;
+            account::verify(&https, with_team).await?;
             write_private(
                 &directory.join("account-acceptance.json"),
                 "{\"account_password_sync_verified\":true}",
             )?;
+            if with_team {
+                write_private(
+                    &directory.join("team-acceptance.json"),
+                    "{\"team_creation_personal_sync_verified\":true}",
+                )?;
+            }
             println!("public Account password and encrypted sync check passed");
         }
     }
@@ -537,7 +549,29 @@ impl Https {
     ) -> Result<Zeroizing<Vec<u8>>> {
         tokio::time::timeout(
             Duration::from_secs(15),
-            self.request(method, path, body, proof, expected),
+            self.request(method, path, body, proof, None, expected),
+        )
+        .await
+        .map_err(|_| "HTTPS request timed out; abandon this fixture after an uncertain operation")?
+    }
+
+    async fn create_organization(
+        &self,
+        body: &[u8],
+        key: &P256SigningKey,
+        token: &str,
+        idempotency_key: uuid::Uuid,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            self.request(
+                "POST",
+                "/api/v1/orgs",
+                body,
+                Some((key, Some(token))),
+                Some(idempotency_key),
+                201,
+            ),
         )
         .await
         .map_err(|_| "HTTPS request timed out; abandon this fixture after an uncertain operation")?
@@ -549,6 +583,7 @@ impl Https {
         path: &str,
         body: &[u8],
         proof: Option<(&P256SigningKey, Option<&str>)>,
+        idempotency_key: Option<uuid::Uuid>,
         expected: u16,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let mut request = Request::builder()
@@ -559,6 +594,9 @@ impl Https {
                 if path.starts_with("/sync/") { "application/cbor" } else { "application/json" },
             )
             .header("Origin", &self.origin);
+        if let Some(key) = idempotency_key {
+            request = request.header("Idempotency-Key", key.to_string());
+        }
         if let Some((key, token)) = proof {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -633,16 +671,42 @@ impl Https {
         {
             return Err("public fixture API response privacy headers invalid");
         }
-        let bytes = Limited::new(
-            reply.into_body(),
-            if path.starts_with("/sync/") { 65_536 } else { 8_192 },
-        )
-        .collect()
-        .await
-        .map_err(|_| "public bootstrap response exceeds limit or is incomplete")?
-        .to_bytes();
+        let (parts, body) = reply.into_parts();
+        let bytes = Limited::new(body, if path.starts_with("/sync/") { 65_536 } else { 8_192 })
+            .collect()
+            .await
+            .map_err(|_| "public bootstrap response exceeds limit or is incomplete")?
+            .to_bytes();
+        if path.starts_with("/api/v1/orgs") {
+            verify_organization_response(method, path, &parts.headers, &bytes)?;
+        }
         Ok(Zeroizing::new(bytes.to_vec()))
     }
+}
+
+fn verify_organization_response(
+    method: &str,
+    path: &str,
+    headers: &axum::http::HeaderMap,
+    bytes: &[u8],
+) -> Result<()> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    if header("x-request-id").is_none_or(str::is_empty) || headers.contains_key("set-cookie") {
+        return Err("team response metadata invalid");
+    }
+    if method == "GET" && path == "/api/v1/orgs" {
+        OrganizationPage::from_http_json(bytes, header("cache-control"), header("pragma"))
+            .map_err(|_| "team discovery response invalid")?;
+    } else {
+        OrganizationResource::from_http_json(
+            bytes,
+            header("etag"),
+            header("cache-control"),
+            header("pragma"),
+        )
+        .map_err(|_| "team Resource response invalid")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

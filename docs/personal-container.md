@@ -29,12 +29,13 @@ terminates TLS directly on container port 8443; no reverse proxy is required.
 
 Run from the server repository root. Copy `deploy/.env.example` to `deploy/.env`, then set:
 
-| Variable                | Value                                                                  |
-| ----------------------- | ---------------------------------------------------------------------- |
-| `SCOPLEN_SERVER_HOST`   | Certificate DNS name, without a scheme, port, or path. Required.       |
+| Variable | Value |
+| --- | --- |
+| `SCOPLEN_SERVER_HOST` | Certificate DNS name, without a scheme, port, or path. Required. |
 | `SCOPLEN_TLS_DIRECTORY` | Absolute path of the existing private certificate directory. Required. |
-| `SCOPLEN_HTTPS_PORT`    | Public HTTPS port mapped to container port 8443. Default: `8443`.      |
-| `SCOPLEN_BIND_ADDRESS`  | Host interface for the published port. Default: `0.0.0.0`.             |
+| `SCOPLEN_HTTPS_PORT` | Public HTTPS port mapped to container port 8443. Default: `8443`. |
+| `SCOPLEN_BIND_ADDRESS` | Host interface for the published port. Default: `0.0.0.0`. |
+| `SPL_ORGANIZATIONS_ALLOW_CREATION` | Allow authenticated Accounts to create teams: `true` or `false`. Default: `false`. |
 
 The default Compose project name is `scoplen-personal`. For another independent deployment,
 supply the same explicit `--project-name` in every command so its data volume stays separate.
@@ -129,6 +130,16 @@ its deployment lease remains held until the container process exits. Wait for th
 before any offline copy. Do not delete `deployment.lease` from the data volume to bypass an
 occupied lock.
 
+To opt in to Account-owned team creation, set `SPL_ORGANIZATIONS_ALLOW_CREATION=true` in
+`deploy/.env` and run the same `up --detach --no-build` command to recreate the service with
+the new environment. Changing this policy does not require an image rebuild or a new data
+volume. Only the exact lowercase values `true` and `false` are valid; another value stops
+server configuration validation before startup. Returning to `false` blocks new creation
+while preserving current membership discovery and exact creation confirmation. Team creation
+adds the Account as its initial owner without moving its Personal data or granting Operator
+access. Invitations, team assets, Shared vaults, dissolution and team administration remain
+separate work; the Operator console has no team-creation form.
+
 Before upgrading an existing SQLite schema, the server creates and verifies a standalone
 `pre-migration-<UUIDv7>.sqlite` snapshot in `/var/lib/spl/scoplen.sqlite.migration-snapshots/`.
 Committed WAL pages are included. The three newest completed snapshots are retained; fresh empty
@@ -184,14 +195,21 @@ checks image/data-volume permissions, non-root writes, TLS trust and hostname re
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
 Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Its separate
-`verify-account` invocation registers a randomly generated password Account and writes a signed,
+`verify-account --with-team` invocation registers a randomly generated password Account and writes a signed,
 encrypted Host through the first enrolled Device. A fresh independent Device derives the same
 password credential, verifies and decrypts the complete signed bootstrap, completes admission,
-authenticates and refreshes its session, then opens its own ARK and Personal vault-key wraps.
+authenticates and refreshes its session. With the check's explicit creation opt-in, that Device
+confirms empty membership discovery, creates a team with its Account as the sole owner,
+reads and lists the same team, and explicitly confirms the original idempotency key without
+creating another team. It refreshes its session again, then opens its own ARK and Personal vault-key wraps.
 It verifies and decrypts the retained Host, edits and uploads it with its own Device signature;
 the original Device refreshes and verifies the returned edit. Only these public HTTPS operations
-can produce the separate content-free `account-acceptance.json` receipt. No SQL identity seed or
-internal server coordinator is used. Repeated bootstrap and Account checks are rejected without
+can produce the separate content-free `account-acceptance.json` receipt. Completing the team
+operations and subsequent Personal sync also produces a distinct content-free
+`team-acceptance.json` receipt; the existing Account receipt and descriptor are unchanged.
+Before startup, Compose rendering checks the default `false`, explicit `true` and unchanged
+invalid input; the server's configuration tests verify invalid booleans are rejected.
+No SQL identity seed or internal server coordinator is used. Repeated bootstrap and Account checks are rejected without
 changing their completed artifacts. The controller then restarts the service and verifies unchanged public
 keyrings and completed setup state. Every HTTPS exchange has a whole-request deadline and
 operations are not retried automatically.

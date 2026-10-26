@@ -50,6 +50,10 @@ export function assertAccountAcceptance(receipt) {
   assert.deepEqual(receipt, { account_password_sync_verified: true });
 }
 
+export function assertTeamAcceptance(receipt) {
+  assert.deepEqual(receipt, { team_creation_personal_sync_verified: true });
+}
+
 export function describeCheckFailure({
   phase,
   error,
@@ -545,6 +549,7 @@ export async function checkPersonalContainer(driverPath) {
       SCOPLEN_HTTPS_PORT: String(port),
       SCOPLEN_BIND_ADDRESS: "127.0.0.1",
       SCOPLEN_TLS_DIRECTORY: join(fixture, "tls").replaceAll("\\", "/"),
+      SPL_ORGANIZATIONS_ALLOW_CREATION: "true",
     };
     const emptyEnv = join(directory, "compose.env");
     const override = join(directory, "compose.override.json");
@@ -575,6 +580,24 @@ export async function checkPersonalContainer(driverPath) {
     const compose = async (args, options = {}) =>
       await docker([...composeArgs, ...args], { ...options, environment });
     await compose(["config", "--quiet"]);
+    for (const value of [undefined, "true", "invalid"]) {
+      const rendering = { ...environment };
+      if (value === undefined)
+        delete rendering.SPL_ORGANIZATIONS_ALLOW_CREATION;
+      else rendering.SPL_ORGANIZATIONS_ALLOW_CREATION = value;
+      const result = await docker(
+        [...composeArgs, "config", "--format", "json"],
+        {
+          environment: rendering,
+        },
+      );
+      assert.equal(
+        JSON.parse(result.stdout).services.server.environment
+          .SPL_ORGANIZATIONS_ALLOW_CREATION,
+        value ?? "false",
+        "Compose must preserve the explicit creation policy for server validation",
+      );
+    }
     for (const name of ["SCOPLEN_SERVER_HOST", "SCOPLEN_TLS_DIRECTORY"]) {
       const missing = { ...environment };
       delete missing[name];
@@ -926,18 +949,27 @@ export async function checkPersonalContainer(driverPath) {
     assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
 
     progress("public Account password entry and encrypted sync");
-    await command(driver, ["verify-account", fixture]);
+    await command(driver, ["verify-account", fixture, "--with-team"]);
     const accountAcceptancePath = join(fixture, "account-acceptance.json");
     const accountAcceptanceBytes = await readFile(accountAcceptancePath);
     assertAccountAcceptance(JSON.parse(accountAcceptanceBytes));
-    const accountRepeat = await command(driver, ["verify-account", fixture], {
-      allowFailure: true,
-    });
+    const teamAcceptancePath = join(fixture, "team-acceptance.json");
+    const teamAcceptanceBytes = await readFile(teamAcceptancePath);
+    assertTeamAcceptance(JSON.parse(teamAcceptanceBytes));
+    assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
+    const accountRepeat = await command(
+      driver,
+      ["verify-account", fixture, "--with-team"],
+      {
+        allowFailure: true,
+      },
+    );
     assert(accountRepeat.error, "Account acceptance must not repeat");
     assert.deepEqual(
       await readFile(accountAcceptancePath),
       accountAcceptanceBytes,
     );
+    assert.deepEqual(await readFile(teamAcceptancePath), teamAcceptanceBytes);
     const paths = ["/.well-known/jwks.json", "/.well-known/operator-jwks.json"];
     const keys = [];
     for (const path of paths) {
@@ -1178,7 +1210,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, Account password entry, independent Device admission and encrypted Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

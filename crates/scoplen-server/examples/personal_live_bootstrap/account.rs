@@ -13,6 +13,9 @@ use scoplen_api::{
         AuthChallengeRequest, AuthChallengeResponse, AuthDeviceRequest, AuthRefreshRequest,
         AuthTokenResponse,
     },
+    organization::{
+        OrganizationCreateRequest, OrganizationListQuery, OrganizationPage, OrganizationResource,
+    },
     sync::{
         SyncAccountDeviceWrap, SyncAccountKeyBundle, SyncAccountKeyBundleUpdate,
         SyncSnapshotResponse, SyncVaultKeysResponse, SyncWrite, SyncWriteBatch,
@@ -558,7 +561,62 @@ async fn admitted_vault_key(
         .map_err(|_| "Personal vault-key decryption failed")
 }
 
-pub(super) async fn verify(https: &Https) -> Result<()> {
+async fn verify_team(
+    https: &Https,
+    device: &Device,
+    token: &AuthTokenResponse,
+    account_id: Uuid,
+) -> Result<()> {
+    let proof = Some((&device.keys.signing, Some(token.access_token.as_str())));
+    let bytes = https.exchange("GET", "/api/v1/orgs", b"", proof, 200).await?;
+    let before = OrganizationPage::from_json(&bytes)
+        .map_err(|_| "initial team discovery response invalid")?;
+    before
+        .validate_for_account(account_id, OrganizationListQuery::default())
+        .map_err(|_| "initial team discovery belongs to another Account")?;
+    if !before.items.is_empty() || before.next_cursor.is_some() {
+        return Err("new Account unexpectedly belongs to a team");
+    }
+    let request = OrganizationCreateRequest::new("Disposable HTTPS team")
+        .and_then(|request| request.to_json())
+        .map_err(|_| "team creation request invalid")?;
+    let key = Uuid::now_v7();
+    let bytes =
+        https.create_organization(&request, &device.keys.signing, &token.access_token, key).await?;
+    let created =
+        OrganizationResource::from_json(&bytes).map_err(|_| "created team Resource invalid")?;
+    created
+        .validate_for_account(account_id)
+        .map_err(|_| "created team belongs to another Account")?;
+    if created.name != "Disposable HTTPS team" || created.membership.roles != ["owner"] {
+        return Err("created team name or owner membership differs");
+    }
+    let bytes =
+        https.exchange("GET", &format!("/api/v1/orgs/{}", created.id), b"", proof, 200).await?;
+    if OrganizationResource::from_json(&bytes).map_err(|_| "team read response invalid")? != created
+    {
+        return Err("team read differs from creation");
+    }
+    let bytes =
+        https.create_organization(&request, &device.keys.signing, &token.access_token, key).await?;
+    if OrganizationResource::from_json(&bytes).map_err(|_| "team confirmation response invalid")?
+        != created
+    {
+        return Err("team confirmation differs from creation");
+    }
+    let bytes = https.exchange("GET", "/api/v1/orgs", b"", proof, 200).await?;
+    let after = OrganizationPage::from_json(&bytes)
+        .map_err(|_| "current team discovery response invalid")?;
+    after
+        .validate_for_account(account_id, OrganizationListQuery::default())
+        .map_err(|_| "current team discovery belongs to another Account")?;
+    if after.items != [created] || after.next_cursor.is_some() {
+        return Err("team confirmation duplicated or lost membership");
+    }
+    Ok(())
+}
+
+pub(super) async fn verify(https: &Https, with_team: bool) -> Result<()> {
     let account = Registration::new(&https.origin)?;
     account.register(https).await?;
     let first_token = account.device.authenticate(https).await?;
@@ -586,6 +644,12 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
     admit(https, &second, login, &snapshot, &bootstrap).await?;
     let token = second.authenticate(https).await?;
     let token = second.refresh(https, token).await?;
+    let token = if with_team {
+        verify_team(https, &second, &token, snapshot.account_id).await?;
+        second.refresh(https, token).await?
+    } else {
+        token
+    };
     let vault_key =
         admitted_vault_key(https, &second, &token, &snapshot, &bootstrap, account.device.id)
             .await?;
