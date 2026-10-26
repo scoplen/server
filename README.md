@@ -395,7 +395,9 @@ configured DNS name and public port. The runtime is distroless and non-root; ord
 the one-time Operator setup link, fresh Passkey sign-in, and explicit server sign out. Deployment and
 release gates remain Incomplete; this entry does not establish signed release artifacts,
 backup/restore, physical Passkey interoperability, or every `all`-role workflow.
-The disposable container check also runs a populated pre-migration SQLite database through the
+The disposable container check registers a real password Account, signs in an independent
+Device, refreshes its native session, and verifies encrypted Host synchronization in both
+directions through public HTTPS APIs. It also runs a populated pre-migration SQLite database through the
 current image, then starts a matching old server against an explicit offline snapshot recovery.
 It covers that upgrade path without implementing complete deployment backup/restore.
 
@@ -429,7 +431,9 @@ separate verification.
 For independent Personal integration tests, build the registered
 `personal_live_bootstrap` example and follow [the disposable HTTPS fixture procedure](docs/live-personal-fixture.md).
 It prepares a private localhost TLS configuration, then performs real public Operator
-Operator setup/login/logout and retired-route absence against the production server. SQLite is the default; PostgreSQL takes
+setup/login/logout and retired-route absence against the production server. Its separate
+`verify-account` command verifies password registration, independent Device admission and
+bidirectional encrypted Host sync without seeding identity tables. SQLite is the default; PostgreSQL takes
 a private disposable-database configuration. The caller owns the server process and database.
 
 The maintained WebAuthn verifier builds vendored OpenSSL. Install Perl and a native C toolchain

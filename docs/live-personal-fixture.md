@@ -6,8 +6,10 @@
 checkout. It uses the production `spl-server` binary, real localhost HTTPS, the maintained
 software passkey authenticator already used in server tests, and only public Operator
 setup/login/logout APIs and verifies the eight retired invitation/enrollment/pairing API routes
-and the old `/pair` landing return 404. It does not enroll a Personal device, seed identity tables,
-open SQL connections, manage a server process, create/drop a PostgreSQL database, or install a CA
+and the old `/pair` landing return 404. The separate `verify-account` command exercises real
+Account password entry and encrypted synchronization using two independently generated Devices.
+Neither command seeds identity tables, opens SQL connections, manages a server process,
+creates/drops a PostgreSQL database, or installs a CA
 in the operating system. Physical passkeys and browser interaction require separate coverage.
 
 Build both programs from this checkout; old cached example binaries are not a substitute:
@@ -153,8 +155,25 @@ After confirmed Operator setup, login, logout, eligible terminal logout confirma
 retired-route absence, the helper publishes `descriptor.json`, at most 8192 bytes, with exactly
 `disposable: true`, `origin: "https://localhost:<port>"`, `operator_lifecycle_verified: true`,
 and `ca_certificate` (an absolute PEM path). It contains no Account invitation or Device
-registration entitlement. Account registration/bootstrap and native Device restart acceptance
-require a later production implementation. Keep the descriptor private.
+registration entitlement. This consumer descriptor is unchanged by the separate Account check.
+Keep the descriptor private.
+
+For the production-container acceptance check, run `personal_live_bootstrap verify-account
+<fixture-directory>` once against the same running server. It registers a random password
+Account through D-128, authenticates the first Device and writes an encrypted Host. A fresh
+independent Device obtains password options, derives its credential, verifies/decrypts the
+complete signed bootstrap and completes public Device admission. It authenticates and refreshes,
+opens its own ARK and vault-key wraps, and verifies/decrypts the existing Host. Its signed edit is
+then verified/decrypted by the original Device after native refresh. Neither Device's private
+key is supplied to the other, and all server state changes use public HTTPS APIs.
+
+The command writes `account-check.started` exclusively before its first request. Only a complete
+successful flow writes the separate `account-acceptance.json` containing exactly
+`{"account_password_sync_verified":true}`. It never upgrades or edits `descriptor.json`.
+A failed or interrupted check cannot be retried; discard the caller-owned fixture and its
+database. Its random Account, encrypted objects and keys have the same disposable lifecycle;
+no credential is printed or exported. This check does not establish native desktop restart
+behavior, physical passkey interaction or complete deployment backup/restore.
 
 The production file-TLS listener supports TLS 1.3 and HTTP/2. Bootstrap requires TLS 1.3
 and HTTP/2, validates `localhost` against only this fixture CA, bounds response headers and

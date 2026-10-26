@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Verify real password Account registration/login, independent Device admission, native refresh
+  and bidirectional encrypted Host synchronization in the Personal production-container check.
+  The public-API consumer uses random disposable keys without identity seeding and writes a
+  separate content-free acceptance receipt, preserving existing integration descriptors.
+
 - Advance the SQLite upgrade and offline-recovery probe to the team membership migration
   while preserving its pinned historical image boundary.
 

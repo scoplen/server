@@ -152,8 +152,10 @@ self-hosted server, host agent, administration CLI, and web console.
 - A source-built Personal Compose entry bundles the console, uses externally provisioned HTTPS
   certificates, and retains SQLite and keys in a private volume under a non-root distroless
   runtime. Its public-API container check covers setup, fresh software-passkey login/logout,
-  retired-route absence and persisted restart state. Device/sync fixtures directly seed valid
-  signed legacy artifacts into owned test databases; production registration is not simulated. Complete deployment, backup/restore, upgrade, physical Passkey
+  retired-route absence and persisted restart state. Its independent Account check uses real
+  public password registration/login, fresh Device admission, native authentication/refresh
+  and signed encrypted Host synchronization in both directions, without SQL identity seeds.
+  Complete deployment, backup/restore, upgrade, physical Passkey
   interoperability and release artifacts still require their own validated gates.
 
 ## Review
