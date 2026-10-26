@@ -32,6 +32,9 @@ mod test_lost_commit;
 #[path = "../../scoplen-store/tests/support/passkey.rs"]
 mod test_passkey;
 #[cfg(test)]
+#[path = "../../scoplen-store/tests/support/pool_close.rs"]
+mod test_pool_close;
+#[cfg(test)]
 #[path = "../../scoplen-store/tests/support/mod.rs"]
 mod test_support;
 

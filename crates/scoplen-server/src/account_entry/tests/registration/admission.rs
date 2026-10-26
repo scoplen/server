@@ -505,7 +505,7 @@ async fn sqlite_admission_source_and_shared_proof_capacity_reject_before_body() 
     exchange(address, incomplete.as_bytes()).await.problem(429, "auth.rate_limited", true);
     assert_eq!(state.proof_jobs.available_permits(), 16);
     stop(server).await;
-    store.pool().close().await;
+    crate::test_pool_close::close(store.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
