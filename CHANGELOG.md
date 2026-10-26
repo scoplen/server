@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Forward the existing `SPL_ORGANIZATIONS_ALLOW_CREATION` setting through Personal Compose,
+  defaulting to `false`, with explicit opt-in instructions and strict boolean validation checks.
+  Extend the production-container public consumer through team creation, discovery and exact
+  confirmation before encrypted Personal Host sync, recording a separate content-free receipt.
+
 - Keep TOML configuration parse failures actionable without rendering source snippets or
   submitted values in server and bootstrap CLI diagnostics.
 

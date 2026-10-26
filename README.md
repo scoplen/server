@@ -395,9 +395,16 @@ configured DNS name and public port. The runtime is distroless and non-root; ord
 the one-time Operator setup link, fresh Passkey sign-in, and explicit server sign out. Deployment and
 release gates remain Incomplete; this entry does not establish signed release artifacts,
 backup/restore, physical Passkey interoperability, or every `all`-role workflow.
+Account-owned team creation is disabled by default. Set the existing
+`SPL_ORGANIZATIONS_ALLOW_CREATION=true` deployment variable and recreate the service to opt in;
+existing membership discovery and exact creation confirmation remain available when disabled.
+Creating a team preserves Personal data and does not grant Operator access. Invitations, team
+assets, Shared vaults, dissolution and team administration remain separate roadmap work.
 The disposable container check registers a real password Account, signs in an independent
 Device, refreshes its native session, and verifies encrypted Host synchronization in both
-directions through public HTTPS APIs. It also runs a populated pre-migration SQLite database through the
+directions through public HTTPS APIs after team creation, discovery and exact confirmation.
+Team verification writes its own content-free receipt, preserving the Account receipt and
+integration descriptor. It also runs a populated pre-migration SQLite database through the
 current image, then starts a matching old server against an explicit offline snapshot recovery.
 It covers that upgrade path without implementing complete deployment backup/restore.
 

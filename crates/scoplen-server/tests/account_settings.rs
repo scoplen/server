@@ -16,7 +16,7 @@ impl Fixture {
         Self(directory)
     }
 
-    fn validate(&self, enabled: &str, limit: &str) -> Output {
+    fn validate(&self, enabled: &str, limit: &str, creation: &str) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_spl-server"));
         command
             .args(["--role", "api", "--validate-config", "--config"])
@@ -26,7 +26,8 @@ impl Fixture {
             .env("SPL_TLS_MODE", "plain")
             .env("SPL_STORAGE_BACKEND", "sqlite")
             .env("SPL_ACCOUNTS_REGISTRATION_ENABLED", enabled)
-            .env("SPL_ACCOUNTS_USED_ACCOUNT_ID_LIMIT", limit);
+            .env("SPL_ACCOUNTS_USED_ACCOUNT_ID_LIMIT", limit)
+            .env("SPL_ORGANIZATIONS_ALLOW_CREATION", creation);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -46,7 +47,7 @@ impl Drop for Fixture {
 fn account_environment_overrides_are_validated_without_creating_material() {
     let fixture = Fixture::new();
     for (enabled, limit) in [("false", "25"), ("true", "1048576"), ("", "")] {
-        let output = fixture.validate(enabled, limit);
+        let output = fixture.validate(enabled, limit, "");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         assert!(!fixture.0.join("data").exists());
     }
@@ -62,9 +63,28 @@ fn invalid_account_environment_overrides_fail_before_startup() {
         ("true", "0", "accounts.used_account_id_limit"),
         ("false", "18446744073709551615", "accounts.used_account_id_limit"),
     ] {
-        let output = fixture.validate(enabled, limit);
+        let output = fixture.validate(enabled, limit, "");
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(!fixture.0.join("data").exists());
+    }
+}
+
+#[test]
+fn organization_creation_environment_requires_a_boolean_before_startup() {
+    let fixture = Fixture::new();
+    for creation in ["", "false", "true"] {
+        let output = fixture.validate("true", "25", creation);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!fixture.0.join("data").exists());
+    }
+    for creation in ["invalid", "TRUE", "1"] {
+        let output = fixture.validate("true", "25", creation);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("SPL_ORGANIZATIONS_ALLOW_CREATION must be true or false")
+        );
         assert!(!fixture.0.join("data").exists());
     }
 }

@@ -18,6 +18,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   assertAccountAcceptance,
+  assertTeamAcceptance,
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
@@ -40,6 +41,24 @@ test("Account acceptance requires the explicit completed password and sync recei
     { disposable: true, operator_lifecycle_verified: true },
   ]) {
     assert.throws(() => assertAccountAcceptance(receipt));
+  }
+});
+
+test("team acceptance requires its own completed creation and Personal sync receipt", () => {
+  assert.doesNotThrow(() =>
+    assertTeamAcceptance({ team_creation_personal_sync_verified: true }),
+  );
+  for (const receipt of [
+    undefined,
+    null,
+    {},
+    { team_creation_personal_sync_verified: false },
+    { team_creation_personal_sync_verified: "true" },
+    { account_password_sync_verified: true },
+    { disposable: true, operator_lifecycle_verified: true },
+    { team_creation_personal_sync_verified: true, team_name: "unexpected" },
+  ]) {
+    assert.throws(() => assertTeamAcceptance(receipt));
   }
 });
 

@@ -23,6 +23,9 @@ backend = "sqlite"
 registration_enabled = true
 used_account_id_limit = 1048576
 
+[organizations]
+allow_creation = false
+
 [storage.kms]
 backend = "local"
 
