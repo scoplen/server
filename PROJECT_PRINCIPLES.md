@@ -138,6 +138,12 @@ self-hosted server, host agent, administration CLI, and web console.
   Exact confirmation requires current membership and preserves the original mutation. Bounded
   worker maintenance retires only expired receipts. Authentication and refresh include every
   current active membership while retaining the original refresh-family scope ceiling.
+  Name-only settings use transaction-current Account/Device and tenant Membership verification,
+  canonical Cedar `manage_organization`, exact `orgs:write` and strong Resource preconditions.
+  Name, durable update time and organization audit commit atomically; matching unchanged names
+  do not write. Unconfirmed updates require an explicit read and reviewed edit, independently of
+  original-key creation confirmation. Custom-policy/group storage and broader Cedar graph
+  integration remain open.
   Team invitations, asset permissions, Shared vaults and dissolution remain open.
   The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key

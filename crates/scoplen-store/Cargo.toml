@@ -10,6 +10,7 @@ description = "Scoplen storage abstraction."
 workspace = true
 
 [dependencies]
+cedar-policy = "=4.4.0"
 scoplen-audit = { path = "../scoplen-audit" }
 scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0" }
 scoplen-identity = { path = "../scoplen-identity" }

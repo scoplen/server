@@ -4132,6 +4132,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "cedar-policy",
  "ciborium",
  "ed25519-dalek 2.2.0",
  "futures-util",

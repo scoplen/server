@@ -397,9 +397,10 @@ release gates remain Incomplete; this entry does not establish signed release ar
 backup/restore, physical Passkey interoperability, or every `all`-role workflow.
 Account-owned team creation is disabled by default. Set the existing
 `SPL_ORGANIZATIONS_ALLOW_CREATION=true` deployment variable and recreate the service to opt in;
-existing membership discovery and exact creation confirmation remain available when disabled.
+existing membership discovery, exact creation confirmation and name settings remain available
+when disabled.
 Creating a team preserves Personal data and does not grant Operator access. Invitations, team
-assets, Shared vaults, dissolution and team administration remain separate roadmap work.
+assets, Shared vaults, dissolution and remaining team administration remain separate roadmap work.
 The disposable container check registers a real password Account, signs in an independent
 Device, refreshes its native session, and verifies encrypted Host synchronization in both
 directions through public HTTPS APIs after team creation, discovery and exact confirmation.
@@ -656,8 +657,22 @@ the team name and the caller's own membership, ordered by team id with bounded c
 Absent, foreign and inactive memberships share the same 404 response. Device authentication and
 refresh include every current active team in the JWT `org` snapshot; existing refresh families
 keep their original scope ceiling, so a fresh Device exchange is needed for the new
-`orgs:create` and `orgs:read` scopes. Creating a team preserves the Account and its Personal
-vault. Invitations, asset permissions, team vaults and dissolution remain separate work.
+`orgs:create`, `orgs:read` and `orgs:write` scopes. Creating a team preserves the Account and its
+Personal vault.
+
+`PATCH /api/v1/orgs/{org}` changes only the team name. Send `{"data":{"name":"Operations"}}`
+with `orgs:write` and the exact current Resource ETag in one strong `If-Match` header. Current
+Account, Device and tenant Membership are checked inside the transaction; the canonical Cedar
+`manage_organization` action permits the current Owner or Administrator. Other built-in roles
+cannot rename a team, and creation policy does not disable name settings. A missing precondition
+returns 428, a malformed one returns 400, and an authorized stale edit returns 412. Read the
+current Resource and review another edit after a conflict. An unchanged name with a matching
+ETag returns the current Resource without changing its time or audit. A changed name, durable
+update time and attributable organization audit commit together. All team projections retain
+the later Organization/Membership update time. An unknown PATCH commit returns 503 with
+`changed: true, retryable: false`; read the team before another explicit edit, without automatic
+mutation replay. This is independent of original-key creation confirmation. Invitations, asset
+permissions, team vaults and dissolution remain separate work.
 
 Server integration tests seed real signed legacy Account/Device artifacts directly into owned
 SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator login, public

@@ -55,6 +55,12 @@ const ORGANIZATIONS: TableSpec = TableSpec {
             nullable: false,
             primary_key: false,
         },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
     ],
     foreign_keys: &[],
     indexes: &[],
@@ -3034,6 +3040,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261026000000_organization_memberships.sql");
     const POSTGRES_ORGANIZATION_MEMBERSHIPS: &str =
         include_str!("../migrations/postgres/20261026000000_organization_memberships.sql");
+    const SQLITE_ORGANIZATION_UPDATE_TIME: &str =
+        include_str!("../migrations/sqlite/20261026010000_organization_update_time.sql");
+    const POSTGRES_ORGANIZATION_UPDATE_TIME: &str =
+        include_str!("../migrations/postgres/20261026010000_organization_update_time.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -3085,6 +3095,7 @@ mod tests {
             SQLITE_ACCOUNT_OPERATION_RECEIPTS,
             SQLITE_ACCOUNT_PASSWORD_LOGIN,
             SQLITE_ORGANIZATION_MEMBERSHIPS,
+            SQLITE_ORGANIZATION_UPDATE_TIME,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -3116,6 +3127,7 @@ mod tests {
             POSTGRES_ACCOUNT_OPERATION_RECEIPTS,
             POSTGRES_ACCOUNT_PASSWORD_LOGIN,
             POSTGRES_ORGANIZATION_MEMBERSHIPS,
+            POSTGRES_ORGANIZATION_UPDATE_TIME,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

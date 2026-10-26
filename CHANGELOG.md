@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add name-only team settings on SQLite and PostgreSQL through current tenant Membership and
+  canonical Cedar authorization. Strong If-Match prevents stale edits; unchanged names are
+  no-ops, and name/time/audit commit together. Preserve creation-confirmation recovery while
+  uncertain updates require an explicit read. Forward-migrate retained Organization update
+  times and preserve existing refresh-family scope ceilings.
+
 - Verify Account-owned team and encrypted Host persistence through the Personal container's
   real service restart. Retain the original Device session in memory, refresh it before team
   read/discovery and exact creation confirmation, and write a distinct content-free restart receipt.

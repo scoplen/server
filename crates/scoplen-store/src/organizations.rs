@@ -22,6 +22,8 @@ use crate::{
     },
 };
 
+mod name;
+
 /// Fixed public classes without submitted names, credentials or database diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum OrganizationStoreError {
@@ -31,6 +33,10 @@ pub enum OrganizationStoreError {
     AuthenticationRequired,
     #[error("organization creation is disabled")]
     CreationDisabled,
+    #[error("organization permission denied")]
+    PermissionDenied,
+    #[error("organization precondition failed")]
+    PreconditionFailed,
     #[error("organization not found")]
     NotFound,
     #[error("organization creation conflicts with the original request")]
@@ -39,6 +45,8 @@ pub enum OrganizationStoreError {
     StorageUnavailable,
     #[error("organization creation commit outcome is unknown")]
     CommitOutcomeUnknown,
+    #[error("organization update commit outcome is unknown")]
+    UpdateCommitOutcomeUnknown,
 }
 
 impl From<sqlx::Error> for OrganizationStoreError {
@@ -231,7 +239,7 @@ macro_rules! organizations {
                     .execute(&mut *tx).await?;
                 let organization=Uuid::now_v7();
                 let membership=Uuid::now_v7();
-                sqlx::query("INSERT INTO organizations (id,name,created_at_ms) VALUES ($1,$2,$3)")
+                sqlx::query("INSERT INTO organizations (id,name,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$3)")
                     .bind(organization.as_bytes().as_slice()).bind(&request.name).bind(now)
                     .execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO organization_memberships (id,organization_id,account_id,status,roles_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,'active','[\"owner\"]',$4,$4)")
@@ -262,7 +270,7 @@ macro_rules! organizations {
                 tx:&mut Transaction<'_,$db>, account:&[u8;16], organization:&[u8],
             )->Result<OrganizationResource,OrganizationStoreError>{
                 let length=if $postgres {"octet_length(o.name)"}else{"length(CAST(o.name AS BLOB))"};
-                let query=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,m.updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND m.status='active'");
+                let query=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND m.status='active'");
                 let row=sqlx::query(&query).bind(organization).bind(account.as_slice())
                     .fetch_optional(&mut **tx).await?.ok_or(OrganizationStoreError::NotFound)?;
                 resource(&row)
@@ -296,7 +304,7 @@ macro_rules! organizations {
                 check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
                 let cursor=query.cursor.unwrap_or(Uuid::nil());
                 let length=if $postgres {"octet_length(o.name)"}else{"length(CAST(o.name AS BLOB))"};
-                let sql=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,m.updated_at_ms FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.id>$2 ORDER BY o.id LIMIT $3");
+                let sql=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.id>$2 ORDER BY o.id LIMIT $3");
                 let rows=sqlx::query(&sql).bind(expected.account_id.as_slice()).bind(cursor.as_bytes().as_slice())
                     .bind(i64::from(query.limit)+1).fetch_all(&mut *tx).await?;
                 let more=rows.len()>usize::from(query.limit);
