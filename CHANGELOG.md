@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Mount Account-owned team creation and current-membership list/read on SQLite and PostgreSQL.
+  Creation defaults to disabled and atomically persists one initial owner, organization audit
+  and 24-hour idempotency receipt. Exact confirmation returns current team state without
+  duplicate effects; uncertain commits retain original-key recovery. Bounded worker cleanup
+  retires expired receipts without removing team state. Device authentication and refresh now
+  sign complete current active memberships while preserving existing refresh scope ceilings.
+  Invitations, asset authorization, Shared vaults and dissolution remain separate work.
+
 - Return `404 sync.object_not_found` for absent and foreign Personal vault ids after enrolled
   Device authentication and route-scope checks. SQLite/PostgreSQL HTTP regressions exercise
   vault keys, changes, snapshots, versions, object writes and ACKs with real tokens and DPoP.

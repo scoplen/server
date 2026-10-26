@@ -129,6 +129,13 @@ self-hosted server, host agent, administration CLI, and web console.
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
   and Personal sync continue. Complete password-account acceptance remains incomplete.
+  Account-owned team creation and current-membership discovery use the same enrolled Device
+  boundary, independently of asset authorization. Explicit creation policy defaults to closed;
+  one transaction persists the team, sole initial owner, organization audit and 24-hour receipt.
+  Exact confirmation requires current membership and preserves the original mutation. Bounded
+  worker maintenance retires only expired receipts. Authentication and refresh include every
+  current active membership while retaining the original refresh-family scope ceiling.
+  Team invitations, asset permissions, Shared vaults and dissolution remain open.
   The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

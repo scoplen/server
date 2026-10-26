@@ -594,7 +594,25 @@ Missing key state, corrupt collections and capacity failures return a non-cachea
 partial data. The read accepts no body, query, `Idempotency-Key` or `If-Match`, and returns no ETag
 or pagination fields. Names and platforms remain signed account claims. Remaining device
 lifecycle mutations remain separate work. The protected Personal
-sync subset above also uses these credentials; other control-plane APIs remain unmounted.
+sync subset above also uses these credentials.
+
+`POST /api/v1/orgs`, `GET /api/v1/orgs` and `GET /api/v1/orgs/{org}` provide team creation and
+the caller Account's current active memberships on SQLite and PostgreSQL. Creation is disabled
+by default; enable it with `[organizations] allow_creation = true` in TOML or
+`SPL_ORGANIZATIONS_ALLOW_CREATION=true`. This policy affects only new creation. Each creation
+atomically persists the team, its sole initial `owner`, an organization audit event and a
+24-hour receipt. Supply one UUIDv7 `Idempotency-Key` and retain the original request for retry.
+An exact replay returns the current Resource without duplicating the team or audit, including
+after creation is disabled. An unknown commit requires confirmation with that same key and
+payload during the original receipt lifetime. Worker maintenance removes at most 100 expired
+receipts per heartbeat and preserves teams, memberships and audit events.
+Discovery uses the current Account membership rather than an asset permission. It returns only
+the team name and the caller's own membership, ordered by team id with bounded cursor pages.
+Absent, foreign and inactive memberships share the same 404 response. Device authentication and
+refresh include every current active team in the JWT `org` snapshot; existing refresh families
+keep their original scope ceiling, so a fresh Device exchange is needed for the new
+`orgs:create` and `orgs:read` scopes. Creating a team preserves the Account and its Personal
+vault. Invitations, asset permissions, team vaults and dissolution remain separate work.
 
 Server integration tests seed real signed legacy Account/Device artifacts directly into owned
 SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator login, public

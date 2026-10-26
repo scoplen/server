@@ -13,6 +13,7 @@ mod device_auth;
 mod error;
 mod operator_auth;
 mod operator_logout;
+mod organizations;
 mod personal_sync;
 mod private_material;
 mod roles;
@@ -36,7 +37,7 @@ mod test_support;
 
 pub use config::{
     AccountSettings, Config, ConfigError, ConsoleSettings, KmsSettings, ObjectStorageSettings,
-    SecretValue, StorageSettings, TlsMode,
+    OrganizationSettings, SecretValue, StorageSettings, TlsMode,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};

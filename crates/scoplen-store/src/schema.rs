@@ -60,6 +60,118 @@ const ORGANIZATIONS: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ORGANIZATION_MEMBERSHIPS: TableSpec = TableSpec {
+    name: "organization_memberships",
+    columns: &[
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "status", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "roles_json",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_memberships_account",
+        columns: &["account_id", "organization_id"],
+    }],
+};
+
+const ORGANIZATION_CREATION_RECEIPTS: TableSpec = TableSpec {
+    name: "organization_creation_receipts",
+    columns: &[
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "idempotency_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "request_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_creation_receipts_expiry",
+        columns: &["expires_at_ms"],
+    }],
+};
+
 const AUDIT_EVENTS: TableSpec = TableSpec {
     name: "audit_events",
     columns: &[
@@ -2396,6 +2508,8 @@ const ACCOUNT_ADMISSION_CAPABILITIES: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    ORGANIZATION_MEMBERSHIPS,
+    ORGANIZATION_CREATION_RECEIPTS,
     ACCOUNT_OPERATION_RECEIPTS,
     ACCOUNT_PASSWORD_ATTEMPTS,
     ACCOUNT_ADMISSION_CAPABILITIES,
@@ -2916,6 +3030,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261025080000_account_password_login.sql");
     const POSTGRES_ACCOUNT_PASSWORD_LOGIN: &str =
         include_str!("../migrations/postgres/20261025080000_account_password_login.sql");
+    const SQLITE_ORGANIZATION_MEMBERSHIPS: &str =
+        include_str!("../migrations/sqlite/20261026000000_organization_memberships.sql");
+    const POSTGRES_ORGANIZATION_MEMBERSHIPS: &str =
+        include_str!("../migrations/postgres/20261026000000_organization_memberships.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -2966,6 +3084,7 @@ mod tests {
             SQLITE_ACCOUNT_ENTRY_STATE,
             SQLITE_ACCOUNT_OPERATION_RECEIPTS,
             SQLITE_ACCOUNT_PASSWORD_LOGIN,
+            SQLITE_ORGANIZATION_MEMBERSHIPS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -2996,6 +3115,7 @@ mod tests {
             POSTGRES_ACCOUNT_ENTRY_STATE,
             POSTGRES_ACCOUNT_OPERATION_RECEIPTS,
             POSTGRES_ACCOUNT_PASSWORD_LOGIN,
+            POSTGRES_ORGANIZATION_MEMBERSHIPS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

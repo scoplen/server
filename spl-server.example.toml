@@ -31,6 +31,10 @@ registration_enabled = true
 # Deployment-lifetime capacity; startup must match its already admitted durable value.
 used_account_id_limit = 1048576
 
+[organizations]
+# Explicitly enable Account self-service team creation. Existing team discovery stays available.
+allow_creation = false
+
 [sync]
 # Positive platform-representable write bounds may be raised or lowered from these defaults.
 max_envelope_bytes = 266240

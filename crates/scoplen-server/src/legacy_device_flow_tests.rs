@@ -27,6 +27,8 @@ mod account_profile;
 mod key_publication;
 #[path = "personal_notify_tests.rs"]
 pub(super) mod notifications;
+#[path = "organization_tests.rs"]
+mod organizations;
 #[path = "personal_retention_tests.rs"]
 mod retention;
 
@@ -122,6 +124,14 @@ pub(super) async fn authenticate_device(
     device: Uuid,
     client: &P256SigningKey,
 ) -> String {
+    authenticate_tokens(f, device, client).await.access_token
+}
+
+async fn authenticate_tokens(
+    f: &Fixture,
+    device: Uuid,
+    client: &P256SigningKey,
+) -> AuthTokenResponse {
     let body = AuthChallengeRequest::new(device).expect("challenge").to_json().expect("JSON");
     let reply = http(
         f.address,
@@ -150,7 +160,7 @@ pub(super) async fn authenticate_device(
     .await;
     assert_eq!(reply.status, 200);
     assert!(reply.header("set-cookie").is_none());
-    AuthTokenResponse::from_json(reply.text()).expect("native device token").access_token
+    AuthTokenResponse::from_json(reply.text()).expect("native device token")
 }
 
 async fn session_and_keys(
