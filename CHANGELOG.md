@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Advance the SQLite upgrade and offline-recovery probe to the team membership migration
+  while preserving its pinned historical image boundary.
+
 - Validate mounted control-plane routes against the same pinned public API contract used by
   the server, with a regression check for CI checkout drift. Run team membership migrations
   and HTTP failure paths in separate PostgreSQL test databases.
