@@ -42,6 +42,7 @@ const failurePhases = new Set([
   "bundled console assets",
   "public Operator setup, Passkey login/logout and retired entry absence",
   "public Account password entry and encrypted sync",
+  "team membership and Personal Host after restart",
   "restart and persistent setup/key verification",
   "offline snapshot restore",
   "matching old image recovery",
@@ -55,6 +56,10 @@ export function assertAccountAcceptance(receipt) {
 
 export function assertTeamAcceptance(receipt) {
   assert.deepEqual(receipt, { team_creation_personal_sync_verified: true });
+}
+
+export function assertTeamRestartAcceptance(receipt) {
+  assert.deepEqual(receipt, { team_membership_restart_verified: true });
 }
 
 export function assertDoctorAcceptance(result, healthy) {
@@ -402,6 +407,59 @@ async function request(origin, path, ca, servername = "localhost") {
     );
     outgoing.on("error", reject);
   });
+}
+
+export async function runTeamRestart({
+  fixture,
+  run,
+  restart,
+  timeout = 120_000,
+}) {
+  for (const name of ["team-restart.ready", "team-restart.resume"]) {
+    try {
+      await lstat(join(fixture, name));
+      assert.fail("team restart signal already exists");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  const controller = new AbortController();
+  let settled = false;
+  const completed = run(controller.signal).finally(() => {
+    settled = true;
+  });
+  // Readiness polling also observes a driver that fails before publishing its marker.
+  completed.catch(() => {});
+  try {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      if (settled) {
+        await completed;
+        assert.fail("team restart driver exited before restart");
+      }
+      try {
+        assert.equal(
+          await readFile(join(fixture, "team-restart.ready"), "utf8"),
+          "ready\n",
+        );
+        break;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      assert(Date.now() < deadline, "team restart driver readiness timed out");
+      await new Promise((accept) => setTimeout(accept, 50));
+    }
+    await restart();
+    assert(!settled, "team restart driver exited before restart");
+    await writeFile(join(fixture, "team-restart.resume"), "resume\n", {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await completed;
+  } finally {
+    controller.abort();
+    await completed.catch(() => {});
+  }
 }
 
 export async function checkPersonalContainer(driverPath, doctorPath) {
@@ -1015,28 +1073,6 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     assert(repeat.error, "bootstrap must not repeat");
     assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
 
-    progress("public Account password entry and encrypted sync");
-    await command(driver, ["verify-account", fixture, "--with-team"]);
-    const accountAcceptancePath = join(fixture, "account-acceptance.json");
-    const accountAcceptanceBytes = await readFile(accountAcceptancePath);
-    assertAccountAcceptance(JSON.parse(accountAcceptanceBytes));
-    const teamAcceptancePath = join(fixture, "team-acceptance.json");
-    const teamAcceptanceBytes = await readFile(teamAcceptancePath);
-    assertTeamAcceptance(JSON.parse(teamAcceptanceBytes));
-    assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
-    const accountRepeat = await command(
-      driver,
-      ["verify-account", fixture, "--with-team"],
-      {
-        allowFailure: true,
-      },
-    );
-    assert(accountRepeat.error, "Account acceptance must not repeat");
-    assert.deepEqual(
-      await readFile(accountAcceptancePath),
-      accountAcceptanceBytes,
-    );
-    assert.deepEqual(await readFile(teamAcceptancePath), teamAcceptanceBytes);
     const paths = ["/.well-known/jwks.json", "/.well-known/operator-jwks.json"];
     const keys = [];
     for (const path of paths) {
@@ -1049,56 +1085,99 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       keys.push(response.body);
     }
 
-    progress("restart and persistent setup/key verification");
-    await compose(["stop", "server"]);
-    assert.equal((await inspect("container", container)).State.ExitCode, 0);
-    progress("native doctor while stopped");
-    await doctor(false);
-    progress("restart and persistent setup/key verification");
-    await compose(["up", "--detach", "--no-build"]);
-    const restartDeadline = Date.now() + 60_000;
-    for (;;) {
-      try {
-        if ((await request(origin, "/readyz", ca)).status === 200) break;
-      } catch {}
-      assert(
-        Date.now() < restartDeadline,
-        "restarted production HTTPS readiness timed out",
-      );
-      await new Promise((accept) => setTimeout(accept, 500));
+    progress("public Account password entry and encrypted sync");
+    const accountArguments = [
+      "verify-account",
+      fixture,
+      "--with-team",
+      "--across-restart",
+    ];
+    await runTeamRestart({
+      fixture,
+      run: (signal) =>
+        command(driver, accountArguments, { signal, timeout: 300_000 }),
+      restart: async () => {
+        progress("restart and persistent setup/key verification");
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        progress("native doctor while stopped");
+        await doctor(false);
+        progress("restart and persistent setup/key verification");
+        await compose(["up", "--detach", "--no-build"]);
+        const restartDeadline = Date.now() + 60_000;
+        for (;;) {
+          try {
+            if ((await request(origin, "/readyz", ca)).status === 200) break;
+          } catch {}
+          assert(
+            Date.now() < restartDeadline,
+            "restarted production HTTPS readiness timed out",
+          );
+          await new Promise((accept) => setTimeout(accept, 500));
+        }
+        progress("native doctor after restart");
+        await doctor(true);
+        progress("restart and persistent setup/key verification");
+        for (const [index, path] of paths.entries()) {
+          const response = await request(origin, path, ca);
+          assert.equal(response.status, 200);
+          assert.deepEqual(
+            response.body,
+            keys[index],
+            "restart changed a persisted token keyring",
+          );
+        }
+        const recovery = await compose(
+          [
+            "exec",
+            "-T",
+            "server",
+            "/app/splctl",
+            "bootstrap",
+            "--reissue-pending",
+          ],
+          { allowFailure: true },
+        );
+        assert(
+          recovery.error &&
+            recovery.stderr.trim() ===
+              "splctl: operator setup error: operator setup authentication denied",
+          "completed Operator setup must survive restart",
+        );
+        assert.equal(
+          recovery.stdout,
+          "",
+          "completed setup disclosed a replacement link",
+        );
+        assert.equal(
+          (await inspect("container", container)).RestartCount,
+          0,
+          "service restarted unexpectedly",
+        );
+        progress("team membership and Personal Host after restart");
+      },
+    });
+    const acceptancePaths = [
+      ["account-acceptance.json", assertAccountAcceptance],
+      ["team-acceptance.json", assertTeamAcceptance],
+      ["team-restart-acceptance.json", assertTeamRestartAcceptance],
+    ];
+    const acceptanceBytes = [];
+    for (const [name, validate] of acceptancePaths) {
+      const bytes = await readFile(join(fixture, name));
+      validate(JSON.parse(bytes));
+      acceptanceBytes.push(bytes);
     }
-    progress("native doctor after restart");
-    await doctor(true);
-    progress("restart and persistent setup/key verification");
-    for (const [index, path] of paths.entries()) {
-      const response = await request(origin, path, ca);
-      assert.equal(response.status, 200);
+    assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
+    const accountRepeat = await command(driver, accountArguments, {
+      allowFailure: true,
+    });
+    assert(accountRepeat.error, "Account acceptance must not repeat");
+    for (const [index, [name]] of acceptancePaths.entries())
       assert.deepEqual(
-        response.body,
-        keys[index],
-        "restart changed a persisted token keyring",
+        await readFile(join(fixture, name)),
+        acceptanceBytes[index],
       );
-    }
-    const recovery = await compose(
-      ["exec", "-T", "server", "/app/splctl", "bootstrap", "--reissue-pending"],
-      { allowFailure: true },
-    );
-    assert(
-      recovery.error &&
-        recovery.stderr.trim() ===
-          "splctl: operator setup error: operator setup authentication denied",
-      "completed Operator setup must survive restart",
-    );
-    assert.equal(
-      recovery.stdout,
-      "",
-      "completed setup disclosed a replacement link",
-    );
-    assert.equal(
-      (await inspect("container", container)).RestartCount,
-      0,
-      "service restarted unexpectedly",
-    );
 
     progress("offline snapshot restore");
     await compose(["stop", "server"]);
@@ -1283,7 +1362,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, native refresh and team/Host persistence across restart, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

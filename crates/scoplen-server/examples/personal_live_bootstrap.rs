@@ -82,6 +82,9 @@ enum Command {
         /// Also verify team creation/discovery and Personal sync after joining a team.
         #[arg(long)]
         with_team: bool,
+        /// Retain Device credentials in memory across one controller-owned service restart.
+        #[arg(long, requires = "with_team")]
+        across_restart: bool,
     },
 }
 
@@ -125,7 +128,7 @@ async fn run(command: Command) -> Result<()> {
             bootstrap(&directory, server_log.as_deref()).await?;
             println!("fixture descriptor ready");
         }
-        Command::VerifyAccount { directory, with_team } => {
+        Command::VerifyAccount { directory, with_team, across_restart } => {
             let directory = canonical_fixture_directory(&directory)?;
             let config = fixture_config(&directory)?;
             let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
@@ -134,7 +137,12 @@ async fn run(command: Command) -> Result<()> {
                 &directory.join("account-check.started"),
                 "One attempt only; discard this fixture after any failure.",
             )?;
-            account::verify(&https, with_team).await?;
+            tokio::time::timeout(
+                Duration::from_secs(240),
+                account::verify(&https, with_team, across_restart.then_some(directory.as_path())),
+            )
+            .await
+            .map_err(|_| "Account check exceeded its deadline; abandon this fixture")??;
             write_private(
                 &directory.join("account-acceptance.json"),
                 "{\"account_password_sync_verified\":true}",
@@ -143,6 +151,12 @@ async fn run(command: Command) -> Result<()> {
                 write_private(
                     &directory.join("team-acceptance.json"),
                     "{\"team_creation_personal_sync_verified\":true}",
+                )?;
+            }
+            if across_restart {
+                write_private(
+                    &directory.join("team-restart-acceptance.json"),
+                    "{\"team_membership_restart_verified\":true}",
                 )?;
             }
             println!("public Account password and encrypted sync check passed");
@@ -729,6 +743,24 @@ mod tests {
                 fs::remove_dir_all(&self.0).expect("remove exclusively owned fixture");
             }
         }
+    }
+
+    #[test]
+    fn restart_acceptance_requires_team_verification() {
+        assert!(
+            Cli::try_parse_from(["consumer", "verify-account", "unused", "--across-restart"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "verify-account",
+                "unused",
+                "--with-team",
+                "--across-restart"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

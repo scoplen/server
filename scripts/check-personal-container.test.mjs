@@ -20,6 +20,7 @@ import {
   assertAccountAcceptance,
   assertDoctorAcceptance,
   assertTeamAcceptance,
+  assertTeamRestartAcceptance,
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
@@ -27,7 +28,201 @@ import {
   describeImageBuildFailure,
   describeWalHolderFailure,
   prepareRecoveryProbeContext,
+  runTeamRestart,
 } from "./check-personal-container.mjs";
+
+function teamTestDriver(fixture, source, signal, observe = () => {}) {
+  return new Promise((accept, reject) => {
+    let result;
+    const child = execFile(
+      process.execPath,
+      ["--input-type=module", "-e", source, fixture],
+      { signal, timeout: 5000, windowsHide: true },
+      (error, stdout, stderr) => {
+        result = { error, stdout, stderr };
+      },
+    );
+    observe(child);
+    child.once("close", () => {
+      if (result.error)
+        reject(
+          new Error("synthetic team driver failed", { cause: result.error }),
+        );
+      else accept(result);
+    });
+  });
+}
+
+const teamReady = `
+  import assert from "node:assert/strict";
+  import { readFile, writeFile } from "node:fs/promises";
+  import { join } from "node:path";
+  const fixture = process.argv[1];
+  const held = { proof: "synthetic-private-proof", refresh: "synthetic-private-refresh" };
+  await writeFile(join(fixture, "team-restart.ready"), "ready\\n", { flag: "wx" });
+  for (;;) {
+    try {
+      assert.equal(await readFile(join(fixture, "team-restart.resume"), "utf8"), "resume\\n");
+      break;
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    await new Promise((accept) => setTimeout(accept, 10));
+  }
+  assert.equal(held.refresh, "synthetic-private-refresh");
+  assert.equal(held.proof, "synthetic-private-proof");
+  process.stdout.write("team-test-complete\\n");
+`;
+
+test("team driver retains its process across the controller restart before resuming", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+  let restarts = 0;
+  let result;
+  try {
+    await runTeamRestart({
+      fixture,
+      run: async (signal) => {
+        result = await teamTestDriver(fixture, teamReady, signal);
+      },
+      restart: async () => {
+        restarts++;
+        await assert.rejects(readFile(join(fixture, "team-restart.resume")), {
+          code: "ENOENT",
+        });
+      },
+    });
+    assert.equal(restarts, 1);
+    assert.equal(result.stdout, "team-test-complete\n");
+    assert.equal(result.stderr, "");
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("team driver failure before readiness never restarts the server or publishes resume", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runTeamRestart({
+        fixture,
+        run: (signal) => teamTestDriver(fixture, "process.exit(7)", signal),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /synthetic team driver failed/,
+    );
+    assert.equal(restarts, 0);
+    await assert.rejects(readFile(join(fixture, "team-restart.resume")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("team readiness deadline aborts and reaps only its own stalled driver", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+  let child;
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runTeamRestart({
+        fixture,
+        timeout: 50,
+        run: (signal) =>
+          teamTestDriver(
+            fixture,
+            "setInterval(() => {}, 1000)",
+            signal,
+            (value) => {
+              child = value;
+            },
+          ),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /team restart driver readiness timed out/,
+    );
+    assert.equal(restarts, 0);
+    assert(child.exitCode !== null || child.signalCode !== null);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("controller restart failure aborts the retained team driver without publishing resume", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+  let child;
+  try {
+    await assert.rejects(
+      runTeamRestart({
+        fixture,
+        run: (signal) =>
+          teamTestDriver(fixture, teamReady, signal, (value) => {
+            child = value;
+          }),
+        restart: async () => {
+          throw new Error("synthetic restart failure");
+        },
+      }),
+      /synthetic restart failure/,
+    );
+    assert(child.exitCode !== null || child.signalCode !== null);
+    await assert.rejects(readFile(join(fixture, "team-restart.resume")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("stale team restart signals are preserved and never start a driver or restart", async () => {
+  for (const name of ["team-restart.ready", "team-restart.resume"]) {
+    const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+    let calls = 0;
+    try {
+      const path = join(fixture, name);
+      await writeFile(path, "synthetic-private-value", { flag: "wx" });
+      await assert.rejects(
+        runTeamRestart({
+          fixture,
+          run: async () => {
+            calls++;
+          },
+          restart: async () => {
+            calls++;
+          },
+        }),
+        /team restart signal already exists/,
+      );
+      assert.equal(calls, 0);
+      assert.equal(await readFile(path, "utf8"), "synthetic-private-value");
+    } finally {
+      await rm(fixture, { recursive: true });
+    }
+  }
+});
+
+test("a successful child exit without team readiness is not restart acceptance", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-team-restart-test-"));
+  let restarts = 0;
+  try {
+    await assert.rejects(
+      runTeamRestart({
+        fixture,
+        run: (signal) => teamTestDriver(fixture, "process.exit(0)", signal),
+        restart: async () => {
+          restarts++;
+        },
+      }),
+      /team restart driver exited before restart/,
+    );
+    assert.equal(restarts, 0);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
 
 test("doctor acceptance binds exit status and complete fixed findings to the service state", () => {
   const output = (healthy) =>
@@ -123,6 +318,23 @@ test("team acceptance requires its own completed creation and Personal sync rece
   ]) {
     assert.throws(() => assertTeamAcceptance(receipt));
   }
+});
+
+test("team restart acceptance requires its distinct completed membership receipt", () => {
+  assert.doesNotThrow(() =>
+    assertTeamRestartAcceptance({ team_membership_restart_verified: true }),
+  );
+  for (const receipt of [
+    undefined,
+    null,
+    {},
+    { team_membership_restart_verified: false },
+    { team_membership_restart_verified: "true" },
+    { team_creation_personal_sync_verified: true },
+    { account_password_sync_verified: true },
+    { team_membership_restart_verified: true, team_name: "unexpected" },
+  ])
+    assert.throws(() => assertTeamRestartAcceptance(receipt));
 });
 
 test("recovery probe follows the latest SQLite migration and preserves its old-image anchor", async () => {
