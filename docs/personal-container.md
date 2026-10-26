@@ -75,6 +75,27 @@ database and object store. The distroless image has no shell or curl; configurat
 is not a replacement for these readiness requests. The console at `/` and `/setup` must also
 load successfully. Missing/invalid console assets return 503 independently of `/readyz`.
 
+The image also carries the read-only diagnostic command:
+
+```text
+docker compose --env-file deploy/.env -f deploy/compose.personal.yaml exec -T server /app/splctl doctor
+```
+
+This runs inside the container and uses its effective configuration to check the configured
+public HTTPS host and port. That address must be reachable from the container; the check does
+not substitute the internal listener port. For a private CA, provision its trusted public PEM
+as `ca.pem` in the existing TLS directory and add
+`--ca-certificate /run/scoplen/tls/ca.pem` to the command. System trust remains enabled.
+The findings report configuration, health and readiness, with exit 0 for success and exit 1
+for failure. Other diagnostics are explicitly `NOT CHECKED`; this command does not start or
+repair a deployment, open storage or generate keys.
+
+To check from another machine, including while the container is stopped, use a native
+`splctl doctor --config <operator-config.toml>` with the same public host and port, and
+`--ca-certificate <trusted-ca.pem>` when needed. Normal `SPL_` overrides apply; `splctl` does
+not load Compose's `deploy/.env`. The source-build invocation is documented in the README.
+Reachability is established only from the machine running the command.
+
 ## First Operator session
 
 Read local bootstrap output with:
@@ -166,14 +187,15 @@ Custom object/KMS paths and the external TLS directory also need their own compl
 
 The `Personal container (Linux amd64)` CI job runs the same repository check that can be run
 locally with Node 24 and a local Linux-container Docker daemon. Build the registered native
-`personal_live_bootstrap` example, then pass its executable path:
+`personal_live_bootstrap` example and `splctl`, then pass their executable paths:
 
 ```text
 cargo build --locked -p scoplen-server --example personal_live_bootstrap
-node scripts/check-personal-container.mjs --bootstrap-driver <cargo-target-directory>/debug/examples/personal_live_bootstrap
+cargo build --locked -p scoplen-ctl --bin splctl
+node scripts/check-personal-container.mjs --bootstrap-driver <cargo-target-directory>/debug/examples/personal_live_bootstrap --doctor-cli <cargo-target-directory>/debug/splctl
 ```
 
-On Windows the native driver has an `.exe` extension. Use the actual target directory selected
+On Windows both native executables have an `.exe` extension. Use the actual target directory selected
 by Cargo. Unset `SPL_*` overrides and use a private temporary directory outside Git checkouts.
 The check uses a fresh disposable CA trusted only by its HTTPS clients; it does not change
 the operating system or browser trust store.
@@ -192,6 +214,13 @@ these observations do not establish the underlying cause.
 The check builds the production image, starts its own uniquely named Compose project, and
 checks image/data-volume permissions, non-root writes, TLS trust and hostname rejection,
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs
+native `splctl doctor` checks from the host against that same public HTTPS origin with the
+explicit fixture CA. Exact fixed configuration/health/readiness findings and exit 0 must pass
+before and after the existing restart; while stopped, the same command must return exit 1
+with fixed health/readiness connection failures. Each invocation preserves its input files
+and fixture entries and leaves its configured local data directory absent. This verifies the
+native CLI against the production server; it does not execute the image's bundled CLI.
+It performs
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
 Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Its separate

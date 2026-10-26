@@ -18,6 +18,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   assertAccountAcceptance,
+  assertDoctorAcceptance,
   assertTeamAcceptance,
   assertOwnedFixture,
   assertOwnedResource,
@@ -27,6 +28,68 @@ import {
   describeWalHolderFailure,
   prepareRecoveryProbeContext,
 } from "./check-personal-container.mjs";
+
+test("doctor acceptance binds exit status and complete fixed findings to the service state", () => {
+  const output = (healthy) =>
+    [
+      "PASS configuration: configuration and selected roles are valid.",
+      ...["health", "readiness"].map((check) =>
+        healthy
+          ? `PASS ${check}: trusted public HTTPS returned the expected response.`
+          : `FAIL ${check}: could not establish trusted HTTPS; check DNS, the public port, certificate chain and hostname, or explicitly supply the deployment CA.`,
+      ),
+      "NOT CHECKED remaining diagnostics: external reachability; ACME management; clock offset; local storage permissions and capacity; direct database/object/KMS probes; backup recency; schema and gateway/host-agent compatibility; console parity.",
+      "",
+    ].join("\n");
+  const success = { stdout: output(true), stderr: "" };
+  const stopped = { stdout: output(false), stderr: "", error: { code: 1 } };
+  assertDoctorAcceptance(success, true);
+  assertDoctorAcceptance(stopped, false);
+  assertDoctorAcceptance(
+    { ...success, stdout: success.stdout.replaceAll("\n", "\r\n") },
+    true,
+  );
+  for (const [result, healthy] of [
+    [success, false],
+    [stopped, true],
+    [{ ...success, error: { code: 1 } }, true],
+    [{ ...success, error: { code: null, killed: true } }, true],
+    [{ ...success, error: { signal: "SIGTERM" } }, true],
+    [{ ...success, stderr: "unexpected diagnostic" }, true],
+    [{ ...success, stdout: "PASS configuration\n" }, true],
+    [
+      { ...success, stdout: `${success.stdout}unexpected response body\n` },
+      true,
+    ],
+    [{ ...stopped, error: { code: 2 } }, false],
+    [{ ...stopped, error: { code: "ENOENT" } }, false],
+  ]) {
+    assert.throws(() => assertDoctorAcceptance(result, healthy));
+  }
+});
+
+test("container CLI requires both native consumers before preparing a fixture", async () => {
+  const result = await new Promise((accept) => {
+    execFile(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL("./check-personal-container.mjs", import.meta.url),
+        ),
+        "--bootstrap-driver",
+        "unused",
+      ],
+      { timeout: 10_000, windowsHide: true },
+      (error, stdout, stderr) => accept({ error, stdout, stderr }),
+    );
+  });
+  assert.equal(result.error?.code, 1);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr.trim(),
+    "usage: node scripts/check-personal-container.mjs --bootstrap-driver <native-personal_live_bootstrap> --doctor-cli <native-splctl>",
+  );
+});
 
 test("Account acceptance requires the explicit completed password and sync receipt", () => {
   assert.doesNotThrow(() =>

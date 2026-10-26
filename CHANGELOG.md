@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Check the native read-only `splctl doctor` against the Personal production container's
+  public HTTPS origin, including fixed findings, stopped-service failure and restart recovery.
+  Preserve diagnostic inputs and absent local deployment state, and document native and
+  bundled CLI operation without changing the diagnostic scope.
+
 - Forward the existing `SPL_ORGANIZATIONS_ALLOW_CREATION` setting through Personal Compose,
   defaulting to `false`, with explicit opt-in instructions and strict boolean validation checks.
   Extend the production-container public consumer through team creation, discovery and exact

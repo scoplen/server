@@ -407,6 +407,10 @@ Team verification writes its own content-free receipt, preserving the Account re
 integration descriptor. It also runs a populated pre-migration SQLite database through the
 current image, then starts a matching old server against an explicit offline snapshot recovery.
 It covers that upgrade path without implementing complete deployment backup/restore.
+The same check runs native `splctl doctor` against the container's configured public HTTPS
+origin, verifies fixed successful findings, stopped-service failure and restart recovery,
+and checks that the diagnostic inputs and absent local deployment state remain unchanged.
+See the procedure for running the bundled or native CLI against a deployment.
 
 ## Personal console assets
 

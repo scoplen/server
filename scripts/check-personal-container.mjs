@@ -35,6 +35,9 @@ const failurePhases = new Set([
   "matching old image build",
   "old schema seed",
   "SQLite migration snapshot",
+  "native doctor on production HTTPS",
+  "native doctor while stopped",
+  "native doctor after restart",
   "non-root Compose startup and trusted HTTPS",
   "bundled console assets",
   "public Operator setup, Passkey login/logout and retired entry absence",
@@ -52,6 +55,32 @@ export function assertAccountAcceptance(receipt) {
 
 export function assertTeamAcceptance(receipt) {
   assert.deepEqual(receipt, { team_creation_personal_sync_verified: true });
+}
+
+export function assertDoctorAcceptance(result, healthy) {
+  assert.equal(
+    result.error ? result.error.code : 0,
+    healthy ? 0 : 1,
+    "unexpected doctor exit code",
+  );
+  assert.equal(result.stderr, "", "doctor findings must use stdout only");
+  const connectionFailure =
+    "could not establish trusted HTTPS; check DNS, the public port, certificate chain and hostname, or explicitly supply the deployment CA.";
+  const expected = [
+    "PASS configuration: configuration and selected roles are valid.",
+    ...["health", "readiness"].map((check) =>
+      healthy
+        ? `PASS ${check}: trusted public HTTPS returned the expected response.`
+        : `FAIL ${check}: ${connectionFailure}`,
+    ),
+    "NOT CHECKED remaining diagnostics: external reachability; ACME management; clock offset; local storage permissions and capacity; direct database/object/KMS probes; backup recency; schema and gateway/host-agent compatibility; console parity.",
+    "",
+  ].join("\n");
+  assert.equal(
+    result.stdout.replaceAll("\r\n", "\n"),
+    expected,
+    "unexpected doctor findings",
+  );
 }
 
 export function describeCheckFailure({
@@ -375,7 +404,7 @@ async function request(origin, path, ca, servername = "localhost") {
   });
 }
 
-export async function checkPersonalContainer(driverPath) {
+export async function checkPersonalContainer(driverPath, doctorPath) {
   assert(
     !Object.keys(process.env).some((name) =>
       name.toUpperCase().startsWith("SPL_"),
@@ -386,6 +415,11 @@ export async function checkPersonalContainer(driverPath) {
   assert(
     (await lstat(driver)).isFile(),
     "bootstrap driver must be a native executable",
+  );
+  const doctorCli = await realpath(resolve(doctorPath));
+  assert(
+    (await lstat(doctorCli)).isFile(),
+    "doctor CLI must be a native executable",
   );
   const parent = await realpath(tmpdir());
   const run = randomUUID();
@@ -541,6 +575,36 @@ export async function checkPersonalContainer(driverPath) {
       });
     });
     await command(driver, ["prepare", fixture, "--port", String(port)]);
+    const doctorConfig = join(fixture, "server.toml");
+    const doctorCa = join(fixture, "ca.pem");
+    const doctor = async (healthy) => {
+      const before = (await readdir(fixture)).sort();
+      const configBefore = await readFile(doctorConfig);
+      const caBefore = await readFile(doctorCa);
+      await assert.rejects(lstat(join(fixture, "data")), { code: "ENOENT" });
+      const result = await command(
+        doctorCli,
+        ["doctor", "--config", doctorConfig, "--ca-certificate", doctorCa],
+        { allowFailure: true, timeout: 30_000 },
+      );
+      assertDoctorAcceptance(result, healthy);
+      assert.deepEqual(
+        (await readdir(fixture)).sort(),
+        before,
+        "doctor changed fixture entries",
+      );
+      assert.deepEqual(
+        await readFile(doctorConfig),
+        configBefore,
+        "doctor changed configuration",
+      );
+      assert.deepEqual(
+        await readFile(doctorCa),
+        caBefore,
+        "doctor changed CA input",
+      );
+      await assert.rejects(lstat(join(fixture, "data")), { code: "ENOENT" });
+    };
     const ca = await readFile(join(fixture, "ca.pem"));
     const origin = `https://localhost:${port}`;
     const environment = {
@@ -867,6 +931,9 @@ export async function checkPersonalContainer(driverPath) {
     await docker(["stop", "--time", "30", walHolderId]);
     assert.equal((await inspect("container", walHolderId)).State.ExitCode, 0);
 
+    progress("native doctor on production HTTPS");
+    await doctor(true);
+
     progress("bundled console assets");
     await docker([
       "cp",
@@ -985,6 +1052,9 @@ export async function checkPersonalContainer(driverPath) {
     progress("restart and persistent setup/key verification");
     await compose(["stop", "server"]);
     assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    progress("native doctor while stopped");
+    await doctor(false);
+    progress("restart and persistent setup/key verification");
     await compose(["up", "--detach", "--no-build"]);
     const restartDeadline = Date.now() + 60_000;
     for (;;) {
@@ -997,6 +1067,9 @@ export async function checkPersonalContainer(driverPath) {
       );
       await new Promise((accept) => setTimeout(accept, 500));
     }
+    progress("native doctor after restart");
+    await doctor(true);
+    progress("restart and persistent setup/key verification");
     for (const [index, path] of paths.entries()) {
       const response = await request(origin, path, ca);
       assert.equal(response.status, 200);
@@ -1210,7 +1283,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 
@@ -1219,14 +1292,18 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   const arguments_ = process.argv.slice(2);
-  if (arguments_.length !== 2 || arguments_[0] !== "--bootstrap-driver") {
+  if (
+    arguments_.length !== 4 ||
+    arguments_[0] !== "--bootstrap-driver" ||
+    arguments_[2] !== "--doctor-cli"
+  ) {
     console.error(
-      "usage: node scripts/check-personal-container.mjs --bootstrap-driver <native-personal_live_bootstrap>",
+      "usage: node scripts/check-personal-container.mjs --bootstrap-driver <native-personal_live_bootstrap> --doctor-cli <native-splctl>",
     );
     process.exitCode = 1;
   } else {
     try {
-      await checkPersonalContainer(arguments_[1]);
+      await checkPersonalContainer(arguments_[1], arguments_[3]);
     } catch {
       console.error(
         "Personal container check failed; private command output was not printed.",
