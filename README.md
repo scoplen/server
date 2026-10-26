@@ -470,6 +470,29 @@ For a local configuration check:
 cargo run -p scoplen-server -- --validate-config
 ```
 
+To diagnose a configured deployment through its public HTTPS origin:
+
+```text
+cargo run -p scoplen-ctl --bin splctl -- doctor --config spl-server.toml
+```
+
+The configuration file must exist; normal `SPL_` overrides still apply. The command validates
+configuration and selected roles, then requests `/healthz` and `/readyz` using system certificate
+trust. For a private deployment CA, add `--ca-certificate deployment-ca.pem`; this adds trust
+without disabling certificate or hostname verification. CA input is limited to 64 KiB and 16
+PEM certificates. No redirects, environment proxies or automatic retries are used. Each request
+has a ten-second total deadline, a three-second connection timeout and a five-second read timeout;
+response bodies are limited to 1,024 bytes. The CLI reports fixed `PASS`, `FAIL` and `NOT CHECKED`
+findings without printing configuration values or network response bodies. Exit 0 means all
+included checks passed, exit 1 means a check failed, and invalid CLI usage exits 2.
+
+This first diagnostic slice reads configuration and optional CA files without opening storage,
+generating keys or starting the deployment. Readiness covers only dependencies checked by the
+existing endpoint. The remaining diagnostics are explicitly reported as unchecked, including
+external reachability, ACME management, clock offset, storage and KMS probes, backups, schema
+and agent compatibility, and console parity. Complete administration and diagnostics remain
+roadmap work.
+
 Run `cargo run -p scoplen-server -- --help` for role selection and configuration options. The
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM

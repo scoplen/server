@@ -12,8 +12,18 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+reqwest.workspace = true
 scoplen-server = { path = "../scoplen-server" }
 tokio.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+futures-util.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
