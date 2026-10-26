@@ -159,6 +159,8 @@ async fn sqlite_independent_pools_clock_policy_cleanup_and_unknown_commit() {
 macro_rules! suppressed_mutation_checks {
     ($store:expr, $postgres:expr) => {{
         let store = &$store;
+        // Reusing one DDL connection keeps SQLite's schema cache current across trigger replacement.
+        let mut fault_connection = store.pool().acquire().await.unwrap();
         let now = 1_000_000_000 * TOKEN_SCALE;
         for (table, event) in [
             ("sync_write_admission", "UPDATE OF tokens"),
@@ -172,7 +174,7 @@ macro_rules! suppressed_mutation_checks {
             } else {
                 format!("CREATE TRIGGER suppress_admission_mutation BEFORE {event} ON {table} BEGIN SELECT RAISE(IGNORE); END")
             };
-            sqlx::raw_sql(&create).execute(store.pool()).await.unwrap();
+            sqlx::raw_sql(&create).execute(&mut *fault_connection).await.unwrap();
             assert!(matches!(
                 store.admit_sync_write_with_clock([2;16],limits(1,1),Clock::Fixed(now+61*TOKEN_SCALE)).await,
                 Err(SyncWriteAdmissionError::InvalidState)
@@ -187,7 +189,7 @@ macro_rules! suppressed_mutation_checks {
             } else {
                 "DROP TRIGGER suppress_admission_mutation".to_owned()
             };
-            sqlx::raw_sql(&drop).execute(store.pool()).await.unwrap();
+            sqlx::raw_sql(&drop).execute(&mut *fault_connection).await.unwrap();
         }
     }};
 }
