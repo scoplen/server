@@ -563,6 +563,130 @@ async fn admitted_vault_key(
         .map_err(|_| "Personal vault-key decryption failed")
 }
 
+struct PersonalConsumer {
+    account: Registration,
+    first_token: AuthTokenResponse,
+    device: Device,
+    token: AuthTokenResponse,
+    snapshot: AccountBootstrapSnapshot,
+    bootstrap: PasswordBootstrap,
+    object: Object,
+}
+
+impl PersonalConsumer {
+    async fn new(https: &Https) -> Result<Self> {
+        let account = Registration::new(&https.origin)?;
+        account.register(https).await?;
+        let first_token = account.device.authenticate(https).await?;
+        let object = host(account.device.id)?;
+        upload(
+            https,
+            &account.device,
+            &first_token,
+            account.payload.personal_vault_id,
+            &account.vault_key,
+            &object,
+            None,
+        )
+        .await?;
+        let (login, snapshot, bootstrap) =
+            password_login(https, &account.payload.username, account.password.clone()).await?;
+        if snapshot.account_id != account.payload.account_id
+            || snapshot.personal_vault_id != account.payload.personal_vault_id
+            || snapshot.account_signing_public_key != account.payload.account_signing_public_key
+        {
+            return Err("Independent password login recovered a different Account");
+        }
+        let device = Device::new()?;
+        admit(https, &device, login, &snapshot, &bootstrap).await?;
+        let token = device.authenticate(https).await?;
+        let token = device.refresh(https, token).await?;
+        Ok(Self { account, first_token, device, token, snapshot, bootstrap, object })
+    }
+
+    async fn exchange(mut self, https: &Https) -> Result<Self> {
+        let vault_key = admitted_vault_key(
+            https,
+            &self.device,
+            &self.token,
+            &self.snapshot,
+            &self.bootstrap,
+            self.account.device.id,
+        )
+        .await?;
+        download(
+            https,
+            &self.device,
+            &self.token,
+            (self.account.payload.personal_vault_id, &vault_key),
+            &self.account.device,
+            &self.object,
+            1,
+        )
+        .await?;
+        self.object
+            .insert(
+                FieldPath::field(1).map_err(|_| "Host edit path invalid")?,
+                FieldEntry::new(
+                    cbor::Value::Text("Edited by independent Device".into()),
+                    Hlc::at(2).map_err(|_| "Host edit clock invalid")?,
+                    self.device.id,
+                )
+                .map_err(|_| "Host edit field invalid")?,
+            )
+            .map_err(|_| "Host edit failed")?;
+        upload(
+            https,
+            &self.device,
+            &self.token,
+            self.account.payload.personal_vault_id,
+            &vault_key,
+            &self.object,
+            Some(1),
+        )
+        .await?;
+        self.first_token = self.account.device.refresh(https, self.first_token).await?;
+        download(
+            https,
+            &self.account.device,
+            &self.first_token,
+            (self.account.payload.personal_vault_id, &self.account.vault_key),
+            &self.device,
+            &self.object,
+            2,
+        )
+        .await?;
+        Ok(self)
+    }
+
+    async fn refresh(mut self, https: &Https) -> Result<Self> {
+        self.token = self.device.refresh(https, self.token).await?;
+        Ok(self)
+    }
+
+    async fn read_personal(&self, https: &Https) -> Result<()> {
+        let vault_key = admitted_vault_key(
+            https,
+            &self.device,
+            &self.token,
+            &self.snapshot,
+            &self.bootstrap,
+            self.account.device.id,
+        )
+        .await?;
+        download(
+            https,
+            &self.device,
+            &self.token,
+            (self.account.payload.personal_vault_id, &vault_key),
+            &self.device,
+            &self.object,
+            2,
+        )
+        .await
+    }
+}
+
 struct Team {
     resource: OrganizationResource,
     creation_body: Vec<u8>,
@@ -710,6 +834,82 @@ async fn read_team(
     Ok(())
 }
 
+fn not_found_problem(bytes: &[u8]) -> Result<serde_json::Value> {
+    let problem = ProblemDetails::from_json(bytes, MAX_ORGANIZATION_PROBLEM_BYTES)
+        .map_err(|_| "inaccessible team problem invalid")?;
+    if problem.status != 404
+        || problem.code.as_str() != "organization.not_found"
+        || problem.changed
+        || problem.retryable
+    {
+        return Err("inaccessible team did not retain its refusal semantics");
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "inaccessible team JSON invalid")?;
+    value.as_object_mut().ok_or("inaccessible team problem is not an object")?.remove("instance");
+    Ok(value)
+}
+
+async fn verify_team_isolation(
+    https: &Https,
+    first: &PersonalConsumer,
+    first_team: &Team,
+    second: &PersonalConsumer,
+    second_team: &Team,
+) -> Result<()> {
+    let update = OrganizationUpdateRequest::new("Unauthorized team edit")
+        .and_then(|request| request.to_json())
+        .map_err(|_| "foreign team update request invalid")?;
+    for (actor, own, foreign) in
+        [(first, first_team, second_team), (second, second_team, first_team)]
+    {
+        read_team(https, &actor.device, &actor.token, actor.account.payload.account_id, own)
+            .await?;
+        let absent = format!("/api/v1/orgs/{}", Uuid::now_v7());
+        let foreign_path = format!("/api/v1/orgs/{}", foreign.resource.id);
+        for method in ["GET", "PATCH"] {
+            let mut problems = Vec::new();
+            for path in [&foreign_path, &absent] {
+                let bytes = if method == "GET" {
+                    https
+                        .exchange(
+                            method,
+                            path,
+                            b"",
+                            Some((
+                                &actor.device.keys.signing,
+                                Some(actor.token.access_token.as_str()),
+                            )),
+                            404,
+                        )
+                        .await?
+                } else {
+                    https
+                        .update_organization(
+                            path,
+                            &update,
+                            &actor.device.keys.signing,
+                            &actor.token.access_token,
+                            &foreign.resource.etag,
+                            404,
+                        )
+                        .await?
+                };
+                problems.push(not_found_problem(&bytes)?);
+            }
+            if problems[0] != problems[1] {
+                return Err("foreign and absent teams have distinguishable problems");
+            }
+        }
+    }
+    for (actor, team) in [(first, first_team), (second, second_team)] {
+        read_team(https, &actor.device, &actor.token, actor.account.payload.account_id, team)
+            .await?;
+        actor.read_personal(https).await?;
+    }
+    Ok(())
+}
+
 async fn await_restart(directory: &Path) -> Result<()> {
     super::write_private(&directory.join("team-restart.ready"), "ready")?;
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -741,94 +941,34 @@ pub(super) async fn verify(
     with_team: bool,
     restart_directory: Option<&Path>,
 ) -> Result<()> {
-    let account = Registration::new(&https.origin)?;
-    account.register(https).await?;
-    let first_token = account.device.authenticate(https).await?;
-    let mut object = host(account.device.id)?;
-    upload(
-        https,
-        &account.device,
-        &first_token,
-        account.payload.personal_vault_id,
-        &account.vault_key,
-        &object,
-        None,
-    )
-    .await?;
-
-    let (login, snapshot, bootstrap) =
-        password_login(https, &account.payload.username, account.password.clone()).await?;
-    if snapshot.account_id != account.payload.account_id
-        || snapshot.personal_vault_id != account.payload.personal_vault_id
-        || snapshot.account_signing_public_key != account.payload.account_signing_public_key
-    {
-        return Err("Independent password login recovered a different Account");
+    let first = PersonalConsumer::new(https).await?;
+    if !with_team {
+        first.exchange(https).await?;
+        return Ok(());
     }
-    let second = Device::new()?;
-    admit(https, &second, login, &snapshot, &bootstrap).await?;
-    let token = second.authenticate(https).await?;
-    let token = second.refresh(https, token).await?;
-    let team = if with_team {
-        Some(verify_team(https, &second, &token, snapshot.account_id).await?)
-    } else {
-        None
-    };
-    let token = if with_team { second.refresh(https, token).await? } else { token };
-    let vault_key =
-        admitted_vault_key(https, &second, &token, &snapshot, &bootstrap, account.device.id)
+    let first_team =
+        verify_team(https, &first.device, &first.token, first.account.payload.account_id).await?;
+    let mut first = first.refresh(https).await?.exchange(https).await?;
+    let second = PersonalConsumer::new(https).await?;
+    let second_team =
+        verify_team(https, &second.device, &second.token, second.account.payload.account_id)
             .await?;
-    download(
-        https,
-        &second,
-        &token,
-        (snapshot.personal_vault_id, &vault_key),
-        &account.device,
-        &object,
-        1,
-    )
-    .await?;
-    object
-        .insert(
-            FieldPath::field(1).map_err(|_| "Host edit path invalid")?,
-            FieldEntry::new(
-                cbor::Value::Text("Edited by independent Device".into()),
-                Hlc::at(2).map_err(|_| "Host edit clock invalid")?,
-                second.id,
-            )
-            .map_err(|_| "Host edit field invalid")?,
-        )
-        .map_err(|_| "Host edit failed")?;
-    upload(https, &second, &token, snapshot.personal_vault_id, &vault_key, &object, Some(1))
-        .await?;
-    let first_token = account.device.refresh(https, first_token).await?;
-    download(
-        https,
-        &account.device,
-        &first_token,
-        (snapshot.personal_vault_id, &account.vault_key),
-        &second,
-        &object,
-        2,
-    )
-    .await?;
+    let mut second = second.refresh(https).await?.exchange(https).await?;
+    if first.account.payload.account_id == second.account.payload.account_id
+        || first.account.payload.personal_vault_id == second.account.payload.personal_vault_id
+        || first_team.resource.id == second_team.resource.id
+    {
+        return Err("independent Accounts do not have distinct teams and Personal vaults");
+    }
+    verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     if let Some(directory) = restart_directory {
-        let team = team.as_ref().ok_or("restart acceptance requires a created team")?;
-        if token.refresh_expires_in <= 240 {
+        if first.token.refresh_expires_in <= 240 || second.token.refresh_expires_in <= 240 {
             return Err("native refresh lifetime cannot span the bounded restart check");
         }
         await_restart(directory).await?;
-        let token = second.refresh(https, token).await?;
-        read_team(https, &second, &token, snapshot.account_id, team).await?;
-        download(
-            https,
-            &second,
-            &token,
-            (snapshot.personal_vault_id, &vault_key),
-            &second,
-            &object,
-            2,
-        )
-        .await?;
+        first = first.refresh(https).await?;
+        second = second.refresh(https).await?;
+        verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     }
     Ok(())
 }

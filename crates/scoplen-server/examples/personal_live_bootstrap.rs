@@ -79,7 +79,7 @@ enum Command {
     /// Once only: verify public password entry and encrypted sync with two independent Devices.
     VerifyAccount {
         directory: PathBuf,
-        /// Also verify team creation, conditional name settings and subsequent Personal sync.
+        /// Also verify two password Accounts' teams, name settings and Personal isolation.
         #[arg(long)]
         with_team: bool,
         /// Retain Device credentials in memory across one controller-owned service restart.
@@ -139,7 +139,11 @@ async fn run(command: Command) -> Result<()> {
             )?;
             tokio::time::timeout(
                 Duration::from_secs(240),
-                account::verify(&https, with_team, across_restart.then_some(directory.as_path())),
+                Box::pin(account::verify(
+                    &https,
+                    with_team,
+                    across_restart.then_some(directory.as_path()),
+                )),
             )
             .await
             .map_err(|_| "Account check exceeded its deadline; abandon this fixture")??;
@@ -150,13 +154,13 @@ async fn run(command: Command) -> Result<()> {
             if with_team {
                 write_private(
                     &directory.join("team-acceptance.json"),
-                    "{\"team_creation_personal_sync_verified\":true,\"team_settings_personal_sync_verified\":true}",
+                    "{\"team_creation_personal_sync_verified\":true,\"team_settings_personal_sync_verified\":true,\"team_account_isolation_verified\":true}",
                 )?;
             }
             if across_restart {
                 write_private(
                     &directory.join("team-restart-acceptance.json"),
-                    "{\"team_membership_restart_verified\":true,\"team_settings_restart_verified\":true}",
+                    "{\"team_membership_restart_verified\":true,\"team_settings_restart_verified\":true,\"team_account_isolation_restart_verified\":true}",
                 )?;
             }
             println!("public Account password and encrypted sync check passed");
@@ -694,7 +698,7 @@ impl Https {
                 "public fixture API rejected request; abandon the fixture and inspect only private server diagnostics",
             );
         }
-        if expected == 404 {
+        if expected == 404 && !path.starts_with("/api/v1/orgs") {
             return Ok(Zeroizing::new(Vec::new()));
         }
         let content_type = if expected >= 400 {
@@ -735,6 +739,9 @@ fn verify_organization_response(
         return Err("team response metadata invalid");
     }
     if expected >= 400 {
+        if expected == 404 && headers.contains_key("etag") {
+            return Err("team problem response disclosed a Resource version");
+        }
         return Ok(());
     }
     if method == "GET" && path == "/api/v1/orgs" {

@@ -302,11 +302,12 @@ test("Account acceptance requires the explicit completed password and sync recei
   }
 });
 
-test("team acceptance requires completed creation, name settings and Personal sync", () => {
+test("team acceptance requires both Accounts' creation, settings, isolation and Personal sync", () => {
   assert.doesNotThrow(() =>
     assertTeamAcceptance({
       team_creation_personal_sync_verified: true,
       team_settings_personal_sync_verified: true,
+      team_account_isolation_verified: true,
     }),
   );
   for (const receipt of [
@@ -315,6 +316,20 @@ test("team acceptance requires completed creation, name settings and Personal sy
     {},
     { team_creation_personal_sync_verified: true },
     { team_settings_personal_sync_verified: true },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: true,
+    },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: true,
+      team_account_isolation_verified: false,
+    },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: true,
+      team_account_isolation_verified: "true",
+    },
     {
       team_creation_personal_sync_verified: true,
       team_settings_personal_sync_verified: false,
@@ -330,6 +345,7 @@ test("team acceptance requires completed creation, name settings and Personal sy
     {
       team_creation_personal_sync_verified: true,
       team_settings_personal_sync_verified: true,
+      team_account_isolation_verified: true,
       team_name: "unexpected",
     },
   ]) {
@@ -337,11 +353,12 @@ test("team acceptance requires completed creation, name settings and Personal sy
   }
 });
 
-test("team restart acceptance requires retained membership and name settings", () => {
+test("team restart acceptance requires retained membership, settings and Account isolation", () => {
   assert.doesNotThrow(() =>
     assertTeamRestartAcceptance({
       team_membership_restart_verified: true,
       team_settings_restart_verified: true,
+      team_account_isolation_restart_verified: true,
     }),
   );
   for (const receipt of [
@@ -350,6 +367,20 @@ test("team restart acceptance requires retained membership and name settings", (
     {},
     { team_membership_restart_verified: true },
     { team_settings_restart_verified: true },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: true,
+    },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: true,
+      team_account_isolation_restart_verified: false,
+    },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: true,
+      team_account_isolation_restart_verified: "true",
+    },
     {
       team_membership_restart_verified: true,
       team_settings_restart_verified: false,
@@ -365,6 +396,7 @@ test("team restart acceptance requires retained membership and name settings", (
     {
       team_membership_restart_verified: true,
       team_settings_restart_verified: true,
+      team_account_isolation_restart_verified: true,
       team_name: "unexpected",
     },
   ])
