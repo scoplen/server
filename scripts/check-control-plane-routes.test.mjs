@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { checkControlPlaneRoutes } from "./check-control-plane-routes.mjs";
+
+test("CI checks routes against the server's pinned API contract", async () => {
+  const manifest = await readFile(new URL("../crates/scoplen-server/Cargo.toml", import.meta.url), "utf8");
+  const workflow = await readFile(new URL("../.github/workflows/check.yml", import.meta.url), "utf8");
+  const revision = manifest.match(/^scoplen-api = \{ git = "https:\/\/github\.com\/scoplen\/proto\.git", rev = "([a-f0-9]{40})" \}$/m)?.[1];
+  const checkedRevision = workflow.match(/repository: scoplen\/proto\r?\n\s+ref: ([a-f0-9]{40})\r?\n\s+path: proto/)?.[1];
+  assert.ok(revision, "the server must pin its public API dependency");
+  assert.equal(checkedRevision, revision, "CI must validate the same API contract the server consumes");
+});
 
 test("nested server module routes require a manifest and OpenAPI entry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "scoplen-route-check-"));
