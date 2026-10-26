@@ -68,3 +68,37 @@ fn invalid_account_environment_overrides_fail_before_startup() {
         assert!(!fixture.0.join("data").exists());
     }
 }
+
+#[test]
+fn configuration_parse_failures_do_not_disclose_source_or_values() {
+    let fixture = Fixture::new();
+    let config = fixture.0.join("invalid.toml");
+    let marker = "scoplen-test-credential-marker";
+    for source in [
+        format!("[storage]\ndatabase_url = 'postgres://{marker}\n"),
+        format!("[server]\nlisten_port = '{marker}'\n"),
+        format!("[tls]\nmode = '{marker}'\n"),
+    ] {
+        fs::write(&config, source).expect("malformed configuration fixture");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_spl-server"));
+        command
+            .args(["--validate-config", "--config"])
+            .arg(&config)
+            .env("SPL_SERVER_DATA_DIR", fixture.0.join("data"));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let output = command.output().expect("public configuration validation");
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout.as_slice(), b"");
+        let diagnostic = String::from_utf8(output.stderr).expect("UTF-8 configuration diagnostic");
+        assert!(diagnostic.contains("could not parse configuration file"));
+        assert!(diagnostic.contains(&config.display().to_string()));
+        assert!(diagnostic.contains("check TOML syntax and value types"));
+        assert!(!diagnostic.contains(marker));
+        assert!(!diagnostic.contains("postgres://"));
+        assert!(!fixture.0.join("data").exists());
+    }
+}

@@ -470,6 +470,9 @@ For a local configuration check:
 cargo run -p scoplen-server -- --validate-config
 ```
 
+TOML parse diagnostics identify the configuration file and give fixed guidance to check syntax
+and value types, without rendering parser source snippets.
+
 To diagnose a configured deployment through its public HTTPS origin:
 
 ```text

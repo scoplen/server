@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Keep TOML configuration parse failures actionable without rendering source snippets or
+  submitted values in server and bootstrap CLI diagnostics.
+
 - Add read-only `splctl doctor` configuration and trusted public HTTPS health/readiness checks,
   with bounded requests, explicit additional CA trust and actionable fixed findings. Full
   deployment diagnostics and the console status page remain incomplete.

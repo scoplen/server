@@ -88,6 +88,39 @@ fn exclusive_deployment_lease_rejects_local_reissue_without_creating_storage() {
     fs::remove_dir_all(directory).expect("remove owned CLI fixture");
 }
 
+#[test]
+fn malformed_bootstrap_configuration_uses_safe_display_before_local_admission() {
+    let directory = std::env::temp_dir().join(format!(
+        "scoplen-ctl-invalid-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir(&directory).expect("owned configuration fixture");
+    let config = directory.join("invalid.toml");
+    let data = directory.join("data");
+    let marker = "scoplen-test-credential-marker";
+    fs::write(&config, format!("[storage]\ndatabase_url = 'postgres://{marker}\n"))
+        .expect("malformed configuration fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_splctl"))
+        .args(["bootstrap", "--reissue-pending", "--config"])
+        .arg(&config)
+        .env("SPL_SERVER_DATA_DIR", &data)
+        .output()
+        .expect("public bootstrap CLI");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout.as_slice(), b"");
+    let diagnostic = String::from_utf8(output.stderr).expect("UTF-8 CLI diagnostic");
+    assert!(diagnostic.contains("could not parse configuration file"));
+    assert!(diagnostic.contains("check TOML syntax and value types"));
+    assert!(!diagnostic.contains(marker));
+    assert!(!diagnostic.contains("postgres://"));
+    assert!(!data.exists());
+    fs::remove_dir_all(directory).expect("remove owned configuration fixture");
+}
+
 fn reissue(config: &std::path::Path) -> Vec<u8> {
     let output = Command::new(env!("CARGO_BIN_EXE_splctl"))
         .args(["bootstrap", "--reissue-pending", "--config"])
