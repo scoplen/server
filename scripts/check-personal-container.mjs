@@ -38,12 +38,17 @@ const failurePhases = new Set([
   "non-root Compose startup and trusted HTTPS",
   "bundled console assets",
   "public Operator setup, Passkey login/logout and retired entry absence",
+  "public Account password entry and encrypted sync",
   "restart and persistent setup/key verification",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
   "failed-check cleanup",
 ]);
+
+export function assertAccountAcceptance(receipt) {
+  assert.deepEqual(receipt, { account_password_sync_verified: true });
+}
 
 export function describeCheckFailure({
   phase,
@@ -896,7 +901,9 @@ export async function checkPersonalContainer(driverPath) {
         (await readFile(join(directory, "licenses", `${name}.txt`))).length > 0,
       );
 
-    progress("public Operator setup, Passkey login/logout and retired entry absence");
+    progress(
+      "public Operator setup, Passkey login/logout and retired entry absence",
+    );
     const logs = await docker(["logs", container]);
     await writePrivateDiagnostic(
       join(fixture, "current-server.log"),
@@ -917,6 +924,20 @@ export async function checkPersonalContainer(driverPath) {
     );
     assert(repeat.error, "bootstrap must not repeat");
     assert.deepEqual(await readFile(descriptorPath), descriptorBytes);
+
+    progress("public Account password entry and encrypted sync");
+    await command(driver, ["verify-account", fixture]);
+    const accountAcceptancePath = join(fixture, "account-acceptance.json");
+    const accountAcceptanceBytes = await readFile(accountAcceptancePath);
+    assertAccountAcceptance(JSON.parse(accountAcceptanceBytes));
+    const accountRepeat = await command(driver, ["verify-account", fixture], {
+      allowFailure: true,
+    });
+    assert(accountRepeat.error, "Account acceptance must not repeat");
+    assert.deepEqual(
+      await readFile(accountAcceptancePath),
+      accountAcceptanceBytes,
+    );
     const paths = ["/.well-known/jwks.json", "/.well-known/operator-jwks.json"];
     const keys = [];
     for (const path of paths) {
@@ -954,14 +975,7 @@ export async function checkPersonalContainer(driverPath) {
       );
     }
     const recovery = await compose(
-      [
-        "exec",
-        "-T",
-        "server",
-        "/app/splctl",
-        "bootstrap",
-        "--reissue-pending",
-      ],
+      ["exec", "-T", "server", "/app/splctl", "bootstrap", "--reissue-pending"],
       { allowFailure: true },
     );
     assert(
@@ -1164,7 +1178,7 @@ export async function checkPersonalContainer(driverPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, console, public Operator setup/login/logout, Account password entry, independent Device admission and encrypted Host sync, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

@@ -183,16 +183,24 @@ checks image/data-volume permissions, non-root writes, TLS trust and hostname re
 `/healthz`, `/readyz`, every manifest-listed console asset and bundled licenses. It performs
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
-Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Repeated
-bootstrap is rejected. The controller then restarts the service and verifies unchanged public
+Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Its separate
+`verify-account` invocation registers a randomly generated password Account and writes a signed,
+encrypted Host through the first enrolled Device. A fresh independent Device derives the same
+password credential, verifies and decrypts the complete signed bootstrap, completes admission,
+authenticates and refreshes its session, then opens its own ARK and Personal vault-key wraps.
+It verifies and decrypts the retained Host, edits and uploads it with its own Device signature;
+the original Device refreshes and verifies the returned edit. Only these public HTTPS operations
+can produce the separate content-free `account-acceptance.json` receipt. No SQL identity seed or
+internal server coordinator is used. Repeated bootstrap and Account checks are rejected without
+changing their completed artifacts. The controller then restarts the service and verifies unchanged public
 keyrings and completed setup state. Every HTTPS exchange has a whole-request deadline and
 operations are not retried automatically.
 
-The check does not provision a new Account or Device, seed identity tables, or claim a native
-Device refresh/Host synchronization acceptance path. Existing Device authentication and sync
-are covered by integration tests using valid signed legacy artifacts in owned test databases.
-A new production Account registration/bootstrap path must precede restoring container Device
-restart acceptance. Physical authenticators and native GUI/macOS acceptance remain separate.
+The Account check exercises an independent protocol consumer against the production image;
+native desktop interaction, reopen/restart behavior and independent client acceptance retain
+their separate tests. Other server tests may use signed legacy identity fixtures; those seeds
+do not participate in this password Account or encrypted Host acceptance flow. Physical
+authenticators and native GUI/macOS acceptance remain separate.
 
 The check also archives the pinned server revision
 `37af5126585254612e734f542cfd4e36670915d9` from local Git history and builds its original

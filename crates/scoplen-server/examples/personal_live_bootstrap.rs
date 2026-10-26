@@ -33,6 +33,8 @@ use tokio_rustls::TlsConnector;
 use url::Url;
 use zeroize::Zeroizing;
 
+#[path = "personal_live_bootstrap/account.rs"]
+mod account;
 #[path = "../../scoplen-store/tests/support/passkey.rs"]
 mod passkey;
 #[path = "../src/private_material.rs"]
@@ -73,6 +75,8 @@ enum Command {
         #[arg(long)]
         server_log: Option<PathBuf>,
     },
+    /// Once only: verify public password entry and encrypted sync with two independent Devices.
+    VerifyAccount { directory: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -114,6 +118,22 @@ async fn run(command: Command) -> Result<()> {
         Command::Bootstrap { directory, server_log } => {
             bootstrap(&directory, server_log.as_deref()).await?;
             println!("fixture descriptor ready");
+        }
+        Command::VerifyAccount { directory } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            write_private(
+                &directory.join("account-check.started"),
+                "One attempt only; discard this fixture after any failure.",
+            )?;
+            account::verify(&https).await?;
+            write_private(
+                &directory.join("account-acceptance.json"),
+                "{\"account_password_sync_verified\":true}",
+            )?;
+            println!("public Account password and encrypted sync check passed");
         }
     }
     Ok(())

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  assertAccountAcceptance,
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
@@ -26,6 +27,21 @@ import {
   prepareRecoveryProbeContext,
 } from "./check-personal-container.mjs";
 
+test("Account acceptance requires the explicit completed password and sync receipt", () => {
+  assert.doesNotThrow(() =>
+    assertAccountAcceptance({ account_password_sync_verified: true }),
+  );
+  for (const receipt of [
+    undefined,
+    null,
+    {},
+    { account_password_sync_verified: false },
+    { account_password_sync_verified: "true" },
+    { disposable: true, operator_lifecycle_verified: true },
+  ]) {
+    assert.throws(() => assertAccountAcceptance(receipt));
+  }
+});
 
 test("recovery probe follows the latest SQLite migration and preserves its old-image anchor", async () => {
   const migrations = await readdir(
@@ -42,7 +58,11 @@ test("recovery probe follows the latest SQLite migration and preserves its old-i
   const current = Number(source.match(/const newMigration = (\d+);/)[1]);
   assert.equal(old, 20261024030000, "matching historical image stays pinned");
   assert(versions.includes(old));
-  assert.equal(current, Math.max(...versions), "new migrations must update the recovery consumer");
+  assert.equal(
+    current,
+    Math.max(...versions),
+    "new migrations must update the recovery consumer",
+  );
 });
 
 test("actual recovery probe reports a bounded failure before opening an invalid context", async () => {
