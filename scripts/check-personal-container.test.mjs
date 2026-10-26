@@ -302,37 +302,71 @@ test("Account acceptance requires the explicit completed password and sync recei
   }
 });
 
-test("team acceptance requires its own completed creation and Personal sync receipt", () => {
+test("team acceptance requires completed creation, name settings and Personal sync", () => {
   assert.doesNotThrow(() =>
-    assertTeamAcceptance({ team_creation_personal_sync_verified: true }),
+    assertTeamAcceptance({
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: true,
+    }),
   );
   for (const receipt of [
     undefined,
     null,
     {},
+    { team_creation_personal_sync_verified: true },
+    { team_settings_personal_sync_verified: true },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: false,
+    },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: "true",
+    },
     { team_creation_personal_sync_verified: false },
     { team_creation_personal_sync_verified: "true" },
     { account_password_sync_verified: true },
     { disposable: true, operator_lifecycle_verified: true },
-    { team_creation_personal_sync_verified: true, team_name: "unexpected" },
+    {
+      team_creation_personal_sync_verified: true,
+      team_settings_personal_sync_verified: true,
+      team_name: "unexpected",
+    },
   ]) {
     assert.throws(() => assertTeamAcceptance(receipt));
   }
 });
 
-test("team restart acceptance requires its distinct completed membership receipt", () => {
+test("team restart acceptance requires retained membership and name settings", () => {
   assert.doesNotThrow(() =>
-    assertTeamRestartAcceptance({ team_membership_restart_verified: true }),
+    assertTeamRestartAcceptance({
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: true,
+    }),
   );
   for (const receipt of [
     undefined,
     null,
     {},
+    { team_membership_restart_verified: true },
+    { team_settings_restart_verified: true },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: false,
+    },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: "true",
+    },
     { team_membership_restart_verified: false },
     { team_membership_restart_verified: "true" },
     { team_creation_personal_sync_verified: true },
     { account_password_sync_verified: true },
-    { team_membership_restart_verified: true, team_name: "unexpected" },
+    {
+      team_membership_restart_verified: true,
+      team_settings_restart_verified: true,
+      team_name: "unexpected",
+    },
   ])
     assert.throws(() => assertTeamRestartAcceptance(receipt));
 });

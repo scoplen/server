@@ -79,7 +79,7 @@ enum Command {
     /// Once only: verify public password entry and encrypted sync with two independent Devices.
     VerifyAccount {
         directory: PathBuf,
-        /// Also verify team creation/discovery and Personal sync after joining a team.
+        /// Also verify team creation, conditional name settings and subsequent Personal sync.
         #[arg(long)]
         with_team: bool,
         /// Retain Device credentials in memory across one controller-owned service restart.
@@ -150,13 +150,13 @@ async fn run(command: Command) -> Result<()> {
             if with_team {
                 write_private(
                     &directory.join("team-acceptance.json"),
-                    "{\"team_creation_personal_sync_verified\":true}",
+                    "{\"team_creation_personal_sync_verified\":true,\"team_settings_personal_sync_verified\":true}",
                 )?;
             }
             if across_restart {
                 write_private(
                     &directory.join("team-restart-acceptance.json"),
-                    "{\"team_membership_restart_verified\":true}",
+                    "{\"team_membership_restart_verified\":true,\"team_settings_restart_verified\":true}",
                 )?;
             }
             println!("public Account password and encrypted sync check passed");
@@ -576,6 +576,7 @@ impl Https {
         token: &str,
         idempotency_key: uuid::Uuid,
     ) -> Result<Zeroizing<Vec<u8>>> {
+        let idempotency_key = idempotency_key.to_string();
         tokio::time::timeout(
             Duration::from_secs(15),
             self.request(
@@ -583,8 +584,32 @@ impl Https {
                 "/api/v1/orgs",
                 body,
                 Some((key, Some(token))),
-                Some(idempotency_key),
+                Some(("Idempotency-Key", &idempotency_key)),
                 201,
+            ),
+        )
+        .await
+        .map_err(|_| "HTTPS request timed out; abandon this fixture after an uncertain operation")?
+    }
+
+    async fn update_organization(
+        &self,
+        path: &str,
+        body: &[u8],
+        key: &P256SigningKey,
+        token: &str,
+        etag: &str,
+        expected: u16,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            self.request(
+                "PATCH",
+                path,
+                body,
+                Some((key, Some(token))),
+                Some(("If-Match", etag)),
+                expected,
             ),
         )
         .await
@@ -597,7 +622,7 @@ impl Https {
         path: &str,
         body: &[u8],
         proof: Option<(&P256SigningKey, Option<&str>)>,
-        idempotency_key: Option<uuid::Uuid>,
+        condition: Option<(&'static str, &str)>,
         expected: u16,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let mut request = Request::builder()
@@ -608,8 +633,8 @@ impl Https {
                 if path.starts_with("/sync/") { "application/cbor" } else { "application/json" },
             )
             .header("Origin", &self.origin);
-        if let Some(key) = idempotency_key {
-            request = request.header("Idempotency-Key", key.to_string());
+        if let Some((name, value)) = condition {
+            request = request.header(name, value);
         }
         if let Some((key, token)) = proof {
             let now = SystemTime::now()
@@ -692,7 +717,7 @@ impl Https {
             .map_err(|_| "public bootstrap response exceeds limit or is incomplete")?
             .to_bytes();
         if path.starts_with("/api/v1/orgs") {
-            verify_organization_response(method, path, &parts.headers, &bytes)?;
+            verify_organization_response(method, path, expected, &parts.headers, &bytes)?;
         }
         Ok(Zeroizing::new(bytes.to_vec()))
     }
@@ -701,12 +726,16 @@ impl Https {
 fn verify_organization_response(
     method: &str,
     path: &str,
+    expected: u16,
     headers: &axum::http::HeaderMap,
     bytes: &[u8],
 ) -> Result<()> {
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
     if header("x-request-id").is_none_or(str::is_empty) || headers.contains_key("set-cookie") {
         return Err("team response metadata invalid");
+    }
+    if expected >= 400 {
+        return Ok(());
     }
     if method == "GET" && path == "/api/v1/orgs" {
         OrganizationPage::from_http_json(bytes, header("cache-control"), header("pragma"))
