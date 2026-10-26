@@ -3971,7 +3971,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
+source = "git+https://github.com/scoplen/proto.git?rev=e6be4fa7bb3e265444b3fd26ee14af42337f1889#e6be4fa7bb3e265444b3fd26ee14af42337f1889"
 dependencies = [
  "base64 0.22.1",
  "cedar-policy",
@@ -4010,7 +4010,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
+source = "git+https://github.com/scoplen/proto.git?rev=e6be4fa7bb3e265444b3fd26ee14af42337f1889#e6be4fa7bb3e265444b3fd26ee14af42337f1889"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4065,7 +4065,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=a604b726881292509a8ced5ff32f718ef52f76eb#a604b726881292509a8ced5ff32f718ef52f76eb"
+source = "git+https://github.com/scoplen/proto.git?rev=e6be4fa7bb3e265444b3fd26ee14af42337f1889#e6be4fa7bb3e265444b3fd26ee14af42337f1889"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -5756,7 +5756,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
