@@ -85,13 +85,15 @@ jobs:
           node-version: 24.16.0
       - name: Test container-check cleanup boundaries
         run: node --test scripts/check-personal-container.test.mjs
-      - name: Build public HTTPS Operator lifecycle driver
+      - name: Build native public HTTPS consumers
         run: |
           cargo build --locked -p scoplen-server --example personal_live_bootstrap
+          cargo build --locked -p scoplen-ctl --bin splctl
           install -m 0700 target/debug/examples/personal_live_bootstrap "$RUNNER_TEMP/personal_live_bootstrap"
+          install -m 0700 target/debug/splctl "$RUNNER_TEMP/splctl"
           cargo clean
       - name: Verify the Personal container, SQLite upgrade and offline recovery
-        run: node scripts/check-personal-container.mjs --bootstrap-driver "$RUNNER_TEMP/personal_live_bootstrap"
+        run: node scripts/check-personal-container.mjs --bootstrap-driver "$RUNNER_TEMP/personal_live_bootstrap" --doctor-cli "$RUNNER_TEMP/splctl"
 
   postgres-schema:
     name: PostgreSQL migration schema
