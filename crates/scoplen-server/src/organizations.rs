@@ -9,14 +9,15 @@ use axum::{
     extract::{Query, State},
     http::{Request, StatusCode, header},
     response::Response,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use scoplen_api::{
     ErrorCode, ProblemDetails,
     auth::DeviceAccessOperation,
     organization::{
-        MAX_ORGANIZATION_CREATE_BYTES, OrganizationCreateRequest, OrganizationListQuery,
-        parse_organization_idempotency_key,
+        MAX_ORGANIZATION_CREATE_BYTES, MAX_ORGANIZATION_UPDATE_BYTES, OrganizationCreateRequest,
+        OrganizationListQuery, OrganizationPreconditionError, OrganizationUpdateRequest,
+        parse_organization_idempotency_key, parse_organization_if_match,
     },
 };
 use scoplen_store::{kms::LocalKeyFile, organizations::OrganizationStoreError};
@@ -47,6 +48,7 @@ pub(crate) fn router(
         .route("/api/v1/orgs", post(create))
         .route("/api/v1/orgs", get(list))
         .route("/api/v1/orgs/{org}", get(read))
+        .route("/api/v1/orgs/{org}", patch(update))
         .with_state(OrganizationState { backend, auth, origin, policy })
 }
 
@@ -60,6 +62,92 @@ async fn list(State(state): State<OrganizationState>, request: Request<Body>) ->
 
 async fn read(State(state): State<OrganizationState>, request: Request<Body>) -> Response {
     handle(state, request, DeviceAccessOperation::OrganizationRead).await
+}
+
+async fn update(State(state): State<OrganizationState>, request: Request<Body>) -> Response {
+    let request_id = Uuid::new_v4();
+    let (parts, body) = request.into_parts();
+    if parts.headers.contains_key(header::ORIGIN) && !matching_origin(&parts.headers, &state.origin)
+    {
+        return problem(StatusCode::FORBIDDEN, "policy.denied", false, &request_id);
+    }
+    let (principal, expires_at) = match state
+        .auth
+        .authenticate_request(
+            DeviceAccessOperation::OrganizationUpdate,
+            &parts.method,
+            &parts.uri,
+            &parts.headers,
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            let code = match error.status {
+                StatusCode::FORBIDDEN => "policy.denied",
+                StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
+                _ => "auth.authentication_required",
+            };
+            return problem(error.status, code, false, &request_id);
+        }
+    };
+    if parts.uri.query().is_some()
+        || parts.headers.contains_key("idempotency-key")
+        || parts.headers.get_all(header::IF_MATCH).iter().count() > 1
+    {
+        return invalid(&request_id);
+    }
+    let if_match = parts.headers.get(header::IF_MATCH);
+    if if_match.is_some_and(|value| value.to_str().is_err()) {
+        return invalid(&request_id);
+    }
+    let if_match = match parse_organization_if_match(if_match.and_then(|value| value.to_str().ok()))
+    {
+        Ok(value) => value,
+        Err(OrganizationPreconditionError::Required) => {
+            return problem(
+                StatusCode::PRECONDITION_REQUIRED,
+                "organization.precondition_required",
+                false,
+                &request_id,
+            );
+        }
+        Err(OrganizationPreconditionError::Invalid) => return invalid(&request_id),
+    };
+    let organization = parts
+        .uri
+        .path()
+        .strip_prefix("/api/v1/orgs/")
+        .and_then(|value| parse_organization_idempotency_key(value).ok());
+    let Some(organization) = organization else { return invalid(&request_id) };
+    let body = match json_body(&parts.headers, body, MAX_ORGANIZATION_UPDATE_BYTES).await {
+        Ok(value) => value,
+        Err(StatusCode::UNSUPPORTED_MEDIA_TYPE) => {
+            return problem(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "organization.invalid_request",
+                false,
+                &request_id,
+            );
+        }
+        Err(_) => return invalid(&request_id),
+    };
+    let Ok(decoded) = OrganizationUpdateRequest::from_json(body.as_bytes()) else {
+        return invalid(&request_id);
+    };
+    let result = match &state.backend {
+        AuthBackend::Sqlite(store) => {
+            store
+                .update_organization(&principal, expires_at, organization, if_match, &decoded)
+                .await
+        }
+        AuthBackend::Postgres(store) => {
+            store
+                .update_organization(&principal, expires_at, organization, if_match, &decoded)
+                .await
+        }
+    };
+    resource_response(result, StatusCode::OK, &request_id)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -223,7 +311,12 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
         OrganizationStoreError::AuthenticationRequired => {
             (StatusCode::UNAUTHORIZED, "auth.authentication_required", false)
         }
-        OrganizationStoreError::CreationDisabled => (StatusCode::FORBIDDEN, "policy.denied", false),
+        OrganizationStoreError::CreationDisabled | OrganizationStoreError::PermissionDenied => {
+            (StatusCode::FORBIDDEN, "policy.denied", false)
+        }
+        OrganizationStoreError::PreconditionFailed => {
+            (StatusCode::PRECONDITION_FAILED, "organization.precondition_failed", false)
+        }
         OrganizationStoreError::NotFound => {
             (StatusCode::NOT_FOUND, "organization.not_found", false)
         }
@@ -233,6 +326,17 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
         }
         OrganizationStoreError::CommitOutcomeUnknown => {
             (StatusCode::SERVICE_UNAVAILABLE, "organization.commit_outcome_unknown", true)
+        }
+        OrganizationStoreError::UpdateCommitOutcomeUnknown => {
+            return specific_problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "organization.commit_outcome_unknown",
+                "Team update unconfirmed",
+                "Refresh the current team and review another explicit edit; do not automatically repeat this update.",
+                true,
+                false,
+                request_id,
+            );
         }
     };
     problem(status, code, changed, request_id)
@@ -248,6 +352,14 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
         "organization.conflict" => (
             "Team creation conflict",
             "Retain the original creation key and name; this key already belongs to another payload.",
+        ),
+        "organization.precondition_required" => (
+            "Current team version required",
+            "Read the current team and submit its exact ETag in one strong If-Match header.",
+        ),
+        "organization.precondition_failed" => (
+            "Team changed",
+            "Refresh the current team and review the edit before submitting its new ETag.",
         ),
         "organization.commit_outcome_unknown" => (
             "Team creation unconfirmed",
@@ -267,6 +379,18 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
         ),
         _ => ("Invalid team request", "Correct the team name, route, query or request headers."),
     };
+    specific_problem(status, code, title, detail, changed, status.is_server_error(), request_id)
+}
+
+fn specific_problem(
+    status: StatusCode,
+    code: &str,
+    title: &str,
+    detail: &str,
+    changed: bool,
+    retryable: bool,
+    request_id: &Uuid,
+) -> Response {
     let details = ProblemDetails::new(
         ErrorCode::new(code).expect("static organization code"),
         status.as_u16(),
@@ -274,7 +398,7 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
         detail,
         request_id.to_string(),
         changed,
-        status.is_server_error(),
+        retryable,
     )
     .expect("static organization problem");
     reply(

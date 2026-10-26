@@ -10,6 +10,9 @@ use scoplen_crypto::{DeviceAccessToken, TrustedDeviceAccessTokenKeys};
 const COLLECTION: &str = "/api/v1/orgs";
 const OLD_SCOPE: &str = "account:read keys:read keys:write sync:read sync:write";
 
+#[path = "organization_name_tests.rs"]
+mod name;
+
 async fn mount(f: &mut Fixture, allow_creation: bool) {
     f.server.abort();
     let _ = (&mut f.server).await;
@@ -150,12 +153,12 @@ async fn token_claims(f: &Fixture, token: &str) -> scoplen_crypto::DeviceAccessT
         .clone()
 }
 
-async fn old_family_refresh(f: &Fixture, a: &LegacyDeviceSession) {
+async fn old_family_refresh(f: &Fixture, a: &LegacyDeviceSession, scope: &str) {
     let issued = authenticate_tokens(f, a.receipt.device_id, &a.client).await;
     match &f.backend {
         AuthBackend::Sqlite(store) => {
             sqlx::query("UPDATE device_refresh_families SET scope=$1 WHERE account_id=$2")
-                .bind(OLD_SCOPE)
+                .bind(scope)
                 .bind(a.receipt.account_id.as_bytes().as_slice())
                 .execute(store.pool())
                 .await
@@ -163,7 +166,7 @@ async fn old_family_refresh(f: &Fixture, a: &LegacyDeviceSession) {
         }
         AuthBackend::Postgres(store) => {
             sqlx::query("UPDATE device_refresh_families SET scope=$1 WHERE account_id=$2")
-                .bind(OLD_SCOPE)
+                .bind(scope)
                 .bind(a.receipt.account_id.as_bytes().as_slice())
                 .execute(store.pool())
                 .await
@@ -191,10 +194,25 @@ async fn old_family_refresh(f: &Fixture, a: &LegacyDeviceSession) {
     assert_eq!(reply.status, 200, "{}", reply.text());
     let rotated = AuthTokenResponse::from_json(reply.text()).expect("refresh result");
     let claims = token_claims(f, &rotated.access_token).await;
-    assert_eq!(claims.scope, OLD_SCOPE);
+    assert_eq!(claims.scope, scope);
     assert_eq!(claims.org.len(), 2);
-    let denied = protected(f, "GET", COLLECTION, &[], &rotated.access_token, &a.client).await;
-    denied.problem(403, "policy.denied", false, false);
+    let discovery = protected(f, "GET", COLLECTION, &[], &rotated.access_token, &a.client).await;
+    if scope == OLD_SCOPE {
+        discovery.problem(403, "policy.denied", false, false);
+    } else {
+        assert_eq!(discovery.status, 200);
+    }
+    let path = format!("{COLLECTION}/{}", claims.org[0].id);
+    protected(
+        f,
+        "PATCH",
+        &path,
+        b"{\"data\":{\"name\":\"Denied\"}}",
+        &rotated.access_token,
+        &a.client,
+    )
+    .await
+    .problem(403, "policy.denied", false, false);
     let scope =
         token_claims(f, &authenticate_device(f, a.receipt.device_id, &a.client).await).await.scope;
     assert_eq!(scope, INITIAL_DEVICE_ACCESS_SCOPE);
@@ -326,7 +344,13 @@ async fn contract(mut f: Fixture) {
     assert!(claims.org.iter().all(|entry| entry.sso_authenticated_at.is_none()));
     session_and_keys(&f, &a.receipt, &current, &a.client).await;
     sync_object(&f, &a.receipt, &current, &a.client).await;
-    old_family_refresh(&f, &a).await;
+    old_family_refresh(&f, &a, OLD_SCOPE).await;
+    old_family_refresh(
+        &f,
+        &a,
+        "account:read keys:read keys:write orgs:create orgs:read sync:read sync:write",
+    )
+    .await;
     invalid_requests(&f, &a).await;
     mount(&mut f, false).await;
     assert_eq!(

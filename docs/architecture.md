@@ -203,8 +203,20 @@ confirmed with the original key and payload before receipt expiry. Current membe
 checked again for replay. Discovery projects only the caller's active membership, independently
 of asset authorization, while authentication and refresh sign the complete current team set.
 The explicit `organizations.allow_creation` policy defaults to false and does not close
-discovery or receipt confirmation. Team invitations, assets and Shared vault authorization
-remain outside this subset.
+discovery, receipt confirmation or name settings.
+
+Name-only PATCH is the first production Organization Cedar consumer. Its transaction loads
+the current verified Account/Device and active tenant Membership, then evaluates canonical
+`manage_organization` before comparing the caller-specific strong `If-Match`. It uses the
+canonical built-ins and a trusted Account/Organization/Membership graph; custom-policy and group
+storage remain separate work. An identical name is a no-op. A change atomically writes name,
+Organization update time and attributable organization audit. A forward migration initializes
+retained Organization update times from creation times; read/list/create confirmation/PATCH
+all project the later Organization/Membership time. Lost PATCH commit acknowledgement requires
+an explicit read and reviewed edit, with no idempotency receipt or automatic retry; creation
+keeps its independent original-key confirmation. Exact `orgs:write` is required, and refresh
+families keep their original scope ceiling. Team invitations, assets and Shared vault
+authorization remain outside this subset.
 Worker retention scheduling visits every vault through strictly increasing id pages of at most 1,000
 entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
 later appended ids, and restarts from the beginning on the next heartbeat to discover ids
