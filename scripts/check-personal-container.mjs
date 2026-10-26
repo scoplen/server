@@ -55,11 +55,17 @@ export function assertAccountAcceptance(receipt) {
 }
 
 export function assertTeamAcceptance(receipt) {
-  assert.deepEqual(receipt, { team_creation_personal_sync_verified: true });
+  assert.deepEqual(receipt, {
+    team_creation_personal_sync_verified: true,
+    team_settings_personal_sync_verified: true,
+  });
 }
 
 export function assertTeamRestartAcceptance(receipt) {
-  assert.deepEqual(receipt, { team_membership_restart_verified: true });
+  assert.deepEqual(receipt, {
+    team_membership_restart_verified: true,
+    team_settings_restart_verified: true,
+  });
 }
 
 export function assertDoctorAcceptance(result, healthy) {
@@ -1362,7 +1368,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/discovery/confirmation and subsequent encrypted Personal Host sync, native refresh and team/Host persistence across restart, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, Account password entry, independent Device admission, team creation/conditional name settings/discovery/confirmation and subsequent encrypted Personal Host sync, native refresh and renamed team/Host persistence across restart, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

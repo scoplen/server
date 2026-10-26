@@ -2,6 +2,7 @@
 //! Independent consumer of published Account/Device/sync contracts; no database access.
 
 use scoplen_api::{
+    ProblemDetails,
     account_admission::{
         AccountBootstrapSnapshot, AccountCommittedConfirmation, AccountDeviceAdmissionPayload,
         AccountDeviceAdmissionRequest, AccountPasswordLoginRequest, AccountPasswordLoginResponse,
@@ -14,7 +15,8 @@ use scoplen_api::{
         AuthTokenResponse,
     },
     organization::{
-        OrganizationCreateRequest, OrganizationListQuery, OrganizationPage, OrganizationResource,
+        MAX_ORGANIZATION_PROBLEM_BYTES, OrganizationCreateRequest, OrganizationListQuery,
+        OrganizationPage, OrganizationResource, OrganizationUpdateRequest,
     },
     sync::{
         SyncAccountDeviceWrap, SyncAccountKeyBundle, SyncAccountKeyBundleUpdate,
@@ -597,7 +599,71 @@ async fn verify_team(
     if created.name != "Disposable HTTPS team" || created.membership.roles != ["owner"] {
         return Err("created team name or owner membership differs");
     }
-    let team = Team { resource: created, creation_body: request, idempotency_key: key };
+    let mut team = Team { resource: created, creation_body: request, idempotency_key: key };
+    read_team(https, device, token, account_id, &team).await?;
+    let name = "Renamed HTTPS team";
+    let update = OrganizationUpdateRequest::new(name)
+        .and_then(|request| request.to_json())
+        .map_err(|_| "team name request invalid")?;
+    let path = format!("/api/v1/orgs/{}", team.resource.id);
+    let original_etag = team.resource.etag.clone();
+    let bytes = https
+        .update_organization(
+            &path,
+            &update,
+            &device.keys.signing,
+            &token.access_token,
+            &original_etag,
+            200,
+        )
+        .await?;
+    let updated =
+        OrganizationResource::from_json(&bytes).map_err(|_| "updated team Resource invalid")?;
+    let mut expected = team.resource.clone();
+    expected.name = name.into();
+    expected.updated_at = updated.updated_at.clone();
+    expected.etag = updated.etag.clone();
+    if updated != expected
+        || updated.etag == original_etag
+        || updated.updated_at < team.resource.updated_at
+    {
+        return Err("team name update changed unrelated state or retained its old version");
+    }
+    team.resource = updated;
+    let bytes = https
+        .update_organization(
+            &path,
+            &update,
+            &device.keys.signing,
+            &token.access_token,
+            &original_etag,
+            412,
+        )
+        .await?;
+    let problem = ProblemDetails::from_json(&bytes, MAX_ORGANIZATION_PROBLEM_BYTES)
+        .map_err(|_| "stale team name problem invalid")?;
+    if problem.status != 412
+        || problem.code.as_str() != "organization.precondition_failed"
+        || problem.changed
+        || problem.retryable
+    {
+        return Err("stale team name update did not retain its refusal semantics");
+    }
+    let bytes = https
+        .update_organization(
+            &path,
+            &update,
+            &device.keys.signing,
+            &token.access_token,
+            &team.resource.etag,
+            200,
+        )
+        .await?;
+    if OrganizationResource::from_json(&bytes).map_err(|_| "no-op team Resource invalid")?
+        != team.resource
+    {
+        return Err("unchanged team name changed the Resource");
+    }
     read_team(https, device, token, account_id, &team).await?;
     Ok(team)
 }
@@ -616,7 +682,7 @@ async fn read_team(
     if OrganizationResource::from_json(&bytes).map_err(|_| "team read response invalid")?
         != team.resource
     {
-        return Err("team read differs from creation");
+        return Err("team read differs from the retained current Resource");
     }
     let bytes = https
         .create_organization(
@@ -629,7 +695,7 @@ async fn read_team(
     if OrganizationResource::from_json(&bytes).map_err(|_| "team confirmation response invalid")?
         != team.resource
     {
-        return Err("team confirmation differs from creation");
+        return Err("team confirmation differs from the retained current Resource");
     }
     let bytes = https.exchange("GET", "/api/v1/orgs", b"", proof, 200).await?;
     let after = OrganizationPage::from_json(&bytes)

@@ -230,20 +230,27 @@ password credential, verifies and decrypts the complete signed bootstrap, comple
 authenticates and refreshes its session. With the check's explicit creation opt-in, that Device
 confirms empty membership discovery, creates a team with its Account as the sole owner,
 reads and lists the same team, and explicitly confirms the original idempotency key without
-creating another team. It refreshes its session again, then opens its own ARK and Personal vault-key wraps.
+creating another team. One conditional PATCH renames the team. A second request with the original
+ETag must return the exact unchanged/nonretryable stale-precondition problem; an unchanged-name
+PATCH with the new ETag must preserve the complete Resource. Direct read, discovery and exact
+confirmation with the original creation key/body must return that renamed Resource.
+It refreshes its session again, then opens its own ARK and Personal vault-key wraps.
 It verifies and decrypts the retained Host, edits and uploads it with its own Device signature;
 the original Device refreshes and verifies the returned edit. Only these public HTTPS operations
 can produce the separate content-free `account-acceptance.json` receipt. Completing the team
 operations and subsequent Personal sync also produces a distinct content-free
-`team-acceptance.json` receipt; the existing Account receipt and descriptor are unchanged.
+`team-acceptance.json` receipt with separate creation and name-settings success fields; the existing
+Account receipt and descriptor are unchanged.
 With `--across-restart`, the native process retains its Device keys, original unused refresh
-credential, created team and expected Host in memory while the controller performs the same
+credential, renamed team Resource and expected Host in memory while the controller performs the same
 graceful stop/start and readiness checks. Only fixed ready/resume markers cross the process
 boundary. Its first authentication request after restart refreshes that original credential,
 then direct team read, exact confirmation with the original creation request/idempotency key,
-and discovery must return the same Account-bound team and sole owner membership. The retained
+and discovery must return the same renamed Account-bound Resource, including its ETag, update
+time and sole owner membership. The retained
 signed Host must still decrypt to the same content. These completed operations produce the
-distinct content-free `team-restart-acceptance.json` receipt. No Account or Device is seeded
+distinct content-free `team-restart-acceptance.json` receipt with membership and name-settings
+success fields. No Account or Device is seeded
 again, no credential is written to a fixture file, and failed operations are not retried.
 The coordinator bounds its wait and aborts/reaps its driver if readiness or the controller fails.
 Before startup, Compose rendering checks the default `false`, explicit `true` and unchanged

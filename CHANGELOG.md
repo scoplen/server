@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Extend the public Personal-container consumer through conditional team renaming, stale-ETag
+  refusal and unchanged-name saves. Require the original creation confirmation and discovery
+  to return the renamed Resource, and preserve its complete version through the real restart
+  before confirming encrypted Personal Host access. Acceptance receipts require both checks.
+
 - Add name-only team settings on SQLite and PostgreSQL through current tenant Membership and
   canonical Cedar authorization. Strong If-Match prevents stale edits; unchanged names are
   no-ops, and name/time/audit commit together. Preserve creation-confirmation recovery while
