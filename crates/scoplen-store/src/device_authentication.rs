@@ -8,9 +8,9 @@ use std::{
 
 use scoplen_api::auth::{AuthTokenResponse, DeviceAccessScope, INITIAL_DEVICE_ACCESS_SCOPE};
 use scoplen_crypto::{
-    DeviceAccessToken, DeviceAccessTokenClaims, DeviceAuthContext, DeviceCertificate, DpopProof,
-    DpopTarget, DpopToken, RevocationStatement, TrustedDeviceAccessTokenKeys, VerifiedDpopProof,
-    dpop_jwk_thumbprint, p256_verify,
+    DeviceAccessToken, DeviceAccessTokenClaims, DeviceAuthContext, DeviceCertificate,
+    DeviceOrganizationSnapshot, DpopProof, DpopTarget, DpopToken, RevocationStatement,
+    TrustedDeviceAccessTokenKeys, VerifiedDpopProof, dpop_jwk_thumbprint, p256_verify,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Row, Sqlite, SqlitePool, Transaction};
@@ -511,6 +511,7 @@ fn narrowed_scope(original: &str) -> Result<String, DeviceAuthenticationError> {
 
 fn sign_response(
     principal: &CurrentPrincipal,
+    organizations: Vec<DeviceOrganizationSnapshot>,
     origin: &str,
     keyring: &DeviceTokenKeyring,
     scope: &str,
@@ -531,7 +532,7 @@ fn sign_response(
         did: Uuid::from_bytes(principal.device_id),
         jti: Uuid::now_v7(),
         cnf_jkt: principal.jkt.clone(),
-        org: vec![],
+        org: organizations,
         scope: scope.to_owned(),
         iat,
         exp: iat.checked_add(600).ok_or(DeviceAuthenticationError::Clock)?,
@@ -867,8 +868,12 @@ impl SqliteStore {
         .rows_affected()
             == 1;
         if let (true, Some(principal)) = (claimed, principal.as_ref()) {
+            let organizations =
+                crate::organizations::sqlite_organization_snapshot(&mut tx, &principal.account_id)
+                    .await?;
             let (response, refresh_digest) = sign_response(
                 principal,
+                organizations,
                 trusted_origin,
                 keyring,
                 INITIAL_DEVICE_ACCESS_SCOPE,
@@ -1101,8 +1106,18 @@ impl SqliteStore {
         };
         let remaining_seconds = u64::try_from((family.expires_at_ms - now) / 1_000)
             .map_err(|_| DeviceAuthenticationError::Clock)?;
-        let (response, new_digest) =
-            sign_response(&principal, trusted_origin, keyring, &scope, now, remaining_seconds)?;
+        let organizations =
+            crate::organizations::sqlite_organization_snapshot(&mut tx, &principal.account_id)
+                .await?;
+        let (response, new_digest) = sign_response(
+            &principal,
+            organizations,
+            trusted_origin,
+            keyring,
+            &scope,
+            now,
+            remaining_seconds,
+        )?;
         sqlx::query("UPDATE device_refresh_tokens SET spent_at_ms=? WHERE token_digest=? AND spent_at_ms IS NULL")
             .bind(now).bind(digest.as_slice()).execute(&mut *tx).await?;
         sqlx::query("INSERT INTO device_refresh_tokens (token_digest, family_id, issued_at_ms) VALUES (?, ?, ?)")
@@ -1391,8 +1406,14 @@ impl PostgresStore {
         .rows_affected()
             == 1;
         if let (true, Some(principal)) = (claimed, principal.as_ref()) {
+            let organizations = crate::organizations::postgres_organization_snapshot(
+                &mut tx,
+                &principal.account_id,
+            )
+            .await?;
             let (response, refresh_digest) = sign_response(
                 principal,
+                organizations,
                 trusted_origin,
                 keyring,
                 INITIAL_DEVICE_ACCESS_SCOPE,
@@ -1746,8 +1767,18 @@ impl PostgresStore {
         };
         let remaining_seconds = u64::try_from((family.expires_at_ms - now) / 1_000)
             .map_err(|_| DeviceAuthenticationError::Clock)?;
-        let (response, new_digest) =
-            sign_response(&principal, trusted_origin, keyring, &scope, now, remaining_seconds)?;
+        let organizations =
+            crate::organizations::postgres_organization_snapshot(&mut tx, &principal.account_id)
+                .await?;
+        let (response, new_digest) = sign_response(
+            &principal,
+            organizations,
+            trusted_origin,
+            keyring,
+            &scope,
+            now,
+            remaining_seconds,
+        )?;
         let updated = sqlx::query(
             "UPDATE device_refresh_tokens SET spent_at_ms=$1 WHERE token_digest=$2 AND spent_at_ms IS NULL",
         )

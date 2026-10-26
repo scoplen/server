@@ -20,6 +20,7 @@ use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_audit::{checkpoint_payload, deployment_checkpoint_payload};
 use scoplen_store::account_entry_admission::{AccountEntryCleanup, AccountEntryStateError};
 use scoplen_store::kms::{AuditCheckpointSigner, LocalAuditSigner, LocalKeyFile};
+use scoplen_store::organizations::OrganizationStoreError;
 use scoplen_store::refresh_retention::{RefreshCleanupError, RefreshCleanupReport};
 use scoplen_store::sync::MAX_PAGE_SIZE;
 use scoplen_store::{
@@ -672,6 +673,9 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
     fn cleanup_refresh_families(
         &self,
     ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send;
+    fn cleanup_organization_creation_receipts(
+        &self,
+    ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
     fn requeue_expired_jobs(
         &self,
         now_ms: i64,
@@ -759,6 +763,12 @@ macro_rules! impl_worker_store_backend {
                 &self,
             ) -> impl Future<Output = Result<RefreshCleanupReport, RefreshCleanupError>> + Send {
                 <$store>::cleanup_refresh_families(self)
+            }
+
+            fn cleanup_organization_creation_receipts(
+                &self,
+            ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send {
+                <$store>::cleanup_organization_creation_receipts(self)
             }
 
             fn requeue_expired_jobs(
@@ -938,6 +948,21 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 "refresh retention pass"
             ),
             Err(error) => error!(%error, role = "worker", "refresh retention pass failed"),
+        }
+        let organization_cleanup = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.cleanup_organization_creation_receipts() => result,
+        };
+        match organization_cleanup {
+            Ok(removed) => info!(
+                role = "worker",
+                removed_organization_creation_receipts = removed,
+                "organization receipt retention pass"
+            ),
+            Err(error) => {
+                error!(%error, role = "worker", "organization receipt retention pass failed");
+            }
         }
         let retention = tokio::select! {
             biased;
@@ -1268,6 +1293,7 @@ pub(crate) fn api_router_with_limits(
         read_body_limits,
         NotificationHub::default(),
         crate::AccountSettings::default(),
+        crate::OrganizationSettings::default(),
     )
 }
 
@@ -1283,6 +1309,7 @@ pub(crate) fn api_router_with_notifications(
     read_body_limits: ReadBodyLimits,
     notifications: NotificationHub,
     accounts: crate::AccountSettings,
+    organizations: crate::OrganizationSettings,
 ) -> Router {
     let auth_backend = match &database {
         ListenerDatabase::Sqlite(store) => device_auth::AuthBackend::Sqlite(store.clone()),
@@ -1344,6 +1371,12 @@ pub(crate) fn api_router_with_notifications(
                 trusted_origin.clone(),
                 auth_backend.clone(),
                 key_management.clone(),
+            ))
+            .merge(crate::organizations::router(
+                trusted_origin.clone(),
+                auth_backend.clone(),
+                key_management.clone(),
+                organizations,
             ))
             .merge(device_auth::router(
                 trusted_origin.clone(),
@@ -1409,6 +1442,7 @@ pub(crate) async fn run_public_listener(
         read_body_limits,
         notifications.clone(),
         config.accounts,
+        config.organizations,
     )
     .merge(crate::console::router(&config.console.assets_dir, api_enabled).await)
     .layer(Extension(deployment_lease));
@@ -2440,6 +2474,7 @@ mod tests {
                     ReadBodyLimits::default(),
                     server_notifications,
                     crate::AccountSettings::default(),
+                    crate::OrganizationSettings::default(),
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )

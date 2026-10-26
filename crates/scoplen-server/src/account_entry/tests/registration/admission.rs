@@ -49,6 +49,7 @@ async fn serve_api(backend: AuthBackend, directory: &Path) -> (SocketAddr, JoinH
         ReadBodyLimits::default(),
         NotificationHub::default(),
         settings(true),
+        crate::OrganizationSettings::default(),
     ))
     .await
 }

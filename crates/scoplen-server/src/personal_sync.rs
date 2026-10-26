@@ -105,7 +105,7 @@ impl PersonalSyncAuthenticator {
             .map(|(principal, _)| principal)
     }
 
-    async fn authenticate_request(
+    pub(crate) async fn authenticate_request(
         &self,
         operation: DeviceAccessOperation,
         method: &Method,

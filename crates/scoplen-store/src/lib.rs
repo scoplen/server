@@ -28,6 +28,7 @@ pub mod operator_admission;
 pub mod operator_sessions;
 pub mod operator_setup;
 pub mod operator_token_keys;
+pub mod organizations;
 mod pre_migration;
 pub mod refresh_retention;
 #[cfg(test)]

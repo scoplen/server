@@ -192,6 +192,19 @@ or multipart access. Database-backed roles initialize the configured object back
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat.
+The same heartbeat retires at most 100 expired team-creation receipts using their expiry
+index. It does not delete organizations, memberships or their audit events. Team creation and
+current-membership discovery use the enrolled Device/DPoP boundary with transaction-current
+Account admission. A creation transaction inserts the organization, the initial active owner
+membership, its organization audit and its Account-scoped 24-hour idempotency receipt together.
+SQLite uses its writer transaction; PostgreSQL locks the creating Account before checking the
+receipt. An unconfirmed business commit returns an explicit unknown outcome and can only be
+confirmed with the original key and payload before receipt expiry. Current membership is
+checked again for replay. Discovery projects only the caller's active membership, independently
+of asset authorization, while authentication and refresh sign the complete current team set.
+The explicit `organizations.allow_creation` policy defaults to false and does not close
+discovery or receipt confirmation. Team invitations, assets and Shared vault authorization
+remain outside this subset.
 Worker retention scheduling visits every vault through strictly increasing id pages of at most 1,000
 entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
 later appended ids, and restarts from the beginning on the next heartbeat to discover ids

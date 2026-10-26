@@ -31,6 +31,8 @@ pub struct Config {
     pub sync: SyncSettings,
     /// Native Account registration and deployment-lifetime identity retention.
     pub accounts: AccountSettings,
+    /// Explicit deployment policy for Account self-service team creation.
+    pub organizations: OrganizationSettings,
     /// API-role browser console assets.
     pub console: ConsoleSettings,
 }
@@ -149,6 +151,7 @@ impl Config {
         }
         self.sync.apply_environment()?;
         self.accounts.apply_environment()?;
+        self.organizations.apply_environment()?;
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -342,6 +345,27 @@ impl AccountSettings {
             return Err(ConfigError::Invalid(
                 "accounts.used_account_id_limit must be positive and its retained byte size must fit uint64".into(),
             ));
+        }
+        Ok(())
+    }
+}
+
+/// Account self-service team creation policy, independent of existing membership discovery.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default)]
+pub struct OrganizationSettings {
+    /// Permit new teams; existing memberships and creation confirmations remain available.
+    pub allow_creation: bool,
+}
+
+impl OrganizationSettings {
+    fn apply_environment(&mut self) -> Result<(), ConfigError> {
+        if let Some(value) = env_value("SPL_ORGANIZATIONS_ALLOW_CREATION") {
+            self.allow_creation = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_ORGANIZATIONS_ALLOW_CREATION must be true or false".into(),
+                )
+            })?;
         }
         Ok(())
     }
@@ -857,6 +881,16 @@ mod tests {
         assert_eq!(config.console.assets_dir, PathBuf::from("web/console/dist"));
         assert!(config.accounts.registration_enabled);
         assert_eq!(config.accounts.used_account_id_limit, 1_048_576);
+        assert!(!config.organizations.allow_creation);
+    }
+
+    #[test]
+    fn organization_creation_requires_an_explicit_boolean_setting() {
+        let config: Config = toml::from_str("[organizations]\nallow_creation = true\n")
+            .expect("organization creation policy");
+        config.validate().expect("creation policy is valid");
+        assert!(config.organizations.allow_creation);
+        assert!(toml::from_str::<Config>("[organizations]\nallow_creation = 'true'\n").is_err());
     }
 
     #[test]
