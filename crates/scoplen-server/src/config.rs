@@ -861,7 +861,7 @@ pub enum ConfigError {
     #[error("could not read {path}: {source}")]
     Read { path: PathBuf, source: std::io::Error },
     /// Configuration file parse error.
-    #[error("could not parse {path}: {source}")]
+    #[error("could not parse configuration file {path}; check TOML syntax and value types")]
     Parse { path: PathBuf, source: Box<toml::de::Error> },
     /// A value violates a deployment invariant.
     #[error("{0}")]
