@@ -404,7 +404,11 @@ The disposable container check registers a real password Account, signs in an in
 Device, refreshes its native session, and verifies encrypted Host synchronization in both
 directions through public HTTPS APIs after team creation, discovery and exact confirmation.
 Team verification writes its own content-free receipt, preserving the Account receipt and
-integration descriptor. It also runs a populated pre-migration SQLite database through the
+integration descriptor. The same native consumer retains its Device credentials in memory
+across the real service restart. Its first authentication operation afterward refreshes the
+original credential, then verifies the same team and owner membership through direct read,
+discovery and exact creation confirmation, and decrypts the saved Host. A separate content-free
+receipt records this restart acceptance. It also runs a populated pre-migration SQLite database through the
 current image, then starts a matching old server against an explicit offline snapshot recovery.
 It covers that upgrade path without implementing complete deployment backup/restore.
 The same check runs native `splctl doctor` against the container's configured public HTTPS

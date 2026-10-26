@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Verify Account-owned team and encrypted Host persistence through the Personal container's
+  real service restart. Retain the original Device session in memory, refresh it before team
+  read/discovery and exact creation confirmation, and write a distinct content-free restart receipt.
+
 - Check the native read-only `splctl doctor` against the Personal production container's
   public HTTPS origin, including fixed findings, stopped-service failure and restart recovery.
   Preserve diagnostic inputs and absent local deployment state, and document native and

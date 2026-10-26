@@ -224,7 +224,7 @@ It performs
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
 Personal invitation/enrollment/pairing API routes and old `/pair` landing return 404. Its separate
-`verify-account --with-team` invocation registers a randomly generated password Account and writes a signed,
+`verify-account --with-team --across-restart` invocation registers a randomly generated password Account and writes a signed,
 encrypted Host through the first enrolled Device. A fresh independent Device derives the same
 password credential, verifies and decrypts the complete signed bootstrap, completes admission,
 authenticates and refreshes its session. With the check's explicit creation opt-in, that Device
@@ -236,11 +236,21 @@ the original Device refreshes and verifies the returned edit. Only these public 
 can produce the separate content-free `account-acceptance.json` receipt. Completing the team
 operations and subsequent Personal sync also produces a distinct content-free
 `team-acceptance.json` receipt; the existing Account receipt and descriptor are unchanged.
+With `--across-restart`, the native process retains its Device keys, original unused refresh
+credential, created team and expected Host in memory while the controller performs the same
+graceful stop/start and readiness checks. Only fixed ready/resume markers cross the process
+boundary. Its first authentication request after restart refreshes that original credential,
+then direct team read, exact confirmation with the original creation request/idempotency key,
+and discovery must return the same Account-bound team and sole owner membership. The retained
+signed Host must still decrypt to the same content. These completed operations produce the
+distinct content-free `team-restart-acceptance.json` receipt. No Account or Device is seeded
+again, no credential is written to a fixture file, and failed operations are not retried.
+The coordinator bounds its wait and aborts/reaps its driver if readiness or the controller fails.
 Before startup, Compose rendering checks the default `false`, explicit `true` and unchanged
 invalid input; the server's configuration tests verify invalid booleans are rejected.
 No SQL identity seed or internal server coordinator is used. Repeated bootstrap and Account checks are rejected without
-changing their completed artifacts. The controller then restarts the service and verifies unchanged public
-keyrings and completed setup state. Every HTTPS exchange has a whole-request deadline and
+changing their completed artifacts. The controller verifies unchanged public
+keyrings and completed setup state during that same service restart. Every HTTPS exchange has a whole-request deadline and
 operations are not retried automatically.
 
 The Account check exercises an independent protocol consumer against the production image;

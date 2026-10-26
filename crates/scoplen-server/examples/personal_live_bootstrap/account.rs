@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use super::{Https, Result, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use std::fmt::Write as _;
+use std::{fmt::Write as _, path::Path, time::Duration};
 
 const CHALLENGE: &str = "/api/v1/auth/accounts/requests/challenge";
 const REGISTER: &str = "/api/v1/auth/accounts/register";
@@ -561,12 +561,18 @@ async fn admitted_vault_key(
         .map_err(|_| "Personal vault-key decryption failed")
 }
 
+struct Team {
+    resource: OrganizationResource,
+    creation_body: Vec<u8>,
+    idempotency_key: Uuid,
+}
+
 async fn verify_team(
     https: &Https,
     device: &Device,
     token: &AuthTokenResponse,
     account_id: Uuid,
-) -> Result<()> {
+) -> Result<Team> {
     let proof = Some((&device.keys.signing, Some(token.access_token.as_str())));
     let bytes = https.exchange("GET", "/api/v1/orgs", b"", proof, 200).await?;
     let before = OrganizationPage::from_json(&bytes)
@@ -591,16 +597,37 @@ async fn verify_team(
     if created.name != "Disposable HTTPS team" || created.membership.roles != ["owner"] {
         return Err("created team name or owner membership differs");
     }
-    let bytes =
-        https.exchange("GET", &format!("/api/v1/orgs/{}", created.id), b"", proof, 200).await?;
-    if OrganizationResource::from_json(&bytes).map_err(|_| "team read response invalid")? != created
+    let team = Team { resource: created, creation_body: request, idempotency_key: key };
+    read_team(https, device, token, account_id, &team).await?;
+    Ok(team)
+}
+
+async fn read_team(
+    https: &Https,
+    device: &Device,
+    token: &AuthTokenResponse,
+    account_id: Uuid,
+    team: &Team,
+) -> Result<()> {
+    let proof = Some((&device.keys.signing, Some(token.access_token.as_str())));
+    let bytes = https
+        .exchange("GET", &format!("/api/v1/orgs/{}", team.resource.id), b"", proof, 200)
+        .await?;
+    if OrganizationResource::from_json(&bytes).map_err(|_| "team read response invalid")?
+        != team.resource
     {
         return Err("team read differs from creation");
     }
-    let bytes =
-        https.create_organization(&request, &device.keys.signing, &token.access_token, key).await?;
+    let bytes = https
+        .create_organization(
+            &team.creation_body,
+            &device.keys.signing,
+            &token.access_token,
+            team.idempotency_key,
+        )
+        .await?;
     if OrganizationResource::from_json(&bytes).map_err(|_| "team confirmation response invalid")?
-        != created
+        != team.resource
     {
         return Err("team confirmation differs from creation");
     }
@@ -610,13 +637,44 @@ async fn verify_team(
     after
         .validate_for_account(account_id, OrganizationListQuery::default())
         .map_err(|_| "current team discovery belongs to another Account")?;
-    if after.items != [created] || after.next_cursor.is_some() {
+    if after.items.as_slice() != std::slice::from_ref(&team.resource) || after.next_cursor.is_some()
+    {
         return Err("team confirmation duplicated or lost membership");
     }
     Ok(())
 }
 
-pub(super) async fn verify(https: &Https, with_team: bool) -> Result<()> {
+async fn await_restart(directory: &Path) -> Result<()> {
+    super::write_private(&directory.join("team-restart.ready"), "ready")?;
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match std::fs::metadata(directory.join("team-restart.resume")) {
+                Ok(_) => {
+                    return if super::read_bounded(&directory.join("team-restart.resume"), 16)?
+                        .as_str()
+                        == "resume\n"
+                    {
+                        Ok(())
+                    } else {
+                        Err("invalid team restart resume signal")
+                    };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(_) => return Err("could not inspect team restart resume signal"),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "controller did not restart the server before the deadline")?
+}
+
+pub(super) async fn verify(
+    https: &Https,
+    with_team: bool,
+    restart_directory: Option<&Path>,
+) -> Result<()> {
     let account = Registration::new(&https.origin)?;
     account.register(https).await?;
     let first_token = account.device.authenticate(https).await?;
@@ -644,12 +702,12 @@ pub(super) async fn verify(https: &Https, with_team: bool) -> Result<()> {
     admit(https, &second, login, &snapshot, &bootstrap).await?;
     let token = second.authenticate(https).await?;
     let token = second.refresh(https, token).await?;
-    let token = if with_team {
-        verify_team(https, &second, &token, snapshot.account_id).await?;
-        second.refresh(https, token).await?
+    let team = if with_team {
+        Some(verify_team(https, &second, &token, snapshot.account_id).await?)
     } else {
-        token
+        None
     };
+    let token = if with_team { second.refresh(https, token).await? } else { token };
     let vault_key =
         admitted_vault_key(https, &second, &token, &snapshot, &bootstrap, account.device.id)
             .await?;
@@ -686,5 +744,25 @@ pub(super) async fn verify(https: &Https, with_team: bool) -> Result<()> {
         &object,
         2,
     )
-    .await
+    .await?;
+    if let Some(directory) = restart_directory {
+        let team = team.as_ref().ok_or("restart acceptance requires a created team")?;
+        if token.refresh_expires_in <= 240 {
+            return Err("native refresh lifetime cannot span the bounded restart check");
+        }
+        await_restart(directory).await?;
+        let token = second.refresh(https, token).await?;
+        read_team(https, &second, &token, snapshot.account_id, team).await?;
+        download(
+            https,
+            &second,
+            &token,
+            (snapshot.personal_vault_id, &vault_key),
+            &second,
+            &object,
+            2,
+        )
+        .await?;
+    }
+    Ok(())
 }
