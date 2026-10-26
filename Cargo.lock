@@ -4037,9 +4037,17 @@ dependencies = [
 name = "scoplen-ctl"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
+ "futures-util",
+ "hyper-util",
+ "rcgen",
+ "reqwest",
+ "rustls",
  "scoplen-server",
  "tokio",
+ "tokio-rustls",
+ "uuid",
 ]
 
 [[package]]

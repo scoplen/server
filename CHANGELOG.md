@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add read-only `splctl doctor` configuration and trusted public HTTPS health/readiness checks,
+  with bounded requests, explicit additional CA trust and actionable fixed findings. Full
+  deployment diagnostics and the console status page remain incomplete.
+
 - Verify real password Account registration/login, independent Device admission, native refresh
   and bidirectional encrypted Host synchronization in the Personal production-container check.
   The public-API consumer uses random disposable keys without identity seeding and writes a
