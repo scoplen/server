@@ -6,8 +6,11 @@ bounded asset manifest is checked by the production server on startup. The runti
 distroless and runs as UID/GID `65532:65532`, with a read-only root filesystem and a writable
 private data volume. No image is published by these commands.
 
+For a new single-node PostgreSQL deployment, use the
+[PostgreSQL Compose override](postgres-container.md) with this same server image and TLS setup.
+
 Maturity remains Exploration. Complete deployment/release gates, signed images, SBOM/provenance,
-Helm and PostgreSQL/MinIO examples, backup/restore, and physical Passkey interoperability remain
+Helm and MinIO examples, backup/restore, and physical Passkey interoperability remain
 separate roadmap work. `all` retains the existing role semantics; the CA and gateway roles do
 not yet provide the complete managed-access workflow.
 

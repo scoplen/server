@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add a single-node PostgreSQL Compose override with a digest-pinned database, persistent
+  storage, startup health dependency and no database host port. Reuse the existing server
+  image, private key/object volume and HTTPS setup; document password configuration,
+  first login, diagnostics, retained state and upgrade limits.
+
 - Exercise two independent password Accounts through public registration, Device admission,
   team settings and encrypted Personal sync in the production-container check. Compare foreign
   and absent team read/update refusals, retain both owners' complete Resources and Hosts,

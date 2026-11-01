@@ -83,6 +83,14 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 24.16.0
+      - name: Validate PostgreSQL deployment Compose
+        env:
+          SCOPLEN_SERVER_HOST: localhost
+          SCOPLEN_TLS_DIRECTORY: /tmp/scoplen-compose-render
+          SCOPLEN_POSTGRES_PASSWORD: compose-render-only
+        run: >-
+          docker compose --env-file deploy/.env.example
+          -f deploy/compose.personal.yaml -f deploy/compose.postgres.yaml config --quiet
       - name: Test container-check cleanup boundaries
         run: node --test scripts/check-personal-container.test.mjs
       - name: Build native public HTTPS consumers
