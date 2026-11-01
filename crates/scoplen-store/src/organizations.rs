@@ -23,6 +23,7 @@ use crate::{
 };
 
 mod name;
+mod team;
 
 /// Fixed public classes without submitted names, credentials or database diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -41,6 +42,8 @@ pub enum OrganizationStoreError {
     NotFound,
     #[error("organization creation conflicts with the original request")]
     Conflict,
+    #[error("team invitation is unavailable")]
+    InvitationDenied,
     #[error("organization storage is unavailable")]
     StorageUnavailable,
     #[error("organization creation commit outcome is unknown")]
@@ -180,7 +183,7 @@ async fn postgres_principal(
 macro_rules! organizations {
     ($store:ty, $db:ty, $begin:literal, $lock:ident, $principal:ident, $audit:ident, $snapshot:ident, $postgres:literal) => {
         impl $store {
-            /// Retire at most 100 expired creation receipts without changing team state.
+            /// Retire at most 100 expired receipts per team receipt kind without changing teams.
             ///
             /// # Errors
             /// Returns a fixed storage error; a count is disclosed only after confirmed commit.
@@ -191,8 +194,10 @@ macro_rules! organizations {
                 let now = now_ms()?;
                 let removed = sqlx::query("DELETE FROM organization_creation_receipts WHERE (account_id,idempotency_key) IN (SELECT account_id,idempotency_key FROM organization_creation_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
                     .bind(now).execute(&mut *tx).await?.rows_affected();
+                let lifecycle_removed = sqlx::query("DELETE FROM organization_operation_receipts WHERE (account_id,idempotency_key) IN (SELECT account_id,idempotency_key FROM organization_operation_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
                 tx.commit().await?;
-                Ok(removed)
+                Ok(removed + lifecycle_removed)
             }
 
             /// Atomically create a team, its sole initial owner, audit and 24-hour receipt.
@@ -270,7 +275,7 @@ macro_rules! organizations {
                 tx:&mut Transaction<'_,$db>, account:&[u8;16], organization:&[u8],
             )->Result<OrganizationResource,OrganizationStoreError>{
                 let length=if $postgres {"octet_length(o.name)"}else{"length(CAST(o.name AS BLOB))"};
-                let query=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND m.status='active'");
+                let query=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND m.status='active' AND o.dissolved_at_ms IS NULL");
                 let row=sqlx::query(&query).bind(organization).bind(account.as_slice())
                     .fetch_optional(&mut **tx).await?.ok_or(OrganizationStoreError::NotFound)?;
                 resource(&row)
@@ -304,7 +309,7 @@ macro_rules! organizations {
                 check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
                 let cursor=query.cursor.unwrap_or(Uuid::nil());
                 let length=if $postgres {"octet_length(o.name)"}else{"length(CAST(o.name AS BLOB))"};
-                let sql=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.id>$2 ORDER BY o.id LIMIT $3");
+                let sql=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.dissolved_at_ms IS NULL AND o.id>$2 ORDER BY o.id LIMIT $3");
                 let rows=sqlx::query(&sql).bind(expected.account_id.as_slice()).bind(cursor.as_bytes().as_slice())
                     .bind(i64::from(query.limit)+1).fetch_all(&mut *tx).await?;
                 let more=rows.len()>usize::from(query.limit);
@@ -321,7 +326,7 @@ macro_rules! organizations {
             ->Result<Vec<DeviceOrganizationSnapshot>,DeviceAuthenticationError>{
             // Even one byte per entry could not fit a larger array in the complete token.
             // Fetch one lookahead and fail rather than issue a truncated discovery snapshot.
-            let rows=sqlx::query("SELECT o.id FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' ORDER BY o.id LIMIT $2")
+            let rows=sqlx::query("SELECT o.id FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.dissolved_at_ms IS NULL ORDER BY o.id LIMIT $2")
                 .bind(account.as_slice()).bind(i64::try_from(MAX_DEVICE_ACCESS_TOKEN_BYTES+1).map_err(|_|DeviceAuthenticationError::Database)?)
                 .fetch_all(&mut **tx).await?;
             if rows.len()>MAX_DEVICE_ACCESS_TOKEN_BYTES{return Err(DeviceAuthenticationError::Database);}

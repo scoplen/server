@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: 4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0
+          ref: 96d2cdb1ed9e582a6fa006e5b4a32dd56835e362
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -153,7 +153,7 @@ jobs:
         run: cargo test --locked -p scoplen-store --test account_password_login --features postgres-integration -- --test-threads=1
       - name: Check independent Device admission and exact historical confirmation
         run: cargo test --locked -p scoplen-store --test account_device_admission --features postgres-integration -- --test-threads=1
-      - name: Check native Account entry HTTP and startup on SQLite and PostgreSQL
+      - name: Check native Account entry, team lifecycle HTTP and startup on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2
       - name: Check PostgreSQL operator setup, passkeys, and uncertain commits
@@ -196,6 +196,10 @@ jobs:
         env:
           SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
         run: cargo test --locked -p scoplen-store --test organization_name_migrations --features postgres-integration postgres_name_migration_preserves_creation_membership_receipt_and_audit -- --exact --test-threads=1
+      - name: Check populated team lifecycle forward migration
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
+        run: cargo test --locked -p scoplen-store --test team_lifecycle_migrations --features postgres-integration postgres_team_lifecycle_migration_preserves_identity_audit_and_admission_debt -- --exact --test-threads=1
       - name: Create isolated team HTTP database
         run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organizations_http_ci'
       - name: Check PostgreSQL team creation, discovery, receipts and uncertain commits

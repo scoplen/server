@@ -18,13 +18,13 @@ use super::{
 };
 
 fn name_authorization(
-    expected: &CurrentPrincipal,
+    account: Uuid,
     organization: Uuid,
     value: &OrganizationResource,
     membership_status: &str,
     now: i64,
+    action: &str,
 ) -> Result<(OrganizationAuthorizationContext, Request, Entities), OrganizationStoreError> {
-    let account = Uuid::from_bytes(expected.account_id);
     let trusted = OrganizationAuthorizationContext::new(
         account,
         organization,
@@ -50,7 +50,7 @@ fn name_authorization(
     };
     let request = Request::new(
         uid("Account", account)?,
-        "Action::\"manage_organization\""
+        format!("Action::\"{action}\"")
             .parse::<EntityUid>()
             .map_err(|_| OrganizationStoreError::StorageUnavailable)?,
         uid("Organization", organization)?,
@@ -58,7 +58,7 @@ fn name_authorization(
         None,
     )
     .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
-    // The Account predicate comes only from transaction-current principal verification.
+    // Account and Membership bindings come from transaction-current identity and tenant reads.
     // Groups and custom policies have no production storage in this first Organization route.
     let entities = Entities::from_json_value(
         serde_json::json!([
@@ -76,15 +76,34 @@ fn name_authorization(
     Ok((trusted, request, entities))
 }
 
-fn authorize_name_change(
+pub(super) fn authorize_action(
     expected: &CurrentPrincipal,
     organization: Uuid,
     value: &OrganizationResource,
     membership_status: &str,
     now: i64,
+    action: &str,
+) -> Result<(), OrganizationStoreError> {
+    authorize_account_action(
+        Uuid::from_bytes(expected.account_id),
+        organization,
+        value,
+        membership_status,
+        now,
+        action,
+    )
+}
+
+pub(super) fn authorize_account_action(
+    account: Uuid,
+    organization: Uuid,
+    value: &OrganizationResource,
+    membership_status: &str,
+    now: i64,
+    action: &str,
 ) -> Result<(), OrganizationStoreError> {
     let (trusted, request, entities) =
-        name_authorization(expected, organization, value, membership_status, now)?;
+        name_authorization(account, organization, value, membership_status, now, action)?;
     let authorizer = OrganizationAuthorizer::new(organization, &PolicySet::new())
         .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
     match authorizer.authorize(&trusted, &request, &entities) {
@@ -121,7 +140,7 @@ macro_rules! name_settings {
                 $lock(&mut tx, &expected.account_id, false).await?;
                 check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
                 let suffix = if $postgres { " FOR UPDATE OF o,m" } else { "" };
-                let query = format!("SELECT m.status,o.updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2{suffix}");
+                let query = format!("SELECT m.status,o.updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND o.dissolved_at_ms IS NULL{suffix}");
                 let row = sqlx::query(&query)
                     .bind(organization.as_bytes().as_slice())
                     .bind(expected.account_id.as_slice())
@@ -135,7 +154,7 @@ macro_rules! name_settings {
                     &mut tx, &expected.account_id, organization.as_bytes(),
                 ).await?;
                 let now = now_ms()?;
-                authorize_name_change(expected, organization, &current, &status, now)?;
+                authorize_action(expected, organization, &current, &status, now, "manage_organization")?;
                 if current.etag != if_match {
                     return Err(OrganizationStoreError::PreconditionFailed);
                 }
@@ -148,6 +167,7 @@ macro_rules! name_settings {
                 sqlx::query("UPDATE organizations SET name=$1,updated_at_ms=$2 WHERE id=$3")
                     .bind(&request.name).bind(updated_at)
                     .bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
+                Self::team_revision(&mut tx, organization, now).await?;
                 let event = serde_json::to_vec(&serde_json::json!({
                     "action":"organization.name_updated", "account_id":Uuid::from_bytes(expected.account_id),
                     "device_id":Uuid::from_bytes(expected.device_id),"organization_id":organization,
@@ -217,13 +237,20 @@ mod tests {
         let (principal, mut value) = fixture();
         for role in ["owner", "administrator"] {
             value.membership.roles = vec![role.into()];
-            authorize_name_change(&principal, value.id, &value, "active", 1_000)
+            authorize_action(&principal, value.id, &value, "active", 1_000, "manage_organization")
                 .expect("permitted role");
         }
         for role in ["member", "security_auditor", "approver", "future_role"] {
             value.membership.roles = vec![role.into()];
             assert_eq!(
-                authorize_name_change(&principal, value.id, &value, "active", 1_000),
+                authorize_action(
+                    &principal,
+                    value.id,
+                    &value,
+                    "active",
+                    1_000,
+                    "manage_organization"
+                ),
                 Err(OrganizationStoreError::PermissionDenied)
             );
         }
@@ -244,9 +271,15 @@ mod tests {
                 value.id = Uuid::now_v7();
             }
             let status = if case == 2 { "suspended" } else { "active" };
-            let (trusted, request, entities) =
-                name_authorization(&principal, original.id, &value, status, 1_000)
-                    .expect("same production graph constructor");
+            let (trusted, request, entities) = name_authorization(
+                Uuid::from_bytes(principal.account_id),
+                original.id,
+                &value,
+                status,
+                1_000,
+                "manage_organization",
+            )
+            .expect("same production graph constructor");
             assert!(!matches!(
                 authorizer.authorize(&trusted, &request, &entities),
                 Ok(Decision::Allow)

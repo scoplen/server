@@ -144,7 +144,13 @@ self-hosted server, host agent, administration CLI, and web console.
   do not write. Unconfirmed updates require an explicit read and reviewed edit, independently of
   original-key creation confirmation. Custom-policy/group storage and broader Cedar graph
   integration remain open.
-  Team invitations, asset permissions, Shared vaults and dissolution remain open.
+  Named-Account invitations and member transitions use current Device/Account admission,
+  current Cedar authority, fixed recipient and role-grant checks, conditional Resource ETags
+  and audit-atomic transactions on both databases. Separate invitation passwords are verified
+  through the shared digest profile with bounded matching-recipient attempts. Last-Owner
+  protection and historical confirmation preserve the distinction between a past acceptance
+  and current authority. Dissolution disables only its team and retains Accounts, Personal
+  inventory, other teams and audit. Asset permissions and Shared vaults remain open.
   The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

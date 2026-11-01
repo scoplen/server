@@ -23,6 +23,12 @@ pub enum AccountEntryEndpoint {
     PasswordOptions = 3,
     PasswordLogin = 4,
     DeviceAdmission = 5,
+    TeamInvitationCreate = 6,
+    TeamInvitationAccept = 7,
+    TeamInvitationRevoke = 8,
+    TeamMemberUpdate = 9,
+    TeamMemberRemove = 10,
+    TeamDissolve = 11,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.
@@ -112,6 +118,8 @@ impl AccountEntryPrivateBucket<'_> {
     ) -> Result<(i64, Vec<u8>), AccountEntryStateError> {
         use AccountEntryEndpoint::{
             DeviceAdmission, PasswordLogin, PasswordOptions, Register, RequestChallenge,
+            TeamDissolve, TeamInvitationAccept, TeamInvitationCreate, TeamInvitationRevoke,
+            TeamMemberRemove, TeamMemberUpdate,
         };
         match self {
             Self::Username(key) if matches!(endpoint, PasswordOptions | PasswordLogin) => {
@@ -124,7 +132,18 @@ impl AccountEntryPrivateBucket<'_> {
                 Ok((3, id.as_bytes().to_vec()))
             }
             Self::EstablishedAccount(id)
-                if matches!(endpoint, Register | PasswordLogin | DeviceAdmission) =>
+                if matches!(
+                    endpoint,
+                    Register
+                        | PasswordLogin
+                        | DeviceAdmission
+                        | TeamInvitationCreate
+                        | TeamInvitationAccept
+                        | TeamInvitationRevoke
+                        | TeamMemberUpdate
+                        | TeamMemberRemove
+                        | TeamDissolve
+                ) =>
             {
                 Ok((4, id.0.as_bytes().to_vec()))
             }

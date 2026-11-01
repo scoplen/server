@@ -112,6 +112,18 @@ impl PersonalSyncAuthenticator {
         uri: &Uri,
         headers: &HeaderMap,
     ) -> Result<(CurrentPrincipal, u64), AuthFailure> {
+        self.authenticate_request_with_scopes(operation, method, uri, headers)
+            .await
+            .map(|(principal, expires_at, _)| (principal, expires_at))
+    }
+
+    pub(crate) async fn authenticate_request_with_scopes(
+        &self,
+        operation: DeviceAccessOperation,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(CurrentPrincipal, u64, String), AuthFailure> {
         let raw_token = single_header(headers, AUTHORIZATION.as_str(), 4_101)?
             .strip_prefix("DPoP ")
             .ok_or_else(authentication_required)?;
@@ -132,7 +144,7 @@ impl PersonalSyncAuthenticator {
         uri: &Uri,
         raw_token: &str,
         raw_proof: &str,
-    ) -> Result<(CurrentPrincipal, u64), AuthFailure> {
+    ) -> Result<(CurrentPrincipal, u64, String), AuthFailure> {
         let token = DeviceAccessToken::parse(raw_token).map_err(|_| authentication_required())?;
         let keyring = self.backend.keyring(&self.kms).await.map_err(|_| storage_unavailable())?;
         let mut trusted = TrustedDeviceAccessTokenKeys::new(&self.trusted_origin)
@@ -159,10 +171,10 @@ impl PersonalSyncAuthenticator {
         if principal.jkt != claims.cnf_jkt {
             return Err(authentication_required());
         }
-        if !operation.required_scope().is_present_in(&claims.scope) {
+        if !operation.has_accepted_scope(&claims.scope) {
             return Err(policy_denied());
         }
-        Ok((principal, claims.exp))
+        Ok((principal, claims.exp, claims.scope.clone()))
     }
 }
 
@@ -195,7 +207,7 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         let operation = DeviceAccessOperation::from_route(method.as_str(), uri.path())
             .filter(|operation| *operation == DeviceAccessOperation::Notifications)
             .ok_or_else(authentication_required)?;
-        let (principal, expires_at) = self
+        let (principal, expires_at, _) = self
             .authenticate_credentials(
                 operation,
                 method,

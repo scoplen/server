@@ -1,9 +1,24 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/96d2cdb1ed9e582a6fa006e5b4a32dd56835e362/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
 export interface components {
   schemas: {
+    TeamRole: TeamRole;
+    TeamInvitationStatus: TeamInvitationStatus;
+    TeamMemberStatus: TeamMemberStatus;
+    TeamInvitationCreateRequest: TeamInvitationCreateRequest;
+    TeamInvitationAcceptRequest: TeamInvitationAcceptRequest;
+    TeamInvitationResource: TeamInvitationResource;
+    TeamInvitationPage: TeamInvitationPage;
+    TeamMemberUpdateRequest: TeamMemberUpdateRequest;
+    TeamMemberResource: TeamMemberResource;
+    TeamMemberPage: TeamMemberPage;
+    TeamAcceptanceReceipt: TeamAcceptanceReceipt;
+    TeamDissolveRequest: TeamDissolveRequest;
+    TeamDissolutionReceipt: TeamDissolutionReceipt;
+    TeamInvitationDeniedProblem: TeamInvitationDeniedProblem;
+    TeamBodyTooLargeProblem: TeamBodyTooLargeProblem;
     OrganizationCreateRequest: OrganizationCreateRequest;
     OrganizationResource: OrganizationResource;
     OrganizationMembership: OrganizationMembership;
@@ -14,8 +29,11 @@ export interface components {
     OrganizationDeniedProblem: OrganizationDeniedProblem;
     OrganizationNotFoundProblem: OrganizationNotFoundProblem;
     OrganizationConflictProblem: OrganizationConflictProblem;
+    OrganizationPreconditionFailedProblem: OrganizationPreconditionFailedProblem;
+    OrganizationPreconditionRequiredProblem: OrganizationPreconditionRequiredProblem;
     OrganizationStorageUnavailableProblem: OrganizationStorageUnavailableProblem;
     OrganizationCommitOutcomeUnknownProblem: OrganizationCommitOutcomeUnknownProblem;
+    OrganizationUpdateCommitOutcomeUnknownProblem: OrganizationUpdateCommitOutcomeUnknownProblem;
     Resource: Resource;
     ResourcePage: ResourcePage;
     ProblemDetails: ProblemDetails;
@@ -86,8 +104,6 @@ export interface components {
     Account: Resource;
     Device: Resource;
     Organization: Resource;
-    Member: Resource;
-    Invitation: Resource;
     Group: Resource;
     IdentityProvider: Resource;
     ServicePrincipal: Resource;
@@ -586,3 +602,34 @@ export type OrganizationCommitOutcomeUnknownProblem = ProblemDetails & { status:
 
 export type OrganizationUpdateCommitOutcomeUnknownProblem = ProblemDetails & { status: 503; code: "organization.commit_outcome_unknown"; changed: true; retryable: false; };
 // END GENERATED Organizations
+
+// BEGIN GENERATED TeamMembership
+export type TeamRole = "administrator" | "approver" | "member" | "owner" | "security_auditor";
+export type TeamInvitationStatus = "pending" | "accepted" | "revoked" | "expired" | "locked";
+export type TeamMemberStatus = "active" | "suspended" | "removed";
+export interface TeamInvitationCreateRequest { invitation_id: string; recipient_username: string; roles: TeamRole[]; password_verifier: string; }
+export interface TeamInvitationAcceptRequest { password: string; }
+export interface TeamInvitationResource {
+  id: string; etag: string; created_at: string; updated_at: string;
+  data: { organization_id: string; organization_name: string; recipient_account_id: string; recipient_username: string; roles: TeamRole[]; issuer_account_id: string; expires_at: string; [extension: string]: unknown; } &
+    ({ status: "accepted"; membership_id: string } | { status: Exclude<TeamInvitationStatus, "accepted">; membership_id: null });
+  [extension: string]: unknown;
+}
+export interface TeamInvitationPage { items: TeamInvitationResource[]; next_cursor: string | null; [extension: string]: unknown; }
+export interface TeamMemberUpdateRequest { roles: TeamRole[]; status: "active" | "suspended"; }
+export interface TeamMemberResource {
+  id: string; etag: string; created_at: string; updated_at: string;
+  data: { organization_id: string; account_id: string; username: string; roles: TeamRole[]; status: TeamMemberStatus; [extension: string]: unknown };
+  [extension: string]: unknown;
+}
+export interface TeamMemberPage { items: TeamMemberResource[]; next_cursor: string | null; [extension: string]: unknown; }
+/** Historical confirmation only; every echoed id must bind the captured original operation. */
+export interface TeamAcceptanceReceipt { invitation_id: string; organization_id: string; account_id: string; membership_id: string; accepted_at: string; [extension: string]: unknown; }
+export interface TeamDissolveRequest { organization_id: string; }
+/** Historical confirmation only; conveys no current team-data access. */
+export interface TeamDissolutionReceipt { organization_id: string; dissolved_at: string; [extension: string]: unknown; }
+
+export type TeamInvitationDeniedProblem = ProblemDetails & { status: 409; code: "organization.invitation_denied"; changed: false; retryable: false; };
+
+export type TeamBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
+// END GENERATED TeamMembership

@@ -399,8 +399,9 @@ Account-owned team creation is disabled by default. Set the existing
 `SPL_ORGANIZATIONS_ALLOW_CREATION=true` deployment variable and recreate the service to opt in;
 existing membership discovery, exact creation confirmation and name settings remain available
 when disabled.
-Creating a team preserves Personal data and does not grant Operator access. Invitations, team
-assets, Shared vaults, dissolution and remaining team administration remain separate roadmap work.
+Creating a team preserves Personal data and does not grant Operator access. Named-account
+invitations, member administration and dissolution use the Device-authenticated API described
+below. Team assets, Shared vaults and remaining administration remain separate roadmap work.
 The disposable container check registers two independent password Accounts. Each signs in and
 admits a fresh Device, refreshes its native session, creates and conditionally renames its own
 team, and verifies encrypted Host synchronization in both directions through public HTTPS.
@@ -681,8 +682,65 @@ ETag returns the current Resource without changing its time or audit. A changed 
 update time and attributable organization audit commit together. All team projections retain
 the later Organization/Membership update time. An unknown PATCH commit returns 503 with
 `changed: true, retryable: false`; read the team before another explicit edit, without automatic
-mutation replay. This is independent of original-key creation confirmation. Invitations, asset
-permissions, team vaults and dissolution remain separate work.
+mutation replay. This is independent of original-key creation confirmation. Asset permissions
+and team vaults remain separate work.
+
+The team lifecycle API uses `teams:manage` for administration and `teams:join` for the named
+recipient's preview/acceptance and self-leave. Obtain a fresh Device session when an existing
+refresh family lacks these scopes. All paths below retain `/api/v1/orgs/{org}`:
+
+| Path | Operations |
+| --- | --- |
+| `/invitations` | POST invitation creation and GET administrative pagination |
+| `/invitations/{invitation}` | GET authorized preview and conditional DELETE revocation |
+| `/invitations/{invitation}/accept` | POST named-recipient acceptance |
+| `/members` | GET administrative pagination |
+| `/members/{membership}` | GET member, conditional PATCH roles/status, conditional DELETE removal or self-leave |
+| `/dissolve` | POST Owner-authorized dissolution |
+
+Creation takes `invitation_id`, an existing canonical `recipient_username`, built-in `roles`
+and the shared protocol's `password_verifier`. Generate the invitation's separate eight-symbol
+password in the native core and derive that verifier with the deployment origin, Organization
+and invitation ids. The server retains only the verifier. Share the public
+`/join-team#organization=...&invitation=...` link and the password separately. That page explains
+how to open Join team in Scoplen and performs no acceptance. Another Account cannot preview
+or accept the invitation, even with its password. Invitations expire after 24 hours; five
+incorrect matching-recipient password attempts lock acceptance. An administrator can revoke
+a pending or locked invitation. A lost password cannot be retrieved; revoke and issue a new one.
+
+Creation and acceptance require the original UUIDv7 `Idempotency-Key` and no `If-Match`.
+Creation confirmation rechecks current administrative permission and returns the current
+Invitation Resource. Acceptance takes exactly `{"password":"..."}` and returns an immutable
+receipt. An exact acceptance replay returns that historical receipt after current Device and
+Account authentication, including after removal or dissolution; it never restores membership.
+Both retain the original 24-hour confirmation deadline. Source and authenticated Account
+admission allow 30 and ten attempts per minute respectively, independently per mutation kind,
+using the existing bounded durable admission store.
+
+Member PATCH takes complete `roles` and `status` (`active` or `suspended`) and the exact
+Member Resource ETag in `If-Match`. DELETE takes that ETag; an active or suspended member
+can leave its own membership, and only an active caller may instead use its current
+Organization Resource ETag. Self-leave grants no directory or asset-reading permission.
+Only an Owner can grant Owner or modify an
+existing Owner. Suspending, demoting or removing the final active Owner conflicts. Restore
+suspended membership through authorized PATCH; a removed member needs a fresh named
+invitation. Equal-value PATCH and repeat authorized removed-state DELETE add no audit event.
+
+Dissolution requires an active Owner, current Cedar permission, the exact Organization ETag,
+an original UUIDv7 operation key and `{"organization_id":"..."}` matching the path. One
+transaction disables the team, revokes memberships and pending invitations, increments its
+tenant revision, and retains final audit and a 24-hour historical receipt. Retrying with the
+same Account, key, body and original If-Match confirms that receipt without requiring a now
+inactive team. Personal Accounts, Devices, keys, encrypted inventory and other teams remain
+usable. Installed remote host trust needs separate removal; dissolution does not edit sshd.
+No team inventory, grants, certificates or team notification subscriptions are served by this
+initial lifecycle subset; their own roadmap outcomes remain required.
+
+Unconfirmed creation, acceptance or dissolution commits return
+`organization.commit_outcome_unknown` with `changed: true, retryable: true`; explicitly retry
+only the captured original operation with a fresh proof during its original receipt lifetime.
+Other unconfirmed team mutations have `retryable: false`: refresh and review before another
+explicit edit. Missing receipts or matching current state cannot prove an earlier rollback.
 
 Server integration tests seed real signed legacy Account/Device artifacts directly into owned
 SQLite and PostgreSQL fixtures, then exercise passkey setup, fresh Operator login, public
