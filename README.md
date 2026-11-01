@@ -420,6 +420,13 @@ origin, verifies fixed successful findings, stopped-service failure and restart 
 and checks that the diagnostic inputs and absent local deployment state remain unchanged.
 See the procedure for running the bundled or native CLI against a deployment.
 
+For a new single-node PostgreSQL deployment, follow the
+[PostgreSQL container procedure](docs/postgres-container.md). Its Compose override uses the
+same server image and HTTPS configuration, waits for its digest-pinned database to be healthy,
+and retains the database and server keys in separate volumes without publishing a PostgreSQL
+host port. This provides an alternative new deployment; it does not migrate an existing SQLite
+database or complete high availability, MinIO or backup/restore.
+
 ## Personal console assets
 
 Run `pnpm --dir web/console install --frozen-lockfile` and
