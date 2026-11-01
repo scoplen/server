@@ -3971,7 +3971,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0#4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0"
+source = "git+https://github.com/scoplen/proto.git?rev=96d2cdb1ed9e582a6fa006e5b4a32dd56835e362#96d2cdb1ed9e582a6fa006e5b4a32dd56835e362"
 dependencies = [
  "base64 0.22.1",
  "cedar-policy",
@@ -3983,6 +3983,7 @@ dependencies = [
  "scoplen-model",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "ssh-key",
  "thiserror 2.0.21",
  "tokio-stream",
@@ -4010,7 +4011,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0#4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0"
+source = "git+https://github.com/scoplen/proto.git?rev=96d2cdb1ed9e582a6fa006e5b4a32dd56835e362#96d2cdb1ed9e582a6fa006e5b4a32dd56835e362"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4073,7 +4074,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0#4576b7a8b3c6fc6e9a3c7a4a7e134184340694c0"
+source = "git+https://github.com/scoplen/proto.git?rev=96d2cdb1ed9e582a6fa006e5b4a32dd56835e362#96d2cdb1ed9e582a6fa006e5b4a32dd56835e362"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

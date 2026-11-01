@@ -21,11 +21,19 @@ pub struct LegacyIdentity {
 
 impl LegacyIdentity {
     pub fn new(signing: &Ed25519SigningKey, client: &P256SigningKey) -> Self {
+        let device_kem = DeviceKemKeyPair::from_private_bytes(&[3; 32]).expect("device KEM");
+        Self::with_device_kem(signing, client, &device_kem)
+    }
+
+    pub fn with_device_kem(
+        signing: &Ed25519SigningKey,
+        client: &P256SigningKey,
+        device_kem: &DeviceKemKeyPair,
+    ) -> Self {
         let account_id = Uuid::now_v7();
         let device_id = Uuid::now_v7();
         let personal_vault_id = Uuid::now_v7();
         let kem = AccountKemKeyPair::from_private_bytes(&[4; 32]).expect("account KEM");
-        let device_kem = DeviceKemKeyPair::from_private_bytes(&[3; 32]).expect("device KEM");
         let ark = SecretBytes::new([11; 32]);
         let vault_key = SecretBytes::new([8; 32]);
         let mut key_bundle_update = SyncAccountKeyBundleUpdate {

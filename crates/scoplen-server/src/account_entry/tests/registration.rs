@@ -16,6 +16,7 @@ const REGISTER: &str = "/api/v1/auth/accounts/register";
 const JSON: &[(&str, &str)] = &[("Content-Type", "application/json")];
 
 mod admission;
+mod team;
 
 struct Registration {
     payload: AccountRegistrationPayload,
@@ -26,14 +27,18 @@ struct Registration {
 
 impl Registration {
     fn new() -> Self {
-        let root = Ed25519SigningKey::from_bytes(&[7; 32]).expect("test Account key");
-        let mut scalar = [0; 32];
-        scalar[31] = 7;
-        let device = P256SigningKey::from_bytes(&scalar).expect("independent test Device key");
-        let identity = crate::test_legacy_identity::LegacyIdentity::new(&root, &device);
+        Self::with_username("http-registration")
+    }
+
+    fn with_username(username: &str) -> Self {
+        let root = scoplen_crypto::generate_ed25519_signing_key().expect("independent Account key");
+        let device = scoplen_crypto::generate_p256_signing_key().expect("independent Device key");
+        let kem = scoplen_crypto::DeviceKemKeyPair::generate().expect("independent Device KEM");
+        let identity =
+            crate::test_legacy_identity::LegacyIdentity::with_device_kem(&root, &device, &kem);
         let secrets = PasswordSecrets::create(
             ORIGIN,
-            "http-registration",
+            username,
             SecretVec::new(b"a test password for HTTP registration".to_vec()),
         )
         .expect("real password derivation");
@@ -49,7 +54,7 @@ impl Registration {
         let payload = AccountRegistrationPayload {
             operation_id: Uuid::now_v7(),
             origin: ORIGIN.into(),
-            username: "http-registration".into(),
+            username: username.into(),
             account_id: identity.account_id,
             personal_vault_id: identity.personal_vault_id,
             device_id: identity.device_certificate.device_id,

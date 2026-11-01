@@ -29,6 +29,8 @@ use crate::{
     personal_sync::PersonalSyncAuthenticator,
 };
 
+mod team;
+
 #[derive(Clone)]
 struct OrganizationState {
     backend: AuthBackend,
@@ -49,6 +51,7 @@ pub(crate) fn router(
         .route("/api/v1/orgs", get(list))
         .route("/api/v1/orgs/{org}", get(read))
         .route("/api/v1/orgs/{org}", patch(update))
+        .merge(team::routes())
         .with_state(OrganizationState { backend, auth, origin, policy })
 }
 
@@ -321,6 +324,9 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
             (StatusCode::NOT_FOUND, "organization.not_found", false)
         }
         OrganizationStoreError::Conflict => (StatusCode::CONFLICT, "organization.conflict", false),
+        OrganizationStoreError::InvitationDenied => {
+            (StatusCode::CONFLICT, "organization.invitation_denied", false)
+        }
         OrganizationStoreError::StorageUnavailable => {
             (StatusCode::SERVICE_UNAVAILABLE, "organization.storage_unavailable", false)
         }
@@ -350,8 +356,12 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
     let (title, detail) = match code {
         "organization.not_found" => ("Team not found", "The requested team is unavailable."),
         "organization.conflict" => (
-            "Team creation conflict",
-            "Retain the original creation key and name; this key already belongs to another payload.",
+            "Team operation conflict",
+            "Review the current team state and preserve the original pending operation.",
+        ),
+        "organization.invitation_denied" => (
+            "Invitation unavailable",
+            "This invitation cannot be issued or accepted. Review the current team invitations with an administrator.",
         ),
         "organization.precondition_required" => (
             "Current team version required",
@@ -362,8 +372,8 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
             "Refresh the current team and review the edit before submitting its new ETag.",
         ),
         "organization.commit_outcome_unknown" => (
-            "Team creation unconfirmed",
-            "Retry the original key and name with a fresh proof within the original 24-hour window.",
+            "Team operation unconfirmed",
+            "Explicitly retry the original key, payload and any precondition with a fresh proof within the original 24-hour window.",
         ),
         "organization.storage_unavailable" => (
             "Teams unavailable",

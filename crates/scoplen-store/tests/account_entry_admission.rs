@@ -51,6 +51,12 @@ macro_rules! quotas {
             Endpoint::PasswordOptions,
             Endpoint::PasswordLogin,
             Endpoint::DeviceAdmission,
+            Endpoint::TeamInvitationCreate,
+            Endpoint::TeamInvitationAccept,
+            Endpoint::TeamInvitationRevoke,
+            Endpoint::TeamMemberUpdate,
+            Endpoint::TeamMemberRemove,
+            Endpoint::TeamDissolve,
         ] {
             let mut tasks = Vec::new();
             for index in 0..40 {
@@ -127,7 +133,17 @@ macro_rules! quotas {
         }
         let established =
             VerifiedAccountBucket::after_authentication(Uuid::now_v7()).expect("verified fixture");
-        for endpoint in [Endpoint::Register, Endpoint::PasswordLogin, Endpoint::DeviceAdmission] {
+        for endpoint in [
+            Endpoint::Register,
+            Endpoint::PasswordLogin,
+            Endpoint::DeviceAdmission,
+            Endpoint::TeamInvitationCreate,
+            Endpoint::TeamInvitationAccept,
+            Endpoint::TeamInvitationRevoke,
+            Endpoint::TeamMemberUpdate,
+            Endpoint::TeamMemberRemove,
+            Endpoint::TeamDissolve,
+        ] {
             for _ in 0..10 {
                 assert_eq!(
                     first
@@ -182,7 +198,7 @@ macro_rules! quotas {
             .await
             .expect("retained count");
         assert_eq!(actual, retained);
-        assert_eq!(retained, 13);
+        assert_eq!(retained, 25);
     }};
 }
 

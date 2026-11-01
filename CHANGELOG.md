@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add named-Account team invitations, member administration, self-leave and Owner dissolution
+  on SQLite and PostgreSQL. Bind invitations to an existing username and separate eight-symbol
+  password, retain digest-only verification and bounded attempt debt, and make membership,
+  tenant revision and audit changes atomic. Preserve exact historical acceptance/dissolution
+  confirmation without restoring authority; retain Accounts, Personal inventory and other teams.
+
 - Add a single-node PostgreSQL Compose override with a digest-pinned database, persistent
   storage, startup health dependency and no database host port. Reuse the existing server
   image, private key/object volume and HTTPS setup; document password configuration,
