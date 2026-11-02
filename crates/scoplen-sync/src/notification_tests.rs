@@ -32,7 +32,9 @@ async fn unmounted_organization_hints_do_not_use_personal_vault_authorization() 
         api::SyncNotification::MembershipsChanged,
         expected.clone(),
     ] {
-        send.send(event).await.expect("queued hint");
+        send.send(scoplen_store::sync_notifications::SyncNotificationMessage::Event(event))
+            .await
+            .expect("queued hint");
     }
     drop(send);
     crate::notification_fanout::dispatch(&authenticator, &hub, receive).await;
@@ -45,6 +47,23 @@ async fn unmounted_organization_hints_do_not_use_personal_vault_authorization() 
         events.try_recv(),
         Err(tokio::sync::broadcast::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn membership_rediscovery_is_account_targeted_and_content_free() {
+    let hub=NotificationHub::default();
+    let identity=TestAuthenticator::identity(Uuid::now_v7().into_bytes());
+    let sibling=TestAuthenticator::identity(Uuid::now_v7().into_bytes());
+    let foreign=AuthenticatedDevice{device_id:Uuid::now_v7().into_bytes(),account_id:Uuid::now_v7().into_bytes()};
+    let mut first=hub.subscribe(identity);
+    let mut second=hub.subscribe(sibling);
+    let mut other=hub.subscribe(foreign);
+    crate::notification_fanout::publish_memberships_changed(&TestAuthenticator::new(identity.device_id,true),&hub,identity.account_id).await;
+    for receiver in [&mut first,&mut second] {
+        let bytes=receiver.recv().await.expect("targeted hint");
+        assert_eq!(api::SyncNotification::from_cbor(&bytes),Ok(api::SyncNotification::MembershipsChanged));
+    }
+    assert!(matches!(other.try_recv(),Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
 }
 
 #[tokio::test]
@@ -114,7 +133,7 @@ async fn bounded_dispatch_overflow_and_hung_authorization_force_reconciliation()
     ready(&mut offline).await;
     let (send, receive) = tokio::sync::mpsc::channel(2);
     authenticator.notification_check_stalled.store(true, Ordering::SeqCst);
-    send.send(event).await.expect("queued hint");
+    send.send(scoplen_store::sync_notifications::SyncNotificationMessage::Event(event)).await.expect("queued hint");
     let worker_hub = hub.clone();
     let worker = tokio::spawn(async move {
         crate::notification_fanout::dispatch(&authenticator, &worker_hub, receive).await;

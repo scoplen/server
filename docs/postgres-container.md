@@ -67,7 +67,9 @@ docker compose --env-file deploy/.env -f deploy/compose.personal.yaml -f deploy/
 The console has no Account registration or new Device admission form. Native clients use the
 same password Account and encrypted Personal synchronization APIs on either database. Team
 creation defaults to disabled; set `SPL_ORGANIZATIONS_ALLOW_CREATION=true` and recreate the
-server to opt in. Invitations, team assets and Shared vaults remain separate roadmap work.
+server to opt in. Named-recipient invitations, membership administration, typed team inventory
+and persisted policies use the same native APIs as SQLite. Shared vaults retain their own
+roadmap outcomes.
 
 Read-only diagnosis and pending Operator setup recovery use the existing bundled CLI with
 both Compose files:

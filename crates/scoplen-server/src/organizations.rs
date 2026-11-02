@@ -29,6 +29,8 @@ use crate::{
     personal_sync::PersonalSyncAuthenticator,
 };
 
+mod group_policy;
+mod inventory;
 mod team;
 
 #[derive(Clone)]
@@ -37,6 +39,8 @@ struct OrganizationState {
     auth: PersonalSyncAuthenticator,
     origin: String,
     policy: OrganizationSettings,
+    notifications: scoplen_sync::notify::NotificationHub,
+    read_limits: scoplen_api::sync::SyncReadLimits,
 }
 
 pub(crate) fn router(
@@ -44,6 +48,8 @@ pub(crate) fn router(
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
     policy: OrganizationSettings,
+    notifications: scoplen_sync::notify::NotificationHub,
+    read_body_limits: scoplen_sync::http::ReadBodyLimits,
 ) -> Router {
     let auth = PersonalSyncAuthenticator::new(backend.clone(), kms, origin.clone());
     Router::new()
@@ -52,7 +58,65 @@ pub(crate) fn router(
         .route("/api/v1/orgs/{org}", get(read))
         .route("/api/v1/orgs/{org}", patch(update))
         .merge(team::routes())
-        .with_state(OrganizationState { backend, auth, origin, policy })
+        .merge(inventory::routes())
+        .merge(group_policy::routes())
+        .with_state(OrganizationState {
+            backend,
+            auth,
+            origin,
+            policy,
+            notifications,
+            read_limits: scoplen_api::sync::SyncReadLimits {
+                max_envelope_bytes: usize::try_from(read_body_limits.max_envelope_bytes())
+                    .expect("validated read limits"),
+                max_body_bytes: usize::try_from(read_body_limits.max_body_bytes())
+                    .expect("validated read limits"),
+            },
+        })
+}
+
+async fn notify_organization(state: &OrganizationState, organization: Uuid) {
+    let AuthBackend::Sqlite(store) = &state.backend else {
+        return;
+    };
+    if let Ok(event) = store.organization_inventory_event(organization).await {
+        scoplen_sync::notification_fanout::publish_current(
+            &state.auth,
+            &state.notifications,
+            &event,
+        )
+        .await;
+    } else {
+        tracing::warn!("organization notification unavailable after commit");
+    }
+}
+
+async fn notify_membership_account(state: &OrganizationState, account: [u8; 16]) {
+    if matches!(&state.backend, AuthBackend::Sqlite(_)) {
+        scoplen_sync::notification_fanout::publish_memberships_changed(
+            &state.auth,
+            &state.notifications,
+            account,
+        )
+        .await;
+    }
+}
+
+async fn notify_memberships(
+    state: &OrganizationState,
+    organization: Uuid,
+    membership: Option<Uuid>,
+) {
+    let AuthBackend::Sqlite(store) = &state.backend else {
+        return;
+    };
+    if let Ok(accounts) = store.organization_membership_accounts(organization, membership).await {
+        for account in accounts {
+            notify_membership_account(state, account).await;
+        }
+    } else {
+        tracing::warn!("membership notification unavailable after commit");
+    }
 }
 
 async fn create(State(state): State<OrganizationState>, request: Request<Body>) -> Response {
@@ -150,6 +214,9 @@ async fn update(State(state): State<OrganizationState>, request: Request<Body>) 
                 .await
         }
     };
+    if result.is_ok() {
+        notify_organization(&state, organization).await;
+    }
     resource_response(result, StatusCode::OK, &request_id)
 }
 
@@ -237,6 +304,9 @@ async fn handle(
                         .await
                 }
             };
+            if result.is_ok() {
+                notify_membership_account(&state, principal.account_id).await;
+            }
             resource_response(result, StatusCode::CREATED, &request_id)
         }
         DeviceAccessOperation::OrganizationList | DeviceAccessOperation::OrganizationRead => {
@@ -324,6 +394,9 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
             (StatusCode::NOT_FOUND, "organization.not_found", false)
         }
         OrganizationStoreError::Conflict => (StatusCode::CONFLICT, "organization.conflict", false),
+        OrganizationStoreError::ViewChanged => {
+            (StatusCode::CONFLICT, "organization.conflict", false)
+        }
         OrganizationStoreError::InvitationDenied => {
             (StatusCode::CONFLICT, "organization.invitation_denied", false)
         }

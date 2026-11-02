@@ -249,6 +249,8 @@ pub struct AuthFailure {
     pub detail: String,
     /// Whether retrying with the same request may succeed.
     pub retryable: bool,
+    /// Whether the owning transaction may already have changed durable state.
+    pub changed: bool,
 }
 
 impl AuthFailure {
@@ -271,7 +273,7 @@ impl AuthFailure {
         if title.trim().is_empty() || detail.trim().is_empty() {
             return Err("authentication problem text must not be empty".into());
         }
-        Ok(Self { status, code, title, detail, retryable })
+        Ok(Self { status, code, title, detail, retryable, changed: false })
     }
 }
 
@@ -311,6 +313,63 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         headers: &HeaderMap,
     ) -> Result<AuthenticatedDevice, AuthFailure>;
 
+    /// Retain the original access-token expiry for an Organization transaction.
+    /// # Errors
+    /// Returns the same authentication failures as `authenticate`.
+    async fn authenticate_expiring(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(AuthenticatedDevice, Option<u64>), AuthFailure> {
+        self.authenticate(method, uri, headers).await.map(|identity| (identity, None))
+    }
+
+    /// Additional current tenant-owned descriptors; a bare Organization kind is insufficient.
+    /// # Errors
+    /// Fails closed when current identity, membership or storage is unavailable.
+    async fn organization_vaults(
+        &self,
+        _identity: AuthenticatedDevice,
+        _expires_at: Option<u64>,
+    ) -> Result<Vec<api::SessionVault>, AuthFailure> {
+        Ok(Vec::new())
+    }
+
+    /// Read team history under the current object visibility transaction when this is a team vault.
+    /// # Errors
+    /// Invalid current identity, tenant authority and unavailable storage fail closed.
+    async fn organization_versions(
+        &self,
+        _identity: AuthenticatedDevice,
+        _expires_at: Option<u64>,
+        _vault: storage::VaultId,
+        _object: storage::ObjectId,
+        _limits: api::SyncReadLimits,
+    ) -> Result<Option<api::SyncVersionsResponse>, AuthFailure> {
+        Ok(None)
+    }
+
+    /// Commit a revision-bound Organization ACK with transaction-current authority.
+    /// # Errors
+    /// Returns fixed identity, membership, revision, cursor or storage failures.
+    async fn commit_organization_ack(
+        &self,
+        _identity: AuthenticatedDevice,
+        _expires_at: Option<u64>,
+        _vault: storage::VaultId,
+        _request: api::SyncOrganizationAckRequest,
+    ) -> Result<api::SyncOrganizationAckResponse, AuthFailure> {
+        Err(AuthFailure::new(
+            StatusCode::NOT_FOUND,
+            "sync.object_not_found",
+            "Sync object not found",
+            "The requested Organization inventory is unavailable.",
+            false,
+        )
+        .expect("static problem"))
+    }
+
     /// Authorize the device for one vault operation.
     ///
     /// # Errors
@@ -322,6 +381,47 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         vault: storage::VaultId,
         operation: SyncOperation,
     ) -> Result<(), AuthFailure>;
+
+    /// Authorize an HTTP operation retaining its original token lifetime.
+    /// # Errors
+    /// Returns current vault authorization and Organization read-only failures.
+    async fn authorize_expiring(
+        &self,
+        identity: AuthenticatedDevice,
+        _expires_at: Option<u64>,
+        vault: storage::VaultId,
+        operation: SyncOperation,
+    ) -> Result<(), AuthFailure> {
+        self.authorize(identity, vault, operation).await
+    }
+
+    /// Recheck current authority for one queued, content-free notification.
+    /// # Errors
+    /// Identity, membership and storage failures prohibit delivery.
+    async fn authorize_notification_event(
+        &self,
+        identity: AuthenticatedDevice,
+        event: &api::SyncNotification,
+    ) -> Result<(), AuthFailure> {
+        self.authorize_notifications(identity).await?;
+        match event {
+            api::SyncNotification::VaultAdvanced { vault, .. }
+            | api::SyncNotification::RotationPending { vault } => {
+                self.authorize(identity, *vault.as_bytes(), SyncOperation::Read).await
+            }
+            api::SyncNotification::DeviceRevoked | api::SyncNotification::MembershipsChanged => {
+                Ok(())
+            }
+            api::SyncNotification::OrganizationViewChanged { .. } => Err(AuthFailure::new(
+                StatusCode::NOT_FOUND,
+                "sync.object_not_found",
+                "Sync object not found",
+                "The requested Organization inventory is unavailable.",
+                false,
+            )
+            .expect("static problem")),
+        }
+    }
 
     /// Validate the decoded write envelopes before storage.
     ///
@@ -756,6 +856,7 @@ struct SyncHttpState<A> {
     read_body_limits: ReadBodyLimits,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn session<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     method: Method,
@@ -765,9 +866,9 @@ async fn session<A: SyncAuthenticator>(
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
-    let identity = state
+    let (identity, expires_at) = state
         .authenticator
-        .authenticate(&method, &uri, &headers)
+        .authenticate_expiring(&method, &uri, &headers)
         .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let body = to_bytes(body, MAX_SESSION_REQUEST_BYTES)
@@ -817,12 +918,13 @@ async fn session<A: SyncAuthenticator>(
         .account_id(identity)
         .await
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
-    let vaults = state
+    let mut vaults: Vec<_> = state
         .store
         .list_sync_vaults_for_account(account_id)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?
         .into_iter()
+        .filter(|vault| vault.kind != storage::VaultKind::Organization)
         .map(|vault| api::SessionVault {
             id: Uuid::from_bytes(vault.vault_id),
             kind: match vault.kind {
@@ -836,6 +938,13 @@ async fn session<A: SyncAuthenticator>(
             organization: None,
         })
         .collect();
+    vaults.extend(
+        state
+            .authenticator
+            .organization_vaults(identity, expires_at)
+            .await
+            .map_err(|error| SyncHttpError::from_auth(error, &instance))?,
+    );
     let cardinality_limits = state.store.sync_cardinality_limits();
     let response = api::SyncSessionResponse {
         server_version: server_version.to_string(),
@@ -1340,9 +1449,28 @@ async fn versions<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let object = parse_uuid(&object, "object", &instance)?;
-    let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Versions, &instance)
-            .await?;
+    let (identity, expires_at) = state
+        .authenticator
+        .authenticate_expiring(&method, &uri, &headers)
+        .await
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    if let Some(response) = state
+        .authenticator
+        .organization_versions(identity, expires_at, vault, object, state.read_body_limits.0)
+        .await
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?
+    {
+        return Ok(cbor_response(
+            response
+                .to_cbor_with_limits(state.read_body_limits.0)
+                .map_err(|_| SyncHttpError::invalid_stored_response(&instance))?,
+        ));
+    }
+    state
+        .authenticator
+        .authorize_expiring(identity, expires_at, vault, SyncOperation::Versions)
+        .await
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let versions = state
         .store
         .sync_versions_with_read_limits(vault, object, state.read_body_limits.0)
@@ -1546,12 +1674,32 @@ async fn ack<A: SyncAuthenticator>(
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let identity =
-        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Acknowledge, &instance)
-            .await?;
-    let body = to_bytes(body, MAX_ACK_REQUEST_BYTES)
+    let (identity, expires_at) = state
+        .authenticator
+        .authenticate_expiring(&method, &uri, &headers)
+        .await
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let body = to_bytes(body, api::MAX_SYNC_ORGANIZATION_ACK_REQUEST_BYTES)
         .await
         .map_err(|_| SyncHttpError::invalid(&instance, "acknowledgement request is too large"))?;
+    if let Ok(request) = api::SyncOrganizationAckRequest::from_cbor(&body) {
+        let response = state
+            .authenticator
+            .commit_organization_ack(identity, expires_at, vault, request)
+            .await
+            .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+        return Ok(cbor_response(response.to_cbor().map_err(|_| {
+            SyncHttpError::invalid(&instance, "invalid Organization acknowledgement")
+        })?));
+    }
+    state
+        .authenticator
+        .authorize(identity, vault, SyncOperation::Acknowledge)
+        .await
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    if body.len() > MAX_ACK_REQUEST_BYTES {
+        return Err(SyncHttpError::invalid(&instance, "acknowledgement request is too large"));
+    }
     let request = api::SyncAckRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid acknowledgement: {error}"))
     })?;
@@ -1574,14 +1722,14 @@ async fn authorize<A: SyncAuthenticator>(
     operation: SyncOperation,
     instance: &str,
 ) -> SyncResult<AuthenticatedDevice> {
-    let identity = state
+    let (identity, expires_at) = state
         .authenticator
-        .authenticate(method, uri, headers)
+        .authenticate_expiring(method, uri, headers)
         .await
         .map_err(|error| SyncHttpError::from_auth(error, instance))?;
     state
         .authenticator
-        .authorize(identity, vault, operation)
+        .authorize_expiring(identity, expires_at, vault, operation)
         .await
         .map_err(|error| SyncHttpError::from_auth(error, instance))?;
     Ok(identity)
@@ -1687,7 +1835,7 @@ impl SyncHttpError {
             error.code.as_str(),
             error.title,
             error.detail,
-            false,
+            error.changed,
             error.retryable,
         )
     }

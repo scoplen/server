@@ -128,6 +128,12 @@ async fn session<A: SyncAuthenticator>(
                         close(&mut socket, failure).await;
                         return;
                     }
+                    let Ok(event)=api::SyncNotification::from_cbor(&payload)else{close(&mut socket,Failure::Internal).await;return;};
+                    match timeout_at(expires.min(Instant::now()+CURRENT_STATE_TIMEOUT),state.authenticator.authorize_notification_event(authenticated.identity,&event)).await {
+                        Ok(Ok(()))=>{},
+                        Ok(Err(error)) if !error.status.is_server_error()=>continue,
+                        _=>{close(&mut socket,Failure::Internal).await;return;},
+                    }
                     if !matches!(timeout_at(expires.min(Instant::now() + SEND_TIMEOUT), socket.send(Message::Binary(payload.into()))).await, Ok(Ok(()))) {
                         return;
                     }

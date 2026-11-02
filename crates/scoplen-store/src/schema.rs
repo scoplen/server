@@ -126,10 +126,16 @@ const ORGANIZATION_MEMBERSHIPS: TableSpec = TableSpec {
             target_column: "account_id",
         },
     ],
-    indexes: &[IndexSpec {
-        name: "organization_memberships_account",
-        columns: &["account_id", "organization_id"],
-    }],
+    indexes: &[
+        IndexSpec {
+            name: "organization_memberships_account",
+            columns: &["account_id", "organization_id"],
+        },
+        IndexSpec {
+            name: "organization_memberships_owner_id",
+            columns: &["organization_id", "id"],
+        },
+    ],
 };
 
 const ORGANIZATION_INVITATIONS: TableSpec = TableSpec {
@@ -2698,7 +2704,419 @@ const ACCOUNT_ADMISSION_CAPABILITIES: TableSpec = TableSpec {
     ],
 };
 
+const ORGANIZATION_INVENTORY_VAULTS: TableSpec = TableSpec {
+    name: "organization_inventory_vaults",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "sync_vaults",
+            target_column: "vault_id",
+        },
+    ],
+    indexes: &[],
+};
+
+const ORGANIZATION_INVENTORY_OBJECTS: TableSpec = TableSpec {
+    name: "organization_inventory_objects",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "object_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "object_type",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_inventory_vaults",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "organization_inventory_vaults",
+            target_column: "vault_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_inventory_directory",
+        columns: &["organization_id", "object_type", "object_id"],
+    }],
+};
+
+const ORGANIZATION_INVENTORY_REFERENCES: TableSpec = TableSpec {
+    name: "organization_inventory_references",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "source_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "target_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_inventory_objects",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "source_id",
+            target_table: "organization_inventory_objects",
+            target_column: "object_id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_inventory_objects",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "target_id",
+            target_table: "organization_inventory_objects",
+            target_column: "object_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_inventory_incoming",
+        columns: &["organization_id", "target_id"],
+    }],
+};
+
+const ORGANIZATION_INVENTORY_RECEIPTS: TableSpec = TableSpec {
+    name: "organization_inventory_receipts",
+    columns: &[
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "idempotency_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "request_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_inventory_receipts_expiry",
+        columns: &["expires_at_ms"],
+    }],
+};
+
+const ORGANIZATION_INVENTORY_ACKS: TableSpec = TableSpec {
+    name: "organization_inventory_acks",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "view_revision",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "cursor",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "acknowledged_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "organization_inventory_vaults",
+            target_column: "vault_id",
+        },
+        ForeignKey {
+            source_column: "device_id",
+            target_table: "identity_devices",
+            target_column: "device_id",
+        },
+    ],
+    indexes: &[],
+};
+
+const ORGANIZATION_GROUPS: TableSpec = TableSpec {
+    name: "organization_groups",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec { name: "name", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec { name: "source", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "deleted_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
+};
+
+const ORGANIZATION_GROUP_MEMBERS: TableSpec = TableSpec {
+    name: "organization_group_members",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "group_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_groups",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "group_id",
+            target_table: "organization_groups",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_group_members_membership",
+        columns: &["organization_id", "membership_id"],
+    }],
+};
+
+const ORGANIZATION_POLICIES: TableSpec = TableSpec {
+    name: "organization_policies",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec { name: "name", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec { name: "source", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "enabled",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "deleted_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
+};
+
 const TABLES: &[TableSpec] = &[
+    ORGANIZATION_INVENTORY_VAULTS,
+    ORGANIZATION_INVENTORY_OBJECTS,
+    ORGANIZATION_INVENTORY_REFERENCES,
+    ORGANIZATION_INVENTORY_RECEIPTS,
+    ORGANIZATION_INVENTORY_ACKS,
+    ORGANIZATION_GROUPS,
+    ORGANIZATION_GROUP_MEMBERS,
+    ORGANIZATION_POLICIES,
     ORGANIZATION_INVITATIONS,
     ORGANIZATION_OPERATION_RECEIPTS,
     ORGANIZATION_MEMBERSHIPS,
@@ -3235,6 +3653,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261101000000_team_lifecycle.sql");
     const POSTGRES_TEAM_LIFECYCLE: &str =
         include_str!("../migrations/postgres/20261101000000_team_lifecycle.sql");
+    const SQLITE_ORGANIZATION_INVENTORY: &str =
+        include_str!("../migrations/sqlite/20261102000000_organization_inventory.sql");
+    const POSTGRES_ORGANIZATION_INVENTORY: &str =
+        include_str!("../migrations/postgres/20261102000000_organization_inventory.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -3288,6 +3710,7 @@ mod tests {
             SQLITE_ORGANIZATION_MEMBERSHIPS,
             SQLITE_ORGANIZATION_UPDATE_TIME,
             SQLITE_TEAM_LIFECYCLE,
+            SQLITE_ORGANIZATION_INVENTORY,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -3321,6 +3744,7 @@ mod tests {
             POSTGRES_ORGANIZATION_MEMBERSHIPS,
             POSTGRES_ORGANIZATION_UPDATE_TIME,
             POSTGRES_TEAM_LIFECYCLE,
+            POSTGRES_ORGANIZATION_INVENTORY,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

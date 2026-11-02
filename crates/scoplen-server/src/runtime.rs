@@ -1377,6 +1377,8 @@ pub(crate) fn api_router_with_notifications(
                 auth_backend.clone(),
                 key_management.clone(),
                 organizations,
+                notifications.clone(),
+                read_body_limits,
             ))
             .merge(device_auth::router(
                 trusted_origin.clone(),

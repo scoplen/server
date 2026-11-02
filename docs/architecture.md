@@ -28,8 +28,9 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@a604b726` revision. This workspace consumes only `scoplen-api`, `scoplen-crypto` and
-`scoplen-model`. This revision includes the Account password and Device admission contracts
+`proto@328f16d6` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
+`scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
+This revision includes the Account password, Device admission and Organization inventory contracts
 and removes retired Personal invitation/enrollment and pairing formats. Consuming these
 contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
 The server stores encrypted object envelopes
@@ -205,18 +206,23 @@ of asset authorization, while authentication and refresh sign the complete curre
 The explicit `organizations.allow_creation` policy defaults to false and does not close
 discovery, receipt confirmation or name settings.
 
-Name-only PATCH is the first production Organization Cedar consumer. Its transaction loads
-the current verified Account/Device and active tenant Membership, then evaluates canonical
-`manage_organization` before comparing the caller-specific strong `If-Match`. It uses the
-canonical built-ins and a trusted Account/Organization/Membership graph; custom-policy and group
-storage remain separate work. An identical name is a no-op. A change atomically writes name,
+Name-setting transactions load the current verified Account/Device and active tenant
+Membership, then evaluate canonical `manage_organization` before comparing the caller-specific
+strong `If-Match`. They use the
+canonical built-ins, enabled persisted policies and a trusted current tenant entity graph.
+Local group associations are loaded from current active Memberships; suspension/removal clears
+those associations in the same transaction. An identical name is a no-op. A change atomically writes name,
 Organization update time and attributable organization audit. A forward migration initializes
 retained Organization update times from creation times; read/list/create confirmation/PATCH
 all project the later Organization/Membership time. Lost PATCH commit acknowledgement requires
 an explicit read and reviewed edit, with no idempotency receipt or automatic retry; creation
 keeps its independent original-key confirmation. Exact `orgs:write` is required, and refresh
-families keep their original scope ceiling. Team invitations, assets and Shared vault
-authorization remain outside this subset.
+families keep their original scope ceiling. Inventory writes, local groups and persisted
+policies use that same current graph, immutable Organization vault ownership, atomic audit
+and view revision. The revision-fenced complete authorized view supplies independent object
+visibility, with current visibility also protecting retained history after deletion; live reads
+and complete views exclude deleted objects. Shared vault authorization
+retains its own roadmap outcome.
 Worker retention scheduling visits every vault through strictly increasing id pages of at most 1,000
 entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
 later appended ids, and restarts from the beginning on the next heartbeat to discover ids
@@ -237,7 +243,7 @@ lock, locks current identity and ownership rows, then locks the vault and rechec
 reading ACKs. This serializes with exclusive account-key publication and follows the
 account-before-vault order used by authenticated ACKs and object writes. The raw caller-supplied
 floor primitive and the worker entry share their backend's transaction-local purge SQL.
-Shared/organization membership-aware purging and policy filtering remain open. API/edge PostgreSQL
+Shared/organization membership-aware purging remains open. API/edge PostgreSQL
 startup and listener readiness are available; remaining shared-sync router mounting,
 application-level column encryption, control-plane audit event producers, and other worker jobs
 remain roadmap work.

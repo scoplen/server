@@ -14,10 +14,7 @@ use tokio::{
     time::{Instant, timeout, timeout_at},
 };
 
-use crate::{
-    http::{SyncAuthenticator, SyncOperation},
-    notify::NotificationHub,
-};
+use crate::{http::SyncAuthenticator, notify::NotificationHub};
 
 const QUEUE_CAPACITY: usize = 64;
 const DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -81,12 +78,15 @@ async fn read(
     store: Arc<PostgresStore>,
     mut listener: SyncNotificationListener,
     hub: NotificationHub,
-    send: mpsc::Sender<SyncNotification>,
+    send: mpsc::Sender<SyncNotificationMessage>,
 ) -> Result<(), SyncStoreError> {
     loop {
         match listener.recv().await {
             Ok(SyncNotificationMessage::Event(event)) => {
                 enqueue(&send, &hub, event);
+            }
+            Ok(event @ SyncNotificationMessage::MembershipsChanged { .. }) => {
+                enqueue_message(&send, &hub, event);
             }
             Ok(SyncNotificationMessage::Invalid) => {
                 tracing::warn!("invalid internal sync notification ignored");
@@ -118,9 +118,17 @@ async fn read(
 }
 
 pub(crate) fn enqueue(
-    send: &mpsc::Sender<SyncNotification>,
+    send: &mpsc::Sender<SyncNotificationMessage>,
     hub: &NotificationHub,
     event: SyncNotification,
+) {
+    enqueue_message(send, hub, SyncNotificationMessage::Event(event));
+}
+
+fn enqueue_message(
+    send: &mpsc::Sender<SyncNotificationMessage>,
+    hub: &NotificationHub,
+    event: SyncNotificationMessage,
 ) {
     if send.try_send(event).is_err() {
         hub.interrupt();
@@ -131,36 +139,76 @@ pub(crate) fn enqueue(
 pub(crate) async fn dispatch<A: SyncAuthenticator>(
     authenticator: &A,
     hub: &NotificationHub,
-    mut receive: mpsc::Receiver<SyncNotification>,
+    mut receive: mpsc::Receiver<SyncNotificationMessage>,
 ) {
     while let Some(event) = receive.recv().await {
-        let vault = match &event {
-            SyncNotification::VaultAdvanced { vault, .. }
-            | SyncNotification::RotationPending { vault } => *vault.as_bytes(),
-            SyncNotification::DeviceRevoked
-            | SyncNotification::OrganizationViewChanged { .. }
-            | SyncNotification::MembershipsChanged => continue,
-        };
-        for recipient in hub.active_devices() {
-            let deadline = Instant::now() + DATABASE_TIMEOUT;
-            let permitted = timeout_at(deadline, async {
-                authenticator.authorize_notifications(recipient).await?;
-                authenticator.authorize(recipient, vault, SyncOperation::Read).await
-            })
-            .await;
-            let permitted = if Instant::now() >= deadline { None } else { Some(permitted) };
-            match permitted {
-                Some(Ok(Ok(()))) => {
-                    let _ = hub.publish(recipient, &event);
-                }
-                Some(Ok(Err(error))) if !error.status.is_server_error() => {}
-                _ => {
-                    hub.interrupt();
-                    tracing::warn!(
-                        "sync notification authorization unavailable; sockets must reconcile"
-                    );
-                    break;
-                }
+        match event {
+            SyncNotificationMessage::Event(event) => {
+                publish_current(authenticator, hub, &event).await;
+            }
+            SyncNotificationMessage::MembershipsChanged { account_id } => {
+                publish_memberships_changed(authenticator, hub, account_id).await;
+            }
+            SyncNotificationMessage::Interrupted | SyncNotificationMessage::Invalid => {
+                hub.interrupt();
+            }
+        }
+    }
+}
+
+/// Publish a committed content-free hint only to currently authorized connected devices.
+/// SQLite authoring calls this after commit; PostgreSQL uses its transactional listener.
+pub async fn publish_current<A: SyncAuthenticator>(
+    authenticator: &A,
+    hub: &NotificationHub,
+    event: &SyncNotification,
+) {
+    if matches!(event, SyncNotification::DeviceRevoked | SyncNotification::MembershipsChanged) {
+        return;
+    }
+    publish_matching(authenticator, hub, event, None).await;
+}
+
+/// Ask only one Account's current connected devices to rediscover their memberships.
+pub async fn publish_memberships_changed<A: SyncAuthenticator>(
+    authenticator: &A,
+    hub: &NotificationHub,
+    account_id: [u8; 16],
+) {
+    publish_matching(authenticator, hub, &SyncNotification::MembershipsChanged, Some(account_id))
+        .await;
+}
+
+async fn publish_matching<A: SyncAuthenticator>(
+    authenticator: &A,
+    hub: &NotificationHub,
+    event: &SyncNotification,
+    account_id: Option<[u8; 16]>,
+) {
+    if matches!(event, SyncNotification::DeviceRevoked) {
+        return;
+    }
+    for recipient in hub.active_devices() {
+        if account_id.is_some_and(|account| recipient.account_id != account) {
+            continue;
+        }
+        let deadline = Instant::now() + DATABASE_TIMEOUT;
+        let permitted = timeout_at(deadline, async {
+            authenticator.authorize_notification_event(recipient, event).await
+        })
+        .await;
+        let permitted = if Instant::now() >= deadline { None } else { Some(permitted) };
+        match permitted {
+            Some(Ok(Ok(()))) => {
+                let _ = hub.publish(recipient, event);
+            }
+            Some(Ok(Err(error))) if !error.status.is_server_error() => {}
+            _ => {
+                hub.interrupt();
+                tracing::warn!(
+                    "sync notification authorization unavailable; sockets must reconcile"
+                );
+                break;
             }
         }
     }

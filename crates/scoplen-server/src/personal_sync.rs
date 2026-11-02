@@ -243,6 +243,113 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
         Ok(AuthenticatedDevice { account_id: principal.account_id, device_id: principal.device_id })
     }
 
+    async fn authenticate_expiring(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<(AuthenticatedDevice, Option<u64>), AuthFailure> {
+        let operation = operation_for(method, uri).ok_or_else(policy_denied)?;
+        let (principal, expires_at) =
+            self.authenticate_request(operation, method, uri, headers).await?;
+        Ok((
+            AuthenticatedDevice {
+                account_id: principal.account_id,
+                device_id: principal.device_id,
+            },
+            Some(expires_at),
+        ))
+    }
+
+    async fn organization_vaults(
+        &self,
+        identity: AuthenticatedDevice,
+        expires_at: Option<u64>,
+    ) -> Result<Vec<scoplen_api::sync::SessionVault>, AuthFailure> {
+        let principal = self.current(identity).await?;
+        let expires_at = expires_at.ok_or_else(authentication_required)?;
+        match &self.backend {
+            AuthBackend::Sqlite(store) => {
+                store.organization_sync_vaults(&principal, expires_at).await
+            }
+            AuthBackend::Postgres(store) => {
+                store.organization_sync_vaults(&principal, expires_at).await
+            }
+        }
+        .map_err(organization_error)
+    }
+
+    async fn organization_versions(
+        &self,
+        identity: AuthenticatedDevice,
+        expires_at: Option<u64>,
+        vault: [u8; 16],
+        object: [u8; 16],
+        limits: scoplen_api::sync::SyncReadLimits,
+    ) -> Result<Option<scoplen_api::sync::SyncVersionsResponse>, AuthFailure> {
+        let principal = self.current(identity).await?;
+        let expires_at = expires_at.ok_or_else(authentication_required)?;
+        match &self.backend {
+            AuthBackend::Sqlite(store) => {
+                store
+                    .organization_inventory_versions(
+                        &principal,
+                        expires_at,
+                        Uuid::from_bytes(vault),
+                        Uuid::from_bytes(object),
+                        limits,
+                    )
+                    .await
+            }
+            AuthBackend::Postgres(store) => {
+                store
+                    .organization_inventory_versions(
+                        &principal,
+                        expires_at,
+                        Uuid::from_bytes(vault),
+                        Uuid::from_bytes(object),
+                        limits,
+                    )
+                    .await
+            }
+        }
+        .map_err(organization_error)
+    }
+
+    async fn commit_organization_ack(
+        &self,
+        identity: AuthenticatedDevice,
+        expires_at: Option<u64>,
+        vault: [u8; 16],
+        request: scoplen_api::sync::SyncOrganizationAckRequest,
+    ) -> Result<scoplen_api::sync::SyncOrganizationAckResponse, AuthFailure> {
+        let principal = self.current(identity).await?;
+        let expires_at = expires_at.ok_or_else(authentication_required)?;
+        match &self.backend {
+            AuthBackend::Sqlite(store) => {
+                store
+                    .ack_organization_inventory(
+                        &principal,
+                        expires_at,
+                        Uuid::from_bytes(vault),
+                        request,
+                    )
+                    .await
+            }
+            AuthBackend::Postgres(store) => {
+                store
+                    .ack_organization_inventory(
+                        &principal,
+                        expires_at,
+                        Uuid::from_bytes(vault),
+                        request,
+                    )
+                    .await
+            }
+        }
+        .map_err(organization_error)
+    }
+
     async fn authorize(
         &self,
         identity: AuthenticatedDevice,
@@ -272,6 +379,67 @@ impl SyncAuthenticator for PersonalSyncAuthenticator {
             return Err(vault_not_found());
         }
         Ok(())
+    }
+
+    async fn authorize_expiring(
+        &self,
+        identity: AuthenticatedDevice,
+        expires_at: Option<u64>,
+        vault: [u8; 16],
+        operation: SyncOperation,
+    ) -> Result<(), AuthFailure> {
+        match self.authorize(identity, vault, operation).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.status != StatusCode::NOT_FOUND => return Err(error),
+            Err(_) => {}
+        }
+        if matches!(operation, SyncOperation::Read | SyncOperation::Snapshot | SyncOperation::Write)
+            && self
+                .organization_vaults(identity, expires_at)
+                .await?
+                .iter()
+                .any(|descriptor| descriptor.id.as_bytes() == &vault)
+        {
+            return Err(AuthFailure::new(StatusCode::CONFLICT,"sync.read_only","Organization view required",
+                "Organization inventory uses the revision-bound /view endpoint and the Organization authoring API.",false).expect("static problem"));
+        }
+        self.authorize(identity, vault, operation).await
+    }
+
+    async fn authorize_notification_event(
+        &self,
+        identity: AuthenticatedDevice,
+        event: &scoplen_api::sync::SyncNotification,
+    ) -> Result<(), AuthFailure> {
+        let principal = self.current(identity).await?;
+        match event {
+            scoplen_api::sync::SyncNotification::OrganizationViewChanged {
+                organization,
+                vault,
+                ..
+            } => {
+                let allowed = match &self.backend {
+                    AuthBackend::Sqlite(store) => {
+                        store
+                            .organization_notification_recipient(&principal, *organization, *vault)
+                            .await
+                    }
+                    AuthBackend::Postgres(store) => {
+                        store
+                            .organization_notification_recipient(&principal, *organization, *vault)
+                            .await
+                    }
+                }
+                .map_err(organization_error)?;
+                if allowed { Ok(()) } else { Err(vault_not_found()) }
+            }
+            scoplen_api::sync::SyncNotification::VaultAdvanced { vault, .. }
+            | scoplen_api::sync::SyncNotification::RotationPending { vault } => {
+                self.authorize(identity, *vault.as_bytes(), SyncOperation::Read).await
+            }
+            scoplen_api::sync::SyncNotification::DeviceRevoked
+            | scoplen_api::sync::SyncNotification::MembershipsChanged => Ok(()),
+        }
     }
 
     async fn validate_write(
@@ -472,6 +640,45 @@ fn current_error(error: &DeviceAuthenticationError) -> AuthFailure {
     }
 }
 
+fn organization_error(error: scoplen_store::organizations::OrganizationStoreError) -> AuthFailure {
+    use scoplen_store::organizations::OrganizationStoreError as Error;
+    match error {
+        Error::AuthenticationRequired => authentication_required(),
+        Error::NotFound => vault_not_found(),
+        Error::ViewChanged => AuthFailure::new(
+            StatusCode::CONFLICT,
+            "sync.view_changed",
+            "Team inventory changed",
+            "Refresh the session descriptor and restart the complete team view.",
+            true,
+        )
+        .expect("static problem"),
+        Error::Conflict => AuthFailure::new(
+            StatusCode::CONFLICT,
+            "sync.invalid_request",
+            "Invalid team progress",
+            "Refresh the session descriptor before acknowledging the current view.",
+            false,
+        )
+        .expect("static problem"),
+        Error::InvalidRequest => AuthFailure::new(
+            StatusCode::BAD_REQUEST,
+            "sync.invalid_request",
+            "Invalid team progress",
+            "Correct the team acknowledgement request.",
+            false,
+        )
+        .expect("static problem"),
+        Error::UpdateCommitOutcomeUnknown => {
+            let mut failure=AuthFailure::new(StatusCode::SERVICE_UNAVAILABLE,"sync.storage_unavailable","Team progress confirmation unavailable",
+                "The server could not confirm the acknowledgement. Progress may have changed; refresh the team view before acknowledging again.",false).expect("static problem");
+            failure.changed = true;
+            failure
+        }
+        _ => storage_unavailable(),
+    }
+}
+
 fn mutation_error(error: &AuthFailure) -> SyncStoreError {
     if error.status.is_server_error() {
         SyncStoreError::AuthorizationUnavailable
@@ -541,6 +748,21 @@ mod tests {
     mod limits;
     mod write_admission;
     use super::*;
+
+    #[test]
+    fn organization_ack_commit_uncertainty_retains_mutation_flags() {
+        let failure = organization_error(
+            scoplen_store::organizations::OrganizationStoreError::UpdateCommitOutcomeUnknown,
+        );
+        assert_eq!(failure.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(failure.changed);
+        assert!(!failure.retryable);
+        let unchanged = organization_error(
+            scoplen_store::organizations::OrganizationStoreError::StorageUnavailable,
+        );
+        assert!(!unchanged.changed);
+        assert!(unchanged.retryable);
+    }
     use std::{fmt::Write as _, net::SocketAddr, path::PathBuf, time::Duration};
 
     use scoplen_api::{

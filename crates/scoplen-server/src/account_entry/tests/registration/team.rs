@@ -19,11 +19,15 @@ use scoplen_store::{ObjectStorage, ObjectStorageConfig};
 
 use super::*;
 
+mod inventory;
+
 struct Fixture {
     backend: AuthBackend,
     directory: PathBuf,
     address: SocketAddr,
     server: JoinHandle<()>,
+    notifications: scoplen_sync::notify::NotificationHub,
+    fanout: Option<JoinHandle<Result<(), scoplen_store::sync::SyncStoreError>>>,
 }
 
 impl Fixture {
@@ -46,7 +50,45 @@ impl Fixture {
                 store.ensure_account_probe_key(kms.as_ref()).await.expect("probe key");
             }
         }
-        let database = match &backend {
+        let notifications = scoplen_sync::notify::NotificationHub::default();
+        let fanout = match &backend {
+            AuthBackend::Postgres(store) => {
+                let auth = crate::personal_sync::PersonalSyncAuthenticator::new(
+                    backend.clone(),
+                    kms.clone(),
+                    ORIGIN.into(),
+                );
+                let fanout =
+                    scoplen_sync::notification_fanout::PostgresNotificationFanout::connect(
+                        store.clone(),
+                        auth,
+                        notifications.clone(),
+                    )
+                    .await
+                    .expect("owned notification listener");
+                Some(tokio::spawn(fanout.run()))
+            }
+            AuthBackend::Sqlite(_) => None,
+        };
+        let app = Self::app(
+            &backend,
+            &directory,
+            kms,
+            notifications.clone(),
+            scoplen_sync::http::ReadBodyLimits::default(),
+        );
+        let (address, server) = serve_router(app).await;
+        Self { backend, directory, address, server, notifications, fanout }
+    }
+
+    fn app(
+        backend: &AuthBackend,
+        directory: &std::path::Path,
+        kms: Arc<scoplen_store::kms::LocalKeyFile>,
+        notifications: scoplen_sync::notify::NotificationHub,
+        read_limits: scoplen_sync::http::ReadBodyLimits,
+    ) -> Router {
+        let database = match backend {
             AuthBackend::Sqlite(store) => crate::runtime::ListenerDatabase::Sqlite(store.clone()),
             AuthBackend::Postgres(store) => {
                 crate::runtime::ListenerDatabase::Postgres(store.clone())
@@ -56,7 +98,7 @@ impl Fixture {
             root: directory.join("objects"),
         })
         .expect("object storage");
-        let app = crate::runtime::api_router_with_notifications(
+        crate::runtime::api_router_with_notifications(
             database,
             Arc::new(storage),
             kms,
@@ -64,17 +106,34 @@ impl Fixture {
             true,
             scoplen_sync::http::WriteRateLimits::default(),
             scoplen_sync::http::WriteBodyLimits::default(),
-            scoplen_sync::http::ReadBodyLimits::default(),
-            scoplen_sync::notify::NotificationHub::default(),
-            policy,
+            read_limits,
+            notifications,
+            AccountSettings { registration_enabled: true, ..AccountSettings::default() },
             crate::OrganizationSettings { allow_creation: true },
+        )
+    }
+
+    async fn restart_reads(&mut self, limits: scoplen_sync::http::ReadBodyLimits) {
+        self.server.abort();
+        let _ = (&mut self.server).await;
+        let app = Self::app(
+            &self.backend,
+            &self.directory,
+            test_kms(),
+            self.notifications.clone(),
+            limits,
         );
         let (address, server) = serve_router(app).await;
-        Self { backend, directory, address, server }
+        self.address = address;
+        self.server = server;
     }
 
     async fn close(self) {
         stop(self.server).await;
+        if let Some(fanout) = self.fanout {
+            fanout.abort();
+            let _ = fanout.await;
+        }
         match &self.backend {
             AuthBackend::Sqlite(store) => store.pool().close().await,
             AuthBackend::Postgres(store) => store.pool().close().await,
