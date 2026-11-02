@@ -137,7 +137,9 @@ pub(crate) async fn dispatch<A: SyncAuthenticator>(
         let vault = match &event {
             SyncNotification::VaultAdvanced { vault, .. }
             | SyncNotification::RotationPending { vault } => *vault.as_bytes(),
-            SyncNotification::DeviceRevoked => continue,
+            SyncNotification::DeviceRevoked
+            | SyncNotification::OrganizationViewChanged { .. }
+            | SyncNotification::MembershipsChanged => continue,
         };
         for recipient in hub.active_devices() {
             let deadline = Instant::now() + DATABASE_TIMEOUT;

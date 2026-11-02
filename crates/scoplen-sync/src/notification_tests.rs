@@ -15,6 +15,39 @@ use tokio_tungstenite::{
 };
 
 #[tokio::test]
+async fn unmounted_organization_hints_do_not_use_personal_vault_authorization() {
+    let device = Uuid::now_v7().into_bytes();
+    let vault = Uuid::now_v7();
+    let authenticator = TestAuthenticator::new(device, true);
+    let hub = NotificationHub::default();
+    let mut events = hub.subscribe(TestAuthenticator::identity(device));
+    let (send, receive) = tokio::sync::mpsc::channel(3);
+    let expected = api::SyncNotification::VaultAdvanced { vault, seq: 1 };
+    for event in [
+        api::SyncNotification::OrganizationViewChanged {
+            organization: Uuid::now_v7(),
+            vault,
+            view_revision: 1,
+        },
+        api::SyncNotification::MembershipsChanged,
+        expected.clone(),
+    ] {
+        send.send(event).await.expect("queued hint");
+    }
+    drop(send);
+    crate::notification_fanout::dispatch(&authenticator, &hub, receive).await;
+    assert_eq!(
+        api::SyncNotification::from_cbor(&events.try_recv().expect("Personal vault hint"))
+            .expect("canonical event"),
+        expected
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
 async fn unavailable_source_and_generation_changes_close_with_1011() {
     let (store, _, device) = test_store().await;
     let hub = NotificationHub::default();

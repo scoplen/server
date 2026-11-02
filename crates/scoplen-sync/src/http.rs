@@ -833,6 +833,7 @@ async fn session<A: SyncAuthenticator>(
             seq: vault.sequence,
             key_epoch: vault.key_epoch,
             rotation_pending: vault.rotation_pending,
+            organization: None,
         })
         .collect();
     let cardinality_limits = state.store.sync_cardinality_limits();
@@ -910,6 +911,7 @@ async fn create_vault<A: SyncAuthenticator>(
             seq: 0,
             key_epoch: 1,
             rotation_pending: false,
+            organization: None,
         },
     };
     Ok(cbor_response(response.to_cbor().map_err(|error| {
@@ -2962,6 +2964,10 @@ mod tests {
             .create_personal_sync_vault(outsider.into_bytes(), Uuid::now_v7().into_bytes(), &[3])
             .await
             .expect("other personal vault");
+        store
+            .create_sync_vault(Uuid::now_v7().into_bytes(), storage::VaultKind::Organization)
+            .await
+            .expect("unowned Organization vault");
         let body = api::SyncSessionRequest {
             client_version: env!("CARGO_PKG_VERSION").into(),
             model_version: CURRENT_SCHEMA_VERSION,
@@ -2991,6 +2997,7 @@ mod tests {
         assert_eq!(session.vaults[0].seq, 0);
         assert_eq!(session.vaults[0].key_epoch, 1);
         assert!(!session.vaults[0].rotation_pending);
+        assert_eq!(session.vaults[0].organization, None);
     }
 
     #[tokio::test]
@@ -3048,6 +3055,7 @@ mod tests {
         assert_eq!(session.vaults[0].id, vault);
         assert_eq!(session.vaults[0].kind, api::VaultKind::Shared);
         assert!(!session.vaults[0].rotation_pending);
+        assert_eq!(session.vaults[0].organization, None);
 
         store
             .remove_shared_sync_vault_member(vault.into_bytes(), removed.into_bytes())
