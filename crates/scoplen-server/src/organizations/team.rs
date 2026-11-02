@@ -75,7 +75,7 @@ fn route(parts: &Parts) -> Option<(DeviceAccessOperation, &str, Option<&str>)> {
     Some((DeviceAccessOperation::from_route(parts.method.as_str(), template)?, org, target))
 }
 
-fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryEndpoint> {
+pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryEndpoint> {
     Some(match operation {
         DeviceAccessOperation::TeamInvitationCreate => AccountEntryEndpoint::TeamInvitationCreate,
         DeviceAccessOperation::TeamInvitationAccept => AccountEntryEndpoint::TeamInvitationAccept,
@@ -83,12 +83,81 @@ fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryEndpoint> {
         DeviceAccessOperation::TeamMemberUpdate => AccountEntryEndpoint::TeamMemberUpdate,
         DeviceAccessOperation::TeamMemberRemove => AccountEntryEndpoint::TeamMemberRemove,
         DeviceAccessOperation::TeamDissolve => AccountEntryEndpoint::TeamDissolve,
+        DeviceAccessOperation::InventoryHostCreate => AccountEntryEndpoint::InventoryHostCreate,
+        DeviceAccessOperation::InventoryHostReplace => AccountEntryEndpoint::InventoryHostReplace,
+        DeviceAccessOperation::InventoryHostDelete => AccountEntryEndpoint::InventoryHostDelete,
+        DeviceAccessOperation::InventoryAccessProfileCreate => {
+            AccountEntryEndpoint::InventoryAccessProfileCreate
+        }
+        DeviceAccessOperation::InventoryAccessProfileReplace => {
+            AccountEntryEndpoint::InventoryAccessProfileReplace
+        }
+        DeviceAccessOperation::InventoryAccessProfileDelete => {
+            AccountEntryEndpoint::InventoryAccessProfileDelete
+        }
+        DeviceAccessOperation::InventoryRouteCreate => AccountEntryEndpoint::InventoryRouteCreate,
+        DeviceAccessOperation::InventoryRouteReplace => AccountEntryEndpoint::InventoryRouteReplace,
+        DeviceAccessOperation::InventoryRouteDelete => AccountEntryEndpoint::InventoryRouteDelete,
+        DeviceAccessOperation::InventoryHostGroupCreate => {
+            AccountEntryEndpoint::InventoryHostGroupCreate
+        }
+        DeviceAccessOperation::InventoryHostGroupReplace => {
+            AccountEntryEndpoint::InventoryHostGroupReplace
+        }
+        DeviceAccessOperation::InventoryHostGroupDelete => {
+            AccountEntryEndpoint::InventoryHostGroupDelete
+        }
+        DeviceAccessOperation::InventoryTrustRecordCreate => {
+            AccountEntryEndpoint::InventoryTrustRecordCreate
+        }
+        DeviceAccessOperation::InventoryTrustRecordReplace => {
+            AccountEntryEndpoint::InventoryTrustRecordReplace
+        }
+        DeviceAccessOperation::InventoryTrustRecordDelete => {
+            AccountEntryEndpoint::InventoryTrustRecordDelete
+        }
+        DeviceAccessOperation::InventorySnippetCreate => {
+            AccountEntryEndpoint::InventorySnippetCreate
+        }
+        DeviceAccessOperation::InventorySnippetReplace => {
+            AccountEntryEndpoint::InventorySnippetReplace
+        }
+        DeviceAccessOperation::InventorySnippetDelete => {
+            AccountEntryEndpoint::InventorySnippetDelete
+        }
+        DeviceAccessOperation::InventoryGatewayNetworkCreate => {
+            AccountEntryEndpoint::InventoryGatewayNetworkCreate
+        }
+        DeviceAccessOperation::InventoryGatewayNetworkReplace => {
+            AccountEntryEndpoint::InventoryGatewayNetworkReplace
+        }
+        DeviceAccessOperation::InventoryGatewayNetworkDelete => {
+            AccountEntryEndpoint::InventoryGatewayNetworkDelete
+        }
+        DeviceAccessOperation::OrganizationGroupCreate => {
+            AccountEntryEndpoint::OrganizationGroupCreate
+        }
+        DeviceAccessOperation::OrganizationGroupReplace => {
+            AccountEntryEndpoint::OrganizationGroupReplace
+        }
+        DeviceAccessOperation::OrganizationGroupDelete => {
+            AccountEntryEndpoint::OrganizationGroupDelete
+        }
+        DeviceAccessOperation::OrganizationPolicyCreate => {
+            AccountEntryEndpoint::OrganizationPolicyCreate
+        }
+        DeviceAccessOperation::OrganizationPolicyReplace => {
+            AccountEntryEndpoint::OrganizationPolicyReplace
+        }
+        DeviceAccessOperation::OrganizationPolicyDelete => {
+            AccountEntryEndpoint::OrganizationPolicyDelete
+        }
         _ => return None,
     })
 }
 
 #[allow(clippy::result_large_err)]
-async fn admission(
+pub(super) async fn admission(
     state: &OrganizationState,
     endpoint: AccountEntryEndpoint,
     source: IpAddr,
@@ -149,7 +218,7 @@ async fn admission(
 }
 
 #[allow(clippy::result_large_err)]
-fn precondition(parts: &Parts, id: &Uuid) -> Result<String, Response> {
+pub(super) fn precondition(parts: &Parts, id: &Uuid) -> Result<String, Response> {
     if parts.headers.get_all(header::IF_MATCH).iter().count() > 1 {
         return Err(invalid(id));
     }
@@ -172,7 +241,7 @@ fn precondition(parts: &Parts, id: &Uuid) -> Result<String, Response> {
 }
 
 #[allow(clippy::result_large_err)]
-fn operation_key(parts: &Parts, id: &Uuid) -> Result<Uuid, Response> {
+pub(super) fn operation_key(parts: &Parts, id: &Uuid) -> Result<Uuid, Response> {
     if parts.headers.get_all("idempotency-key").iter().count() != 1 {
         return Err(invalid(id));
     }
@@ -185,7 +254,12 @@ fn operation_key(parts: &Parts, id: &Uuid) -> Result<Uuid, Response> {
 }
 
 #[allow(clippy::result_large_err)]
-async fn body(parts: &Parts, body: Body, max: usize, id: &Uuid) -> Result<SecretVec, Response> {
+pub(super) async fn body(
+    parts: &Parts,
+    body: Body,
+    max: usize,
+    id: &Uuid,
+) -> Result<SecretVec, Response> {
     if parts.headers.contains_key(header::CONTENT_ENCODING)
         && (parts.headers.get_all(header::CONTENT_ENCODING).iter().count() != 1
             || parts.headers.get(header::CONTENT_ENCODING).is_none_or(|value| value != "identity"))
@@ -198,7 +272,7 @@ async fn body(parts: &Parts, body: Body, max: usize, id: &Uuid) -> Result<Secret
         .map_err(|status| problem(status, "organization.invalid_request", false, id))
 }
 
-fn encoded(
+pub(super) fn encoded(
     value: Result<Vec<u8>, scoplen_api::organization::OrganizationCodecError>,
     etag: Option<&str>,
     status: StatusCode,
@@ -397,6 +471,10 @@ async fn handle(
                         .await
                 }
             };
+            if result.is_ok() {
+                super::notify_membership_account(&state, principal.account_id).await;
+                super::notify_organization(&state, organization).await;
+            }
             receipt!(result)
         }
         DeviceAccessOperation::TeamInvitationRead => resource!(
@@ -447,8 +525,16 @@ async fn handle(
                 join,
                 decoded.as_ref()
             ) {
-                Ok(Some(value)) => encoded(value.to_json(), Some(&value.etag), StatusCode::OK, &id),
-                Ok(None) => reply(StatusCode::NO_CONTENT, "application/json", Vec::new(), &id),
+                Ok(value) => {
+                    super::notify_memberships(&state, organization, target).await;
+                    super::notify_organization(&state, organization).await;
+                    match value {
+                        Some(value) => {
+                            encoded(value.to_json(), Some(&value.etag), StatusCode::OK, &id)
+                        }
+                        None => reply(StatusCode::NO_CONTENT, "application/json", Vec::new(), &id),
+                    }
+                }
                 Err(error) => store_problem(error, &id),
             }
         }
@@ -456,12 +542,16 @@ async fn handle(
             let Ok(decoded) = TeamDissolveRequest::from_json(payload.as_bytes()) else {
                 return invalid(&id);
             };
-            receipt!(call!(
+            let result = call!(
                 dissolve_team,
                 key.expect("validated key"),
                 if_match.as_deref().expect("validated precondition"),
                 &decoded
-            ))
+            );
+            if result.is_ok() {
+                super::notify_memberships(&state, organization, None).await;
+            }
+            receipt!(result)
         }
         _ => invalid(&id),
     }

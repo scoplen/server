@@ -7,7 +7,7 @@
 
 #![forbid(unsafe_code)]
 
-mod read;
+pub(crate) mod read;
 mod retention;
 
 use std::{

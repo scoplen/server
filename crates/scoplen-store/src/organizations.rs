@@ -22,6 +22,8 @@ use crate::{
     },
 };
 
+pub mod group_policy;
+pub mod inventory;
 mod name;
 mod team;
 
@@ -50,6 +52,8 @@ pub enum OrganizationStoreError {
     CommitOutcomeUnknown,
     #[error("organization update commit outcome is unknown")]
     UpdateCommitOutcomeUnknown,
+    #[error("organization inventory view changed")]
+    ViewChanged,
 }
 
 impl From<sqlx::Error> for OrganizationStoreError {
@@ -79,13 +83,23 @@ fn check_identity(
     expected: &CurrentPrincipal,
     expires_at: u64,
 ) -> Result<(), OrganizationStoreError> {
-    let current = current.ok_or(OrganizationStoreError::AuthenticationRequired)?;
+    check_current_identity(current, expected)?;
     let now = u64::try_from(now_ms()?.div_euclid(1_000))
         .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
+    if now >= expires_at {
+        return Err(OrganizationStoreError::AuthenticationRequired);
+    }
+    Ok(())
+}
+
+fn check_current_identity(
+    current: Option<CurrentPrincipal>,
+    expected: &CurrentPrincipal,
+) -> Result<(), OrganizationStoreError> {
+    let current = current.ok_or(OrganizationStoreError::AuthenticationRequired)?;
     if current.account_id != expected.account_id
         || current.device_id != expected.device_id
         || current.jkt != expected.jkt
-        || now >= expires_at
     {
         return Err(OrganizationStoreError::AuthenticationRequired);
     }
@@ -196,8 +210,10 @@ macro_rules! organizations {
                     .bind(now).execute(&mut *tx).await?.rows_affected();
                 let lifecycle_removed = sqlx::query("DELETE FROM organization_operation_receipts WHERE (account_id,idempotency_key) IN (SELECT account_id,idempotency_key FROM organization_operation_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
                     .bind(now).execute(&mut *tx).await?.rows_affected();
+                let inventory_removed = sqlx::query("DELETE FROM organization_inventory_receipts WHERE (account_id,idempotency_key) IN (SELECT account_id,idempotency_key FROM organization_inventory_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
                 tx.commit().await?;
-                Ok(removed + lifecycle_removed)
+                Ok(removed + lifecycle_removed + inventory_removed)
             }
 
             /// Atomically create a team, its sole initial owner, audit and 24-hour receipt.
@@ -247,6 +263,12 @@ macro_rules! organizations {
                 sqlx::query("INSERT INTO organizations (id,name,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$3)")
                     .bind(organization.as_bytes().as_slice()).bind(&request.name).bind(now)
                     .execute(&mut *tx).await?;
+                let inventory_vault = Uuid::now_v7();
+                sqlx::query("INSERT INTO sync_vaults (vault_id,kind) VALUES ($1,'organization')")
+                    .bind(inventory_vault.as_bytes().as_slice()).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO organization_inventory_vaults (organization_id,vault_id) VALUES ($1,$2)")
+                    .bind(organization.as_bytes().as_slice()).bind(inventory_vault.as_bytes().as_slice())
+                    .execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO organization_memberships (id,organization_id,account_id,status,roles_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,'active','[\"owner\"]',$4,$4)")
                     .bind(membership.as_bytes().as_slice()).bind(organization.as_bytes().as_slice())
                     .bind(expected.account_id.as_slice()).bind(now).execute(&mut *tx).await?;
@@ -266,6 +288,7 @@ macro_rules! organizations {
                     .bind(organization.as_bytes().as_slice()).bind(digest.as_slice()).bind(now).bind(expires)
                     .execute(&mut *tx).await?;
                 let value=Self::read_organization_in_transaction(&mut tx,&expected.account_id,organization.as_bytes()).await?;
+                Self::queue_memberships_notification(&mut tx,expected.account_id).await?;
                 check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
                 tx.commit().await.map_err(|_| OrganizationStoreError::CommitOutcomeUnknown)?;
                 Ok(value)

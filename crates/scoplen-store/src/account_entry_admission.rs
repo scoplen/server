@@ -29,6 +29,33 @@ pub enum AccountEntryEndpoint {
     TeamMemberUpdate = 9,
     TeamMemberRemove = 10,
     TeamDissolve = 11,
+    InventoryHostCreate = 12,
+    InventoryHostReplace = 13,
+    InventoryHostDelete = 14,
+    InventoryAccessProfileCreate = 15,
+    InventoryAccessProfileReplace = 16,
+    InventoryAccessProfileDelete = 17,
+    InventoryRouteCreate = 18,
+    InventoryRouteReplace = 19,
+    InventoryRouteDelete = 20,
+    InventoryHostGroupCreate = 21,
+    InventoryHostGroupReplace = 22,
+    InventoryHostGroupDelete = 23,
+    InventoryTrustRecordCreate = 24,
+    InventoryTrustRecordReplace = 25,
+    InventoryTrustRecordDelete = 26,
+    InventorySnippetCreate = 27,
+    InventorySnippetReplace = 28,
+    InventorySnippetDelete = 29,
+    InventoryGatewayNetworkCreate = 30,
+    InventoryGatewayNetworkReplace = 31,
+    InventoryGatewayNetworkDelete = 32,
+    OrganizationGroupCreate = 33,
+    OrganizationGroupReplace = 34,
+    OrganizationGroupDelete = 35,
+    OrganizationPolicyCreate = 36,
+    OrganizationPolicyReplace = 37,
+    OrganizationPolicyDelete = 38,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.
@@ -118,8 +145,6 @@ impl AccountEntryPrivateBucket<'_> {
     ) -> Result<(i64, Vec<u8>), AccountEntryStateError> {
         use AccountEntryEndpoint::{
             DeviceAdmission, PasswordLogin, PasswordOptions, Register, RequestChallenge,
-            TeamDissolve, TeamInvitationAccept, TeamInvitationCreate, TeamInvitationRevoke,
-            TeamMemberRemove, TeamMemberUpdate,
         };
         match self {
             Self::Username(key) if matches!(endpoint, PasswordOptions | PasswordLogin) => {
@@ -132,18 +157,7 @@ impl AccountEntryPrivateBucket<'_> {
                 Ok((3, id.as_bytes().to_vec()))
             }
             Self::EstablishedAccount(id)
-                if matches!(
-                    endpoint,
-                    Register
-                        | PasswordLogin
-                        | DeviceAdmission
-                        | TeamInvitationCreate
-                        | TeamInvitationAccept
-                        | TeamInvitationRevoke
-                        | TeamMemberUpdate
-                        | TeamMemberRemove
-                        | TeamDissolve
-                ) =>
+                if !matches!(endpoint, RequestChallenge | PasswordOptions) =>
             {
                 Ok((4, id.0.as_bytes().to_vec()))
             }

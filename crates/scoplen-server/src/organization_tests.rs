@@ -342,7 +342,15 @@ async fn contract(mut f: Fixture) {
     expected.sort();
     assert_eq!(claims.org.iter().map(|entry| entry.id).collect::<Vec<_>>(), expected);
     assert!(claims.org.iter().all(|entry| entry.sso_authenticated_at.is_none()));
-    session_and_keys(&f, &a.receipt, &current, &a.client).await;
+    let session = session_and_keys(&f, &a.receipt, &current, &a.client).await;
+    assert_eq!(session.vaults.len(), 3);
+    let mut organizations: Vec<_> = session
+        .vaults
+        .iter()
+        .filter_map(|vault| vault.organization.map(|context| context.organization))
+        .collect();
+    organizations.sort();
+    assert_eq!(organizations, expected);
     sync_object(&f, &a.receipt, &current, &a.client).await;
     old_family_refresh(&f, &a, OLD_SCOPE).await;
     old_family_refresh(

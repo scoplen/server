@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! D-134 name settings through the current Organization Cedar boundary.
 
+#[cfg(test)]
 use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet, Request};
-use scoplen_api::{
-    control_plane::{OrganizationAuthorizationContext, OrganizationAuthorizer},
-    organization::{
-        OrganizationUpdateRequest, parse_organization_idempotency_key, parse_organization_if_match,
-    },
+#[cfg(test)]
+use scoplen_api::control_plane::{OrganizationAuthorizationContext, OrganizationAuthorizer};
+use scoplen_api::organization::{
+    OrganizationUpdateRequest, parse_organization_idempotency_key, parse_organization_if_match,
 };
 
 use sqlx::Row;
@@ -17,6 +17,7 @@ use super::{
     check_identity, lock_postgres, lock_sqlite, now_ms, postgres_principal, sqlite_principal,
 };
 
+#[cfg(test)]
 fn name_authorization(
     account: Uuid,
     organization: Uuid,
@@ -59,7 +60,7 @@ fn name_authorization(
     )
     .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
     // Account and Membership bindings come from transaction-current identity and tenant reads.
-    // Groups and custom policies have no production storage in this first Organization route.
+    // This isolated fixture tests the immutable built-in role policy boundary.
     let entities = Entities::from_json_value(
         serde_json::json!([
             {"uid":{"type":"Account","id":account},"attrs":{"status":"active"},"parents":[]},
@@ -76,7 +77,8 @@ fn name_authorization(
     Ok((trusted, request, entities))
 }
 
-pub(super) fn authorize_action(
+#[cfg(test)]
+fn authorize_action(
     expected: &CurrentPrincipal,
     organization: Uuid,
     value: &OrganizationResource,
@@ -94,7 +96,8 @@ pub(super) fn authorize_action(
     )
 }
 
-pub(super) fn authorize_account_action(
+#[cfg(test)]
+fn authorize_account_action(
     account: Uuid,
     organization: Uuid,
     value: &OrganizationResource,
@@ -154,7 +157,7 @@ macro_rules! name_settings {
                     &mut tx, &expected.account_id, organization.as_bytes(),
                 ).await?;
                 let now = now_ms()?;
-                authorize_action(expected, organization, &current, &status, now, "manage_organization")?;
+                Self::authorize_organization_action(&mut tx, &current, now, "manage_organization").await?;
                 if current.etag != if_match {
                     return Err(OrganizationStoreError::PreconditionFailed);
                 }

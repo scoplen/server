@@ -21,7 +21,7 @@ use sqlx::{Postgres, Row, Sqlite, Transaction};
 use super::{
     CurrentPrincipal, OrganizationResource, OrganizationStoreError, PostgresStore, SqliteStore,
     Uuid, append_audit_event_in_postgres_transaction, append_audit_event_in_transaction,
-    check_identity, lock_postgres, lock_sqlite, name, now_ms, postgres_principal, sqlite_principal,
+    check_identity, lock_postgres, lock_sqlite, now_ms, postgres_principal, sqlite_principal,
     timestamp,
 };
 
@@ -198,7 +198,7 @@ macro_rules! teams {
             async fn team_actor(tx:&mut Transaction<'_,$db>, expected:&CurrentPrincipal, organization:Uuid, action:&str, now:i64)
                 -> Result<OrganizationResource,OrganizationStoreError> {
                 let value=Self::read_organization_in_transaction(tx,&expected.account_id,organization.as_bytes()).await?;
-                name::authorize_action(expected,organization,&value,"active",now,action)?;
+                Self::authorize_organization_action(tx,&value,now,action).await?;
                 Ok(value)
             }
 
@@ -211,6 +211,7 @@ macro_rules! teams {
                 let updated=now.max(previous_time.checked_add(1).ok_or(OrganizationStoreError::StorageUnavailable)?);
                 sqlx::query("UPDATE organizations SET view_revision=$1,updated_at_ms=$2 WHERE id=$3")
                     .bind(next.as_slice()).bind(updated).bind(organization.as_bytes().as_slice()).execute(&mut **tx).await?;
+                Self::queue_organization_notification(tx,organization,u64::from_be_bytes(next)).await?;
                 Ok(())
             }
 
@@ -376,7 +377,7 @@ macro_rules! teams {
                 if value.status!=TeamInvitationStatus::Pending {return Err(OrganizationStoreError::InvitationDenied);}
                 let issuer_denied=|error|match error {OrganizationStoreError::PermissionDenied|OrganizationStoreError::NotFound=>OrganizationStoreError::InvitationDenied,other=>other};
                 let actor=Self::read_organization_in_transaction(&mut tx,value.issuer_account_id.as_bytes(),organization.as_bytes()).await.map_err(issuer_denied)?;
-                name::authorize_account_action(value.issuer_account_id,organization,&actor,"active",now,"manage_members").map_err(issuer_denied)?;
+                Self::authorize_organization_action(&mut tx,&actor,now,"manage_members").await.map_err(issuer_denied)?;
                 role_ceiling(&actor,&value.roles).map_err(|_|OrganizationStoreError::InvitationDenied)?;
                 let verifier:[u8;32]=row.try_get::<Vec<u8>,_>("password_verifier")?.try_into().map_err(|_|OrganizationStoreError::StorageUnavailable)?;
                 let submitted=request.password.verifier(origin,&organization,&id).map_err(|_|OrganizationStoreError::InvalidRequest)?;
@@ -411,6 +412,7 @@ macro_rules! teams {
                     .bind(membership.as_bytes().as_slice()).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_revision(&mut tx,organization,now).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.invitation_accepted",id,now).await?;
+                Self::queue_memberships_notification(&mut tx,expected.account_id).await?;
                 let receipt=TeamAcceptanceReceipt{invitation_id:id,organization_id:organization,account_id:Uuid::from_bytes(expected.account_id),membership_id:membership,accepted_at:timestamp(now)?};
                 let response=receipt.to_json().map_err(|_|OrganizationStoreError::StorageUnavailable)?;
                 Self::save_team_receipt(&mut tx,&expected.account_id,organization,key,2,&request_digest,Some(id),&response,now).await?;
@@ -503,7 +505,7 @@ macro_rules! teams {
                 };
                 if !self_leave {
                     if !administrative_scope {return Err(OrganizationStoreError::NotFound);}
-                    name::authorize_action(expected,organization,caller.as_ref().expect("current administrative membership"),"active",now,"manage_members")?;
+                    Self::authorize_organization_action(&mut tx,caller.as_ref().expect("current administrative membership"),now,"manage_members").await?;
                 }
                 let next_roles=request.map_or(current.roles.as_slice(),|request|request.roles.as_slice());
                 if !self_leave && (current.roles.contains(&TeamRole::Owner)||next_roles.contains(&TeamRole::Owner))
@@ -529,8 +531,10 @@ macro_rules! teams {
                 let status=match next_status {TeamMemberStatus::Active=>"active",TeamMemberStatus::Suspended=>"suspended",TeamMemberStatus::Removed=>"deprovisioned"};
                 sqlx::query("UPDATE organization_memberships SET status=$1,roles_json=$2,updated_at_ms=CASE WHEN updated_at_ms>=$3 THEN updated_at_ms+1 ELSE $3 END WHERE organization_id=$4 AND id=$5")
                     .bind(status).bind(roles_json(next_roles)?).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
+                if next_status!=TeamMemberStatus::Active {Self::clear_organization_groups(&mut tx,organization,Some(id),now).await?;}
                 Self::team_revision(&mut tx,organization,now).await?;
                 Self::team_audit(&mut tx,expected,organization,if request.is_some() {"organization.member_updated"} else {"organization.member_removed"},id,now).await?;
+                Self::queue_memberships_notification(&mut tx,current.account_id.into_bytes()).await?;
                 let result=if request.is_some() {Some(Self::member_in_tx(&mut tx,organization,id).await?)} else {None};
                 check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::UpdateCommitOutcomeUnknown)?; Ok(result)
@@ -567,11 +571,15 @@ macro_rules! teams {
                 let actor=Self::team_actor(&mut tx,expected,organization,"manage_organization",now).await?;
                 if !owner(&actor) {return Err(OrganizationStoreError::PermissionDenied);}
                 if actor.etag!=if_match {return Err(OrganizationStoreError::PreconditionFailed);}
+                let accounts=sqlx::query_scalar::<_,Vec<u8>>("SELECT account_id FROM organization_memberships WHERE organization_id=$1 AND status='active'")
+                    .bind(organization.as_bytes().as_slice()).fetch_all(&mut *tx).await?;
+                for account in accounts {Self::queue_memberships_notification(&mut tx,account.try_into().map_err(|_|OrganizationStoreError::StorageUnavailable)?).await?;}
                 Self::team_revision(&mut tx,organization,now).await?;
                 sqlx::query("UPDATE organizations SET dissolved_at_ms=$1 WHERE id=$2")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 sqlx::query("UPDATE organization_memberships SET status='deprovisioned',updated_at_ms=CASE WHEN updated_at_ms>=$1 THEN updated_at_ms+1 ELSE $1 END WHERE organization_id=$2 AND status<>'deprovisioned'")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
+                Self::clear_organization_groups(&mut tx,organization,None,now).await?;
                 sqlx::query("UPDATE organization_invitations SET status='revoked',updated_at_ms=$1 WHERE organization_id=$2 AND status IN ('pending','locked')")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.dissolved",organization,now).await?;

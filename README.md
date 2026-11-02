@@ -53,7 +53,7 @@ opaque wraps, commits account-key signatures and the complete certified, unrevok
 and validates encrypted
 envelopes before storage. The caller selects a SQLite or PostgreSQL store for the entire
 authenticated router. The PostgreSQL path has been exercised through HTTP/CBOR against PostgreSQL
-17. The API listener now mounts only the Personal session, account-key read and publication, vault-key read,
+17. The API listener mounts the Personal session, account-key read and publication, vault-key read,
 changes, snapshot, version read, signed object write, ACK, and notification routes. It verifies the enrolled
 device token, exact method/path/ath DPoP proof, durable replay claim, current device certificate,
 required scope, and Personal vault ownership. After authentication and scope checks, absent and
@@ -261,7 +261,8 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@a604b726`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`.
+`proto@328f16d6`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
 The sync service retains encrypted object envelopes without reading their Credential fields.
 Server-hosted SSH and agent execution remain separate roadmap work.
@@ -269,8 +270,7 @@ Server-hosted SSH and agent execution remain separate roadmap work.
 The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
 validation and streaming/multipart operations; database-backed roles initialize the configured
-backend and include it in `/readyz`. Complete control-plane policy filtering,
-Shared/organization membership-aware purge orchestration, organization vault ownership in session listings, higher wire ceilings and
+backend and include it in `/readyz`. Shared/organization membership-aware purge orchestration, higher wire ceilings and
 other route body limits, control, gateway, and remaining console administration are still
 roadmap work. The audit crate and SQLite/PostgreSQL stores provide bounded canonical-event SHA-256
 hashing, same-transaction append helpers, durable checkpoints, and chain verification for separate
@@ -341,8 +341,8 @@ vault-list, and personal-vault key queries use PostgreSQL. PostgreSQL also suppo
 batches with gap-free vault sequences, current change and full-reconciliation snapshot pages from
 one read transaction, bounded retained-version reads, and monotone device acknowledgements. The
 runtime passes the configured object limit to that writer. The injected sync HTTP adapter selects
-SQLite or PostgreSQL consistently for all K-4 routes; the API listener mounts the Personal subset
-described above.
+SQLite or PostgreSQL consistently for all K-4 routes; the API listener mounts the Personal
+operations described above and the current authorized Organization view described below.
 
 Shared-vault key epochs have a bounded retirement path: the authenticated sync adapter accepts
 `POST /sync/v1/vaults/{vault}/epochs/{epoch}/retire`, and the SQLite store records retirement
@@ -401,7 +401,8 @@ existing membership discovery, exact creation confirmation and name settings rem
 when disabled.
 Creating a team preserves Personal data and does not grant Operator access. Named-account
 invitations, member administration and dissolution use the Device-authenticated API described
-below. Team assets, Shared vaults and remaining administration remain separate roadmap work.
+below. Organization assets and current policy-filtered views are available through the native
+Device API. Shared vaults and remaining administration remain separate roadmap work.
 The disposable container check registers two independent password Accounts. Each signs in and
 admits a fresh Device, refreshes its native session, creates and conditionally renames its own
 team, and verifies encrypted Host synchronization in both directions through public HTTPS.
@@ -682,8 +683,8 @@ ETag returns the current Resource without changing its time or audit. A changed 
 update time and attributable organization audit commit together. All team projections retain
 the later Organization/Membership update time. An unknown PATCH commit returns 503 with
 `changed: true, retryable: false`; read the team before another explicit edit, without automatic
-mutation replay. This is independent of original-key creation confirmation. Asset permissions
-and team vaults remain separate work.
+mutation replay. This is independent of original-key creation confirmation. Current stored
+team policies also apply to name and member administration.
 
 The team lifecycle API uses `teams:manage` for administration and `teams:join` for the named
 recipient's preview/acceptance and self-leave. Obtain a fresh Device session when an existing
@@ -733,8 +734,46 @@ tenant revision, and retains final audit and a 24-hour historical receipt. Retry
 same Account, key, body and original If-Match confirms that receipt without requiring a now
 inactive team. Personal Accounts, Devices, keys, encrypted inventory and other teams remain
 usable. Installed remote host trust needs separate removal; dissolution does not edit sshd.
-No team inventory, grants, certificates or team notification subscriptions are served by this
-initial lifecycle subset; their own roadmap outcomes remain required.
+Grants and certificate issuance retain their separate roadmap outcomes.
+
+Team inventory uses the server-readable `hosts`, `access-profiles`, `routes`, `host-groups`,
+`trust-records`, `snippets` and `gateway-networks` collections under `/api/v1/orgs/{org}`.
+Each supports GET list/item, POST create, conditional PUT replacement and conditional DELETE.
+Use `inventory:read` or `inventory:write` and current Cedar permission. POST takes
+`{"id":"<UUIDv7>","data":{"fields":{...}}}` with one original `Idempotency-Key`;
+PUT takes `{"data":{"fields":{...}}}` and the exact original `If-Match`. These named fields
+are typed projections of the shared object model, without caller-supplied clocks or origins.
+The server assigns TrustRecord attribution. Credentials, authenticated-proxy secrets and
+Personal credential fallback cannot be stored in this inventory. References must resolve to
+independently readable objects in the same team; an active reference prevents target deletion.
+Equal replacements and original-create confirmations add no revision, sequence or audit.
+
+`groups` and `policies` use the same Resource, pagination and conditional-write conventions.
+Groups contain current Membership ids and are managed through `teams:manage` and
+`manage_members`. Policy reads use `policies:read`; policy writes use `policies:write` and
+`manage_policy`. One policy Resource stores one schema-valid Cedar policy and an `enabled`
+boolean. Every explicit reference is checked against the owning team. Enabled stored policies
+join the immutable built-ins and tenant guards for current decisions. Removing or suspending
+a member clears its group associations; reactivation does not restore those associations.
+A stored policy reference prevents deleting its group until that policy is removed or edited.
+Time-dependent inventory visibility is outside this initial policy profile.
+
+Sync sessions expose each current team's immutable vault and current `view_revision`.
+Pull `/sync/v1/vaults/{vault}/view?revision={revision}&after=0&limit=100`, then continue with
+the returned cursor and the same revision. Each returned K-1 object has independent current
+`view_inventory` permission; readable references never grant dependency access. Stage the
+whole view before replacing local team inventory. A revision change returns
+`409 sync.view_changed` and requires a new descriptor and a restarted complete pull.
+The configured sync read payload and complete-body budgets also bound these pages. A smaller
+nonempty prefix retains its continuation cursor; if the first eligible object cannot fit,
+the request returns `503 sync.storage_unavailable` without skipping that object.
+Organization ACKs include both `view_revision` and `cursor`; ordinary changes/snapshot reads
+return `409 sync.read_only`. Version history also requires current object visibility, including
+retained versions of deleted objects. Deleted objects stay absent from live inventory and views.
+An unconfirmed Organization ACK returns `503 sync.storage_unavailable` with
+`changed: true, retryable: false`; refresh the view before acknowledging again.
+Authoring commits publish content-free team view hints, and queued delivery rechecks current
+membership. All of these paths preserve the Account's independent encrypted Personal vault.
 
 Unconfirmed creation, acceptance or dissolution commits return
 `organization.commit_outcome_unknown` with `changed: true, retryable: true`; explicitly retry

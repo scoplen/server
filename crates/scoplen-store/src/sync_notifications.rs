@@ -7,7 +7,7 @@ use sqlx::{Postgres, Transaction, postgres::PgListener};
 
 use crate::{PostgresStore, RelationalStore, sync::SyncStoreError};
 
-const MAX_PAYLOAD_BYTES: usize = 128;
+const MAX_PAYLOAD_BYTES: usize = 256;
 // PostgreSQL channels are database-wide. Separate schemas, including isolated integration
 // fixtures, must not consume each other's hints. The hash only bounds the identifier length.
 const CHANNEL_SQL: &str = "SELECT 'scoplen_sync_v1_' || md5(current_schema())";
@@ -16,6 +16,8 @@ const CHANNEL_SQL: &str = "SELECT 'scoplen_sync_v1_' || md5(current_schema())";
 pub enum SyncNotificationMessage {
     /// A bounded, canonical vault hint; authorization is still the service's responsibility.
     Event(SyncNotification),
+    /// Rediscover memberships for the connected devices of one Account only.
+    MembershipsChanged { account_id: [u8; 16] },
     /// The connection was lost, so some hints may be missing.
     Interrupted,
     /// An invalid internal payload was ignored without logging its contents.
@@ -53,8 +55,13 @@ impl SyncNotificationListener {
         let Some(message) = self.inner.try_recv().await? else {
             return Ok(SyncNotificationMessage::Interrupted);
         };
-        Ok(decode(message.payload())
-            .map_or(SyncNotificationMessage::Invalid, SyncNotificationMessage::Event))
+        Ok(decode_memberships(message.payload()).map_or_else(
+            || {
+                decode(message.payload())
+                    .map_or(SyncNotificationMessage::Invalid, SyncNotificationMessage::Event)
+            },
+            |account_id| SyncNotificationMessage::MembershipsChanged { account_id },
+        ))
     }
 }
 
@@ -71,6 +78,24 @@ pub(crate) async fn publish(
     Ok(())
 }
 
+pub(crate) async fn publish_memberships_changed(
+    transaction: &mut Transaction<'_, Postgres>,
+    account_id: [u8; 16],
+) -> Result<(), SyncStoreError> {
+    let payload = format!("memberships:{}", uuid::Uuid::from_bytes(account_id));
+    sqlx::query("SELECT pg_notify('scoplen_sync_v1_' || md5(current_schema()), $1)")
+        .bind(payload)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+fn decode_memberships(payload: &str) -> Option<[u8; 16]> {
+    let raw = payload.strip_prefix("memberships:")?;
+    let id = uuid::Uuid::parse_str(raw).ok()?;
+    (id.get_version_num() == 7 && id.to_string() == raw).then(|| id.into_bytes())
+}
+
 fn decode(payload: &str) -> Option<SyncNotification> {
     if payload.len() > MAX_PAYLOAD_BYTES {
         return None;
@@ -81,7 +106,8 @@ fn decode(payload: &str) -> Option<SyncNotification> {
         SyncNotification::VaultAdvanced { seq, .. } if seq > 0 && i64::try_from(seq).is_ok() => {
             Some(event)
         }
-        SyncNotification::RotationPending { .. } => Some(event),
+        SyncNotification::RotationPending { .. }
+        | SyncNotification::OrganizationViewChanged { .. } => Some(event),
         _ => None,
     }
 }
@@ -90,6 +116,21 @@ fn decode(payload: &str) -> Option<SyncNotification> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn membership_hints_keep_the_internal_account_target() {
+        let account = Uuid::now_v7();
+        assert_eq!(
+            decode_memberships(&format!("memberships:{account}")),
+            Some(account.into_bytes())
+        );
+        assert_eq!(
+            decode_memberships(&format!("memberships:{}", account.to_string().to_uppercase())),
+            None
+        );
+        assert_eq!(decode_memberships("memberships:invalid"), None);
+        assert_eq!(decode_memberships("memberships:00000000-0000-0000-0000-000000000000"), None);
+    }
 
     #[test]
     fn internal_payload_accepts_only_bounded_canonical_vault_hints() {

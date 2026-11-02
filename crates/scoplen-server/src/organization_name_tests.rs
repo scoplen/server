@@ -210,7 +210,16 @@ async fn contract(mut f: Fixture) {
         assert_eq!(f.count(&format!("SELECT COUNT(*) FROM {table}")).await, 1);
     }
     assert_eq!(f.count("SELECT COUNT(*) FROM audit_events").await, 2);
-    session_and_keys(&f, &a.receipt, &a.token, &a.client).await;
+    let session = session_and_keys(&f, &a.receipt, &a.token, &a.client).await;
+    assert_eq!(session.vaults.len(), 2);
+    assert_eq!(
+        session
+            .vaults
+            .iter()
+            .filter_map(|vault| vault.organization.map(|context| context.organization))
+            .collect::<Vec<_>>(),
+        [updated.id]
+    );
     drop(listener);
     f.cleanup().await;
 }

@@ -6,7 +6,7 @@ use scoplen_api::{
     sync::{
         SyncAccountDeviceWrap, SyncAccountKeyBundle, SyncAccountKeyBundleUpdate, SyncAckRequest,
         SyncAckResponse, SyncChangesResponse, SyncSessionRequest, SyncSessionResponse,
-        SyncVaultKeysResponse, SyncWrite, SyncWriteBatch, SyncWriteBatchResponse,
+        SyncVaultKeysResponse, SyncWrite, SyncWriteBatch, SyncWriteBatchResponse, VaultKind,
     },
 };
 use scoplen_crypto::{
@@ -168,7 +168,7 @@ async fn session_and_keys(
     receipt: &LegacyReceipt,
     token: &str,
     client: &P256SigningKey,
-) {
+) -> SyncSessionResponse {
     let device = receipt.device_id;
     let vault = receipt.personal_vault_id;
     let session =
@@ -178,8 +178,11 @@ async fn session_and_keys(
     let reply = protected(f, "POST", "/sync/v1/session", &session, token, client).await;
     assert_eq!(reply.status, 200);
     let session = SyncSessionResponse::from_cbor(&reply.body).expect("session response");
-    assert_eq!(session.vaults.len(), 1);
-    assert_eq!(session.vaults[0].id, vault);
+    let mut personal = session.vaults.iter().filter(|value| value.kind == VaultKind::Personal);
+    let owner = personal.next().expect("account-owned Personal descriptor");
+    assert_eq!(owner.id, vault);
+    assert_eq!(owner.organization, None);
+    assert!(personal.next().is_none());
     let reply = protected(f, "GET", "/sync/v1/keys", &[], token, client).await;
     assert_eq!(reply.status, 200);
     let bundle = SyncAccountKeyBundle::from_cbor(&reply.body).expect("persisted K-4");
@@ -191,6 +194,7 @@ async fn session_and_keys(
     let keys = SyncVaultKeysResponse::from_cbor(&reply.body).expect("vault key");
     scoplen_crypto::PersonalVaultKeyWrap::decode(&keys.keys[0].wrapped_vault_key)
         .expect("real legacy Personal key wrap");
+    session
 }
 
 async fn sync_object(f: &Fixture, receipt: &LegacyReceipt, token: &str, client: &P256SigningKey) {

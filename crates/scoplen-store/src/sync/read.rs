@@ -335,11 +335,22 @@ pub(super) async fn sqlite_versions(
     object: ObjectId,
     limits: Option<SyncReadLimits>,
 ) -> Result<Vec<SyncChange>, SyncStoreError> {
-    validate_limits(limits)?;
     let mut tx = store.pool().begin().await?;
-    vault_state(&mut tx, vault).await?;
+    let versions = sqlite_versions_in_transaction(&mut tx, vault, object, limits).await?;
+    tx.commit().await?;
+    Ok(versions)
+}
+
+pub(crate) async fn sqlite_versions_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    vault: VaultId,
+    object: ObjectId,
+    limits: Option<SyncReadLimits>,
+) -> Result<Vec<SyncChange>, SyncStoreError> {
+    validate_limits(limits)?;
+    vault_state(tx, vault).await?;
     let rows = sqlx::query("SELECT sequence, tombstone, CASE WHEN signer_device_id IS NULL OR length(signer_device_id) = 16 THEN signer_device_id ELSE X'' END AS signer_device_id, key_epoch, length(envelope) AS envelope_bytes, typeof(envelope) AS envelope_type FROM sync_object_versions WHERE vault_id = ? AND object_id = ? ORDER BY sequence DESC LIMIT 21")
-        .bind(vault.as_slice()).bind(object.as_slice()).fetch_all(&mut *tx).await?;
+        .bind(vault.as_slice()).bind(object.as_slice()).fetch_all(&mut **tx).await?;
     let mut metadata =
         rows.iter().map(|row| sqlite_metadata(row, Some(object))).collect::<Result<Vec<_>, _>>()?;
     if metadata.is_empty() {
@@ -350,7 +361,7 @@ pub(super) async fn sqlite_versions(
     #[cfg(test)]
     tests::payload_query(vault);
     let rows = sqlx::query("SELECT sequence, envelope, tombstone, signer_device_id, key_epoch FROM sync_object_versions WHERE vault_id = ? AND object_id = ? AND sequence >= ? AND sequence <= ? AND length(envelope) <= ? ORDER BY sequence ASC LIMIT 21")
-        .bind(vault.as_slice()).bind(object.as_slice()).bind(sequence_to_sql(metadata[0].change.sequence)?).bind(sequence_to_sql(metadata.last().expect("nonempty history").change.sequence)?).bind(payload_bound(&metadata)).fetch_all(&mut *tx).await?;
+        .bind(vault.as_slice()).bind(object.as_slice()).bind(sequence_to_sql(metadata[0].change.sequence)?).bind(sequence_to_sql(metadata.last().expect("nonempty history").change.sequence)?).bind(payload_bound(&metadata)).fetch_all(&mut **tx).await?;
     let mut versions = Vec::new();
     for row in rows {
         let change = change_from_row(object, &row)?;
@@ -359,7 +370,6 @@ pub(super) async fn sqlite_versions(
         versions.push(change);
     }
     verify_payloads(&metadata, &versions)?;
-    tx.commit().await?;
     Ok(versions)
 }
 
@@ -369,21 +379,32 @@ pub(super) async fn postgres_versions(
     object: ObjectId,
     limits: Option<SyncReadLimits>,
 ) -> Result<Vec<SyncChange>, SyncStoreError> {
-    validate_limits(limits)?;
     let mut tx = store.pool().begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
+    let versions = postgres_versions_in_transaction(&mut tx, vault, object, limits).await?;
+    tx.commit().await?;
+    Ok(versions)
+}
+
+pub(crate) async fn postgres_versions_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    vault: VaultId,
+    object: ObjectId,
+    limits: Option<SyncReadLimits>,
+) -> Result<Vec<SyncChange>, SyncStoreError> {
+    validate_limits(limits)?;
     if sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT FROM sync_vaults WHERE vault_id = $1")
         .bind(vault.as_slice())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .is_none()
     {
         return Err(SyncStoreError::VaultNotFound);
     }
     let rows = sqlx::query("SELECT sequence, tombstone, CASE WHEN signer_device_id IS NULL OR octet_length(signer_device_id) = 16 THEN signer_device_id ELSE ''::BYTEA END AS signer_device_id, key_epoch, octet_length(envelope)::BIGINT AS envelope_bytes FROM sync_object_versions WHERE vault_id = $1 AND object_id = $2 ORDER BY sequence DESC LIMIT 21")
-        .bind(vault.as_slice()).bind(object.as_slice()).fetch_all(&mut *tx).await?;
+        .bind(vault.as_slice()).bind(object.as_slice()).fetch_all(&mut **tx).await?;
     let mut metadata = rows
         .iter()
         .map(|row| postgres_metadata(row, Some(object)))
@@ -396,7 +417,7 @@ pub(super) async fn postgres_versions(
     #[cfg(test)]
     tests::payload_query(vault);
     let rows = sqlx::query("SELECT sequence, envelope, tombstone, signer_device_id, key_epoch FROM sync_object_versions WHERE vault_id = $1 AND object_id = $2 AND sequence >= $3 AND sequence <= $4 AND octet_length(envelope) <= $5 ORDER BY sequence ASC LIMIT 21")
-        .bind(vault.as_slice()).bind(object.as_slice()).bind(sequence_to_sql(metadata[0].change.sequence)?).bind(sequence_to_sql(metadata.last().expect("nonempty history").change.sequence)?).bind(payload_bound(&metadata)).fetch_all(&mut *tx).await?;
+        .bind(vault.as_slice()).bind(object.as_slice()).bind(sequence_to_sql(metadata[0].change.sequence)?).bind(sequence_to_sql(metadata.last().expect("nonempty history").change.sequence)?).bind(payload_bound(&metadata)).fetch_all(&mut **tx).await?;
     let mut versions = Vec::new();
     for row in rows {
         let change = change_from_postgres_row(object, &row)?;
@@ -405,6 +426,5 @@ pub(super) async fn postgres_versions(
         versions.push(change);
     }
     verify_payloads(&metadata, &versions)?;
-    tx.commit().await?;
     Ok(versions)
 }

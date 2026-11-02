@@ -161,8 +161,9 @@ volume. Only the exact lowercase values `true` and `false` are valid; another va
 server configuration validation before startup. Returning to `false` blocks new creation
 while preserving current membership discovery and exact creation confirmation. Team creation
 adds the Account as its initial owner without moving its Personal data or granting Operator
-access. Invitations, team assets, Shared vaults, dissolution and team administration remain
-separate work; the Operator console has no team-creation form.
+access. The native team APIs include named-recipient invitations, membership administration,
+dissolution, typed inventory and persisted policies on either database. Shared vaults retain
+their own roadmap outcomes; the Operator console has no team-creation form.
 
 Before upgrading an existing SQLite schema, the server creates and verifies a standalone
 `pre-migration-<UUIDv7>.sqlite` snapshot in `/var/lib/spl/scoplen.sqlite.migration-snapshots/`.
