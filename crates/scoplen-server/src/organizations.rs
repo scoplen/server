@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Native Account team creation and caller-only membership discovery.
+//! Account team creation and membership discovery for Device and Account-browser actors.
 
 use std::sync::Arc;
 
@@ -20,7 +20,10 @@ use scoplen_api::{
         parse_organization_idempotency_key, parse_organization_if_match,
     },
 };
-use scoplen_store::{kms::LocalKeyFile, organizations::OrganizationStoreError};
+use scoplen_store::{
+    kms::LocalKeyFile,
+    organizations::{OrganizationPrincipal as _, OrganizationStoreError},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -38,6 +41,7 @@ mod user_ca;
 struct OrganizationState {
     backend: AuthBackend,
     auth: PersonalSyncAuthenticator,
+    account_auth: crate::account_actor::AccountActorAuthenticator,
     origin: String,
     policy: OrganizationSettings,
     notifications: scoplen_sync::notify::NotificationHub,
@@ -54,6 +58,11 @@ pub(crate) fn router(
     read_body_limits: scoplen_sync::http::ReadBodyLimits,
 ) -> Router {
     let auth = PersonalSyncAuthenticator::new(backend.clone(), kms.clone(), origin.clone());
+    let account_auth = crate::account_actor::AccountActorAuthenticator::new(
+        backend.clone(),
+        kms.clone(),
+        origin.clone(),
+    );
     Router::new()
         .route("/api/v1/orgs", post(create))
         .route("/api/v1/orgs", get(list))
@@ -66,6 +75,7 @@ pub(crate) fn router(
         .with_state(OrganizationState {
             backend,
             auth,
+            account_auth,
             origin,
             policy,
             notifications,
@@ -143,7 +153,7 @@ async fn update(State(state): State<OrganizationState>, request: Request<Body>) 
         return problem(StatusCode::FORBIDDEN, "policy.denied", false, &request_id);
     }
     let (principal, expires_at) = match state
-        .auth
+        .account_auth
         .authenticate_request(
             DeviceAccessOperation::OrganizationUpdate,
             &parts.method,
@@ -237,7 +247,7 @@ async fn handle(
         return problem(StatusCode::FORBIDDEN, "policy.denied", false, &request_id);
     }
     let (principal, expires_at) = match state
-        .auth
+        .account_auth
         .authenticate_request(operation, &parts.method, &parts.uri, &parts.headers)
         .await
     {
@@ -309,7 +319,7 @@ async fn handle(
                 }
             };
             if result.is_ok() {
-                notify_membership_account(&state, principal.account_id).await;
+                notify_membership_account(&state, principal.account_id()).await;
             }
             resource_response(result, StatusCode::CREATED, &request_id)
         }
@@ -460,14 +470,12 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
             "Teams unavailable",
             "Retry with a fresh proof, preserving the original creation key and name when applicable.",
         ),
-        "policy.denied" => (
-            "Access denied",
-            "Obtain a permitted Device session or contact the deployment administrator.",
-        ),
-        "auth.authentication_required" => (
-            "Authentication required",
-            "Authenticate the enrolled Device and create a fresh request proof.",
-        ),
+        "policy.denied" => {
+            ("Access denied", "Use a permitted session or contact the team administrator.")
+        }
+        "auth.authentication_required" => {
+            ("Authentication required", "Sign in and create a fresh request proof.")
+        }
         _ => ("Invalid team request", "Correct the team name, route, query or request headers."),
     };
     specific_problem(status, code, title, detail, changed, status.is_server_error(), request_id)

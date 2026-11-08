@@ -4,6 +4,18 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add independent Account-browser password options, sign-in, rotating refresh and current-family
+  sign-out on SQLite and PostgreSQL. Revalidate genuine browser families inside Account/team
+  transactions and retain native Device authority and receipt bytes. Purpose/key-bound attempts,
+  digest-only credentials, audited outcomes, bounded retention and forward migrations preserve
+  existing password admission debt. Personal sync, Device enrollment and certificate issuance
+  remain outside browser authority.
+
+- Serve the finite Account/team console entry routes and bounded same-origin Worker/WebAssembly
+  assets with a named Worker-only Trusted Types policy. Add a public-registration helper that
+  prepares private disposable Accounts for independent browser acceptance; shipped-browser and
+  complete console acceptance remain separate roadmap outcomes.
+
 - Add named-Account team invitations, member administration, self-leave and Owner dissolution
   on SQLite and PostgreSQL. Bind invitations to an existing username and separate eight-symbol
   password, retain digest-only verification and bounded attempt debt, and make membership,

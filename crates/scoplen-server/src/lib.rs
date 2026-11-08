@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod account_actor;
 mod account_devices;
 mod account_entry;
 mod account_profile;

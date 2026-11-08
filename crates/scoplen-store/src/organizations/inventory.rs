@@ -2,10 +2,11 @@
 //! Transaction-current Organization inventory and complete authorized views.
 
 use super::{
-    CurrentPrincipal, OrganizationResource, OrganizationStoreError as Error, PostgresStore,
-    SqliteStore, Uuid, append_audit_event_in_postgres_transaction,
+    CurrentPrincipal, OrganizationPrincipal, OrganizationResource, OrganizationStoreError as Error,
+    PostgresStore, SqliteStore, Uuid, actor_audit, append_audit_event_in_postgres_transaction,
     append_audit_event_in_transaction, check_current_identity, check_identity, lock_postgres,
-    lock_sqlite, now_ms, postgres_principal, sqlite_principal, timestamp,
+    lock_sqlite, now_ms, postgres_actor, postgres_principal, sqlite_actor, sqlite_principal,
+    timestamp,
 };
 use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet, Request};
 use scoplen_api::{
@@ -107,6 +108,24 @@ fn content_equal(left: &InventoryFields, right: &InventoryFields) -> Result<bool
         serde_json::from_slice(&right.to_json().map_err(|_| Error::InvalidRequest)?)
             .map_err(|_| Error::InvalidRequest)?;
     Ok(existing == desired)
+}
+
+fn browser_inventory_type(
+    expected: &impl OrganizationPrincipal,
+    kind: InventoryType,
+) -> Result<(), Error> {
+    if expected.is_account_browser()
+        && !matches!(
+            kind,
+            InventoryType::Host
+                | InventoryType::HostGroup
+                | InventoryType::AccessProfile
+                | InventoryType::Route
+        )
+    {
+        return Err(Error::PermissionDenied);
+    }
+    Ok(())
 }
 
 pub(super) struct Graph {
@@ -276,7 +295,7 @@ fn object_entity(object: &Object, organization: Uuid) -> Result<Json, Error> {
 }
 
 macro_rules! inventory {
-    ($store:ty,$db:ty,$begin:literal,$lock:ident,$principal:ident,$audit:ident,$postgres:literal,$versions:ident) => {
+    ($store:ty,$db:ty,$begin:literal,$lock:ident,$principal:ident,$actor:ident,$audit:ident,$postgres:literal,$versions:ident) => {
         impl $store {
             /// Resolve retained membership targets for content-free post-commit rediscovery.
             /// # Errors
@@ -329,14 +348,14 @@ macro_rules! inventory {
                 tx.commit().await?;Ok(Some(response))
             }
 
-            pub(super) async fn inventory_owner(tx:&mut Transaction<'_,$db>,expected:&CurrentPrincipal,expires_at:u64,org:Uuid,write:bool)
+            pub(super) async fn inventory_owner(tx:&mut Transaction<'_,$db>,expected: &impl OrganizationPrincipal,expires_at:u64,org:Uuid,write:bool)
                 ->Result<(OrganizationResource,Uuid,u64,u64),Error> {
-                $lock(tx,&expected.account_id,false).await?;
-                check_identity($principal(tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(tx,&expected.account_id(),false).await?;
+                $actor(tx, expected, expires_at).await?;
                 let suffix=if $postgres {if write {" FOR UPDATE OF o,v"}else{" FOR SHARE OF o,v"}} else {""};
                 let row=sqlx::query(&format!("SELECT o.view_revision,v.vault_id,s.current_seq FROM organizations o JOIN organization_inventory_vaults v ON v.organization_id=o.id JOIN sync_vaults s ON s.vault_id=v.vault_id WHERE o.id=$1 AND o.dissolved_at_ms IS NULL AND s.kind='organization'{suffix}"))
                     .bind(org.as_bytes().as_slice()).fetch_optional(&mut **tx).await?.ok_or(Error::NotFound)?;
-                let current=Self::read_organization_in_transaction(tx,&expected.account_id,org.as_bytes()).await?;
+                let current=Self::read_organization_in_transaction(tx,&expected.account_id(),org.as_bytes()).await?;
                 Ok((current,row_uuid(&row,"vault_id")?,revision(row.try_get("view_revision")?)?,number(row.try_get("current_seq")?)?))
             }
 
@@ -466,13 +485,14 @@ macro_rules! inventory {
             /// Read a live typed Resource through current membership and object authorization.
             /// # Errors
             /// Foreign, deleted and unreadable ids share `NotFound`; damaged state fails closed.
-            pub async fn read_organization_inventory(&self,expected:&CurrentPrincipal,expires_at:u64,org:Uuid,kind:InventoryType,id:Uuid)->Result<InventoryResource,Error> {
+            pub async fn read_organization_inventory(&self,expected: &impl OrganizationPrincipal,expires_at:u64,org:Uuid,kind:InventoryType,id:Uuid)->Result<InventoryResource,Error> {
+                browser_inventory_type(expected,kind)?;
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,org,false).await?;
                 let mut graph=Self::inventory_graph(&mut tx,current,now_ms()?).await?;
                 let (object,value)=Self::inventory_object(&mut tx,org,id).await?;
                 if object.object_type!=kind.object_type() || !Self::inventory_readable(&mut tx,&mut graph,&object).await? {return Err(Error::NotFound);}
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $actor(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;
                 Ok(value)
             }
@@ -480,7 +500,8 @@ macro_rules! inventory {
             /// Read only independently visible Resources, advancing solely over eligible ids.
             /// # Errors
             /// Returns current authentication, membership, query or storage errors.
-            pub async fn list_organization_inventory(&self,expected:&CurrentPrincipal,expires_at:u64,org:Uuid,kind:InventoryType,query:&OrganizationListQuery)->Result<InventoryPage,Error> {
+            pub async fn list_organization_inventory(&self,expected: &impl OrganizationPrincipal,expires_at:u64,org:Uuid,kind:InventoryType,query:&OrganizationListQuery)->Result<InventoryPage,Error> {
+                browser_inventory_type(expected,kind)?;
                 query.validate().map_err(|_|Error::InvalidRequest)?;
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,org,false).await?;
@@ -509,7 +530,7 @@ macro_rules! inventory {
                     }
                 }
                 page.to_json().map_err(|_|Error::StorageUnavailable)?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $actor(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;
                 Ok(page)
             }
@@ -557,8 +578,9 @@ macro_rules! inventory {
             /// Returns fixed authentication, current authority, reference, precondition,
             /// storage or uncertain-commit errors. Uncertain replacements are not replayable.
             #[allow(clippy::too_many_lines)]
-            pub async fn write_organization_inventory(&self,expected:&CurrentPrincipal,expires_at:u64,origin:&str,target:InventoryTarget,write:InventoryWrite<'_>)->Result<InventoryWriteResult,Error> {
+            pub async fn write_organization_inventory(&self,expected: &impl OrganizationPrincipal,expires_at:u64,origin:&str,target:InventoryTarget,write:InventoryWrite<'_>)->Result<InventoryWriteResult,Error> {
                 let InventoryTarget{org,kind,id}=target;
+                browser_inventory_type(expected,kind)?;
                 scoplen_model::validate_uuid_v7(id).map_err(|_|Error::InvalidRequest)?;
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,vault,view_revision,current_seq)=Self::inventory_owner(&mut tx,expected,expires_at,org,true).await?;
@@ -571,19 +593,23 @@ macro_rules! inventory {
                         if request.id!=id || request.fields.kind()!=kind {return Err(Error::InvalidRequest);}
                         let canonical=request.to_json().map_err(|_|Error::InvalidRequest)?;
                         let mut hash=Sha256::new();
-                        for part in [b"spl-organization-inventory-create-v1".as_slice(),origin.as_bytes(),expected.account_id.as_slice(),expected.device_id.as_slice(),b"POST",format!("/api/v1/orgs/{org}/{}",kind.segment()).as_bytes()] {
+                        for part in [b"spl-organization-inventory-create-v1".as_slice(),origin.as_bytes(),expected.account_id().as_slice()] {
+                            hash.update(part);hash.update([0]);
+                        }
+                        if let Some(kind)=expected.receipt_writer_kind() {hash.update(kind);hash.update([0]);}
+                        for part in [expected.writer_id().as_slice(),b"POST",format!("/api/v1/orgs/{org}/{}",kind.segment()).as_bytes()] {
                             hash.update(part);hash.update([0]);
                         }
                         hash.update(canonical);
                         let digest:[u8;32]=hash.finalize().into();
                         let row=sqlx::query("SELECT request_digest,response_json FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms>$3")
-                            .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?;
+                            .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?;
                         Self::inventory_references(&mut tx,&mut graph,id,&request.fields).await?;
                         if let Some(row)=row {
                             if row.try_get::<Vec<u8>,_>("request_digest")?.as_slice()!=digest {return Err(Error::Conflict);}
                             let resource=InventoryResource::from_json(kind,&row.try_get::<Vec<u8>,_>("response_json")?).map_err(|_|Error::StorageUnavailable)?;
                             if resource.id!=id {return Err(Error::StorageUnavailable);}
-                            check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                            $actor(&mut tx, expected, expires_at).await?;
                             tx.commit().await?;
                             return Ok(InventoryWriteResult{resource:Some(resource),vault,sequence:current_seq,view_revision,changed:false});
                         }
@@ -604,7 +630,7 @@ macro_rules! inventory {
                         if current.etag!=if_match {return Err(Error::PreconditionFailed);}
                         Self::inventory_references(&mut tx,&mut graph,id,&request.fields).await?;
                         if content_equal(&current.fields,&request.fields)? {
-                            check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                            $actor(&mut tx, expected, expires_at).await?;
                             tx.commit().await?;
                             return Ok(InventoryWriteResult{resource:Some(current),vault,sequence:current_seq,view_revision,changed:false});
                         }
@@ -622,9 +648,9 @@ macro_rules! inventory {
                 };
                 let old_clock=previous.as_ref().and_then(|(object,_)|object.fields.values().map(|entry|entry.clock).max());
                 let clock=Hlc::tick(old_clock,number(now)?).map_err(|_|Error::StorageUnavailable)?;
-                let writer=Uuid::from_bytes(expected.device_id);
+                let writer=Uuid::from_bytes(expected.writer_id());
                 let fields=fields.map(|fields| if kind==InventoryType::TrustRecord {
-                    fields.with_trust_attribution(number(now)?,Uuid::from_bytes(expected.account_id),writer).map_err(|_|Error::InvalidRequest)
+                    fields.with_trust_attribution(number(now)?,Uuid::from_bytes(expected.account_id()),writer).map_err(|_|Error::InvalidRequest)
                 } else {Ok(fields)}).transpose()?;
                 let object=if let Some(fields)=&fields {
                     fields.to_object(id,clock,writer).map_err(|_|Error::InvalidRequest)?
@@ -671,18 +697,17 @@ macro_rules! inventory {
                 Self::team_revision(&mut tx,org,now).await?;
                 let next_revision=view_revision.checked_add(1).ok_or(Error::StorageUnavailable)?;
                 let action=if deleting {"organization.inventory_deleted"}else if create_receipt.is_some(){"organization.inventory_created"}else{"organization.inventory_updated"};
-                let event=serde_json::to_vec(&json!({"action":action,"account_id":Uuid::from_bytes(expected.account_id),"device_id":writer,"organization_id":org,"object_id":id,"object_type":kind.object_type().to_wire(),"sequence":sequence,"view_revision":next_revision}))
-                    .map_err(|_|Error::StorageUnavailable)?;
+                let event=actor_audit(expected,json!({"action":action,"account_id":Uuid::from_bytes(expected.account_id()),"organization_id":org,"object_id":id,"object_type":kind.object_type().to_wire(),"sequence":sequence,"view_revision":next_revision}))?;
                 $audit(&mut tx,org.into_bytes(),&event,now).await.map_err(|_|Error::StorageUnavailable)?;
                 if let Some((key,digest))=create_receipt {
                     sqlx::query("DELETE FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms<=$3")
-                        .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
+                        .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
                     sqlx::query("INSERT INTO organization_inventory_receipts (account_id,idempotency_key,organization_id,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)")
-                        .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(org.as_bytes().as_slice()).bind(digest.as_slice())
+                        .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(org.as_bytes().as_slice()).bind(digest.as_slice())
                         .bind(resource.as_ref().ok_or(Error::StorageUnavailable)?.to_json().map_err(|_|Error::StorageUnavailable)?)
                         .bind(now).bind(now.checked_add(86_400_000).ok_or(Error::StorageUnavailable)?).execute(&mut *tx).await?;
                 }
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $actor(&mut tx, expected, expires_at).await?;
                 let create=create_receipt.is_some();
                 tx.commit().await.map_err(|_|if create {Error::CommitOutcomeUnknown}else{Error::UpdateCommitOutcomeUnknown})?;
                 Ok(InventoryWriteResult{resource,vault,sequence,view_revision:next_revision,changed:true})
@@ -787,6 +812,7 @@ inventory!(
     "BEGIN IMMEDIATE",
     lock_sqlite,
     sqlite_principal,
+    sqlite_actor,
     append_audit_event_in_transaction,
     false,
     sqlite_versions_in_transaction
@@ -797,6 +823,7 @@ inventory!(
     "BEGIN",
     lock_postgres,
     postgres_principal,
+    postgres_actor,
     append_audit_event_in_postgres_transaction,
     true,
     postgres_versions_in_transaction

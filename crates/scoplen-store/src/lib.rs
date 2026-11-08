@@ -5,6 +5,7 @@
 
 pub mod account_admission_capabilities;
 pub mod account_bootstrap;
+pub mod account_browser_sessions;
 pub mod account_device_admission;
 pub mod account_devices;
 pub mod account_entry_admission;

@@ -8,7 +8,9 @@ software passkey authenticator already used in server tests, and only public Ope
 setup/login/logout APIs and verifies the eight retired invitation/enrollment/pairing API routes
 and the old `/pair` landing return 404. The separate `verify-account` command exercises real
 Account password entry and encrypted synchronization using two independently generated Devices.
-Neither command seeds identity tables, opens SQL connections, manages a server process,
+The separate `prepare-browser-accounts` command registers two disposable password Accounts
+and exports private password files for browser team acceptance. None of these commands seeds
+identity tables, opens SQL connections, manages a server process,
 creates/drops a PostgreSQL database, or installs a CA
 in the operating system. Physical passkeys and browser interaction require separate coverage.
 
@@ -148,6 +150,33 @@ Startup and bootstrap are otherwise identical to SQLite. `server.toml` contains 
 connection URL and must never be printed, committed or uploaded. After stopping the owned
 server and all consumers, the caller removes only their disposable database and private inputs.
 The helper never carries database administrator privileges or drops data.
+
+## Browser Account preparation
+
+Before starting the prepared server, place the production console's built assets in the
+fixture's `unused-console` directory and set `[organizations] allow_creation = true` in
+its private `server.toml`. Keep its listener, TLS and data paths unchanged. This lets browser
+acceptance create the team itself through the public API, independently of fixture preparation.
+
+Against that running owned server, execute once:
+
+```text
+personal_live_bootstrap prepare-browser-accounts <fixture-directory> --server-pid <owned-server-pid>
+```
+
+It uses public password registration for two independent Accounts and publishes
+`browser-accounts.json` only after both registrations and both private password files are
+confirmed. The descriptor contains the trusted origin, absolute CA/config paths, the controller's
+server process id, `owner_username`, `member_username`, `owner_password_file` and
+`member_password_file`, plus `disposable: true`. Password files contain exact UTF-8 bytes with
+no newline. Stdout gives only the result and descriptor path. Protect all three files and never
+print or commit their contents.
+
+This descriptor contains no team or asset ids: the browser must create those through the shipped
+console. It does not claim browser login or team acceptance succeeded. The command exclusively
+creates `browser-accounts.started` before its first request; after any failure, abandon the
+owned fixture instead of repeating a possibly committed registration. These Accounts and
+their initial Devices share the fixture's disposable lifecycle.
 
 ## Descriptor, privacy and failures
 

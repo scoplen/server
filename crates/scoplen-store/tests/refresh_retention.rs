@@ -78,6 +78,29 @@ macro_rules! backend {
                 sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {kind}_refresh_{table}"))
                     .fetch_one(pool).await.expect("retained row count")
             }
+
+            pub async fn browser_family(pool:&sqlx::Pool<$db>,principal:Uuid,expires:i64,revoked:bool)->Uuid {
+                let id=Uuid::now_v7();
+                sqlx::query("INSERT INTO account_browser_families (family_id,account_id,credential_generation,dpop_jkt,trusted_origin,scope,created_at_ms,expires_at_ms,revoked_at_ms) VALUES ($1,$2,1,$3,'https://refresh.example.test','account:read',$4,$5,$6)")
+                    .bind(id.as_bytes().as_slice()).bind(principal.as_bytes().as_slice()).bind("a".repeat(43))
+                    .bind(expires-FAMILY_MS).bind(expires).bind(revoked.then_some(expires-FAMILY_MS))
+                    .execute(pool).await.expect("browser family");
+                id
+            }
+
+            pub async fn browser_token(pool:&sqlx::Pool<$db>,family:Uuid,index:u16,access_expires:i64) {
+                let mut digest=[0_u8;32];digest[..16].copy_from_slice(family.as_bytes());digest[16..18].copy_from_slice(&index.to_be_bytes());
+                sqlx::query("INSERT INTO account_browser_refresh_tokens (token_digest,family_id,issued_at_ms,spent_at_ms) VALUES ($1,$2,1,2)")
+                    .bind(digest.as_slice()).bind(family.as_bytes().as_slice()).execute(pool).await.expect("spent refresh");
+                sqlx::query("INSERT INTO account_browser_access_tokens (token_digest,family_id,issued_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4)")
+                    .bind(digest.as_slice()).bind(family.as_bytes().as_slice()).bind(access_expires-600000).bind(access_expires)
+                    .execute(pool).await.expect("browser access digest");
+            }
+
+            pub async fn browser_count(pool:&sqlx::Pool<$db>,table:&str)->i64 {
+                sqlx::query_scalar(&format!("SELECT COUNT(*) FROM account_browser_{table}"))
+                    .fetch_one(pool).await.expect("browser retained rows")
+            }
         }
     };
 }
@@ -85,6 +108,58 @@ macro_rules! backend {
 backend!(sqlite, sqlx::Sqlite, 1_i64);
 #[cfg(feature = "postgres-integration")]
 backend!(postgres, sqlx::Postgres, true);
+
+macro_rules! browser_retention {
+    ($store:expr,$backend:ident)=>{{
+        let store=&$store;
+        let principal=$backend::seed(store.pool()).await;
+        let now=now_ms();
+        let expired=$backend::browser_family(store.pool(),principal,now-1000,false).await;
+        for index in 0..300 {$backend::browser_token(store.pool(),expired,index,now-1000).await;}
+        $backend::browser_token(store.pool(),expired,300,now+600000).await;
+        let live=$backend::browser_family(store.pool(),principal,now+FAMILY_MS,true).await;
+        $backend::browser_token(store.pool(),live,0,now+600000).await;
+        assert_eq!(store.cleanup_refresh_families().await.unwrap(),RefreshCleanupReport{
+            account_browser_access:256,account_browser_refresh:256,..RefreshCleanupReport::default()
+        });
+        assert_eq!(store.cleanup_refresh_families().await.unwrap(),RefreshCleanupReport{
+            account_browser_access:44,account_browser_refresh:45,..RefreshCleanupReport::default()
+        });
+        assert_eq!($backend::browser_count(store.pool(),"families").await,2);
+        assert_eq!($backend::browser_count(store.pool(),"access_tokens").await,2);
+        assert_eq!($backend::browser_count(store.pool(),"refresh_tokens").await,1);
+        assert_eq!(store.cleanup_refresh_families().await.unwrap(),RefreshCleanupReport::default(),
+            "family retirement cannot cascade an access digest before its original expiry");
+        sqlx::query("UPDATE account_browser_access_tokens SET issued_at_ms=issued_at_ms-1200000,expires_at_ms=expires_at_ms-1200000 WHERE family_id=$1")
+            .bind(expired.as_bytes().as_slice()).execute(store.pool()).await.expect("expire retained access");
+        assert_eq!(store.cleanup_refresh_families().await.unwrap(),RefreshCleanupReport{
+            account_browser_access:1,account_browser_families:1,..RefreshCleanupReport::default()
+        });
+        assert_eq!($backend::browser_count(store.pool(),"families").await,1);
+        assert_eq!($backend::browser_count(store.pool(),"refresh_tokens").await,1,
+            "revoked unexpired families retain spent refresh reuse evidence");
+    }};
+}
+
+#[tokio::test]
+async fn sqlite_browser_retention_bounds_tokens_and_preserves_original_access_expiry() {
+    let directory =
+        std::env::temp_dir().join(format!("scoplen-browser-retention-{}", Uuid::now_v7()));
+    let store = SqliteStore::open(&directory.join("store.sqlite")).await.expect("owned store");
+    browser_retention!(store, sqlite);
+    store.pool().close().await;
+    support::remove_test_directory(directory).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_browser_retention_bounds_tokens_and_preserves_original_access_expiry() {
+    let (url, pool, schema) = postgres_fixture().await;
+    let store = PostgresStore::connect(&url).await.expect("owned store");
+    browser_retention!(store, postgres);
+    store.pool().close().await;
+    cleanup_postgres(pool, schema).await;
+}
 
 macro_rules! bounded_retention {
     ($store:expr,$second:expr,$backend:ident) => {{
@@ -107,6 +182,7 @@ macro_rules! bounded_retention {
                 operator_tokens: 256,
                 device_families: 0,
                 operator_families: 0,
+                ..RefreshCleanupReport::default()
             }
         );
         for kind in ["device", "operator"] {
@@ -120,6 +196,7 @@ macro_rules! bounded_retention {
                 operator_tokens: 59,
                 device_families: 16,
                 operator_families: 16,
+                ..RefreshCleanupReport::default()
             }
         );
         assert_eq!(
@@ -129,6 +206,7 @@ macro_rules! bounded_retention {
                 operator_tokens: 2,
                 device_families: 2,
                 operator_families: 2,
+                ..RefreshCleanupReport::default()
             }
         );
         assert_eq!(
@@ -159,6 +237,7 @@ macro_rules! bounded_retention {
             operator_tokens: 2,
             device_families: 1,
             operator_families: 1,
+            ..RefreshCleanupReport::default()
         };
         assert!(
             (first == winner && other == RefreshCleanupReport::default())
@@ -189,6 +268,7 @@ macro_rules! rollback_retention {
                 operator_tokens: 2,
                 device_families: 1,
                 operator_families: 1,
+                ..RefreshCleanupReport::default()
             }
         );
     }};

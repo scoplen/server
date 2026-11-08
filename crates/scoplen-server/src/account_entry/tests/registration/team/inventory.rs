@@ -22,7 +22,13 @@ use serde_json::json;
 
 mod user_ca;
 
-async fn cbor_call(f: &Fixture, a: &Actor, method: &str, path: &str, body: &[u8]) -> Reply {
+pub(super) async fn cbor_call(
+    f: &Fixture,
+    a: &Actor,
+    method: &str,
+    path: &str,
+    body: &[u8],
+) -> Reply {
     let proof = DpopProof::sign(
         &a.registration.device,
         &a.registration.device.public_key_sec1(),
@@ -127,7 +133,11 @@ async fn enroll_member(f: &Fixture, a: &Actor, b: &Actor, org: Uuid) -> Uuid {
     assert_eq!(reply.status, 200);
     TeamAcceptanceReceipt::from_json(&reply.body).expect("membership").membership_id
 }
-async fn descriptor(f: &Fixture, a: &Actor, organization: Uuid) -> scoplen_api::sync::SessionVault {
+pub(super) async fn descriptor(
+    f: &Fixture,
+    a: &Actor,
+    organization: Uuid,
+) -> scoplen_api::sync::SessionVault {
     let body = SyncSessionRequest {
         client_version: "0.1.0".into(),
         model_version: 1,
@@ -144,7 +154,14 @@ async fn descriptor(f: &Fixture, a: &Actor, organization: Uuid) -> scoplen_api::
         .find(|vault| vault.organization.is_some_and(|owner| owner.organization == organization))
         .expect("current Organization descriptor")
 }
-async fn view(f: &Fixture, a: &Actor, vault: Uuid, revision: u64, after: u64, limit: u16) -> Reply {
+pub(super) async fn view(
+    f: &Fixture,
+    a: &Actor,
+    vault: Uuid,
+    revision: u64,
+    after: u64,
+    limit: u16,
+) -> Reply {
     cbor_call(
         f,
         a,

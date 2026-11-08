@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Device-authenticated local groups and persisted-policy administration.
+//! Account-authenticated local groups and persisted-policy administration.
 
 use super::{OrganizationState, invalid, problem, reply, store_problem, team};
 use crate::device_auth::{AuthBackend, matching_origin};
@@ -20,7 +20,7 @@ use scoplen_api::{
     organization::{OrganizationListQuery, parse_organization_idempotency_key},
 };
 use scoplen_store::organizations::{
-    OrganizationStoreError,
+    OrganizationPrincipal as _, OrganizationStoreError,
     group_policy::{ControlFields, ControlKind, ControlResource, ControlTarget, ControlWrite},
 };
 use uuid::Uuid;
@@ -77,7 +77,7 @@ async fn handle(
         return response;
     }
     let (principal, expires_at) = match state
-        .auth
+        .account_auth
         .authenticate_request(operation, &parts.method, &parts.uri, &parts.headers)
         .await
     {
@@ -100,7 +100,7 @@ async fn handle(
             &state,
             endpoint,
             peer.ip(),
-            Some(Uuid::from_bytes(principal.account_id)),
+            Some(Uuid::from_bytes(principal.account_id())),
             &id,
         )
         .await
