@@ -56,7 +56,7 @@ export function SimpleRuleEditor({
   }, [generating, source, previewFailed]);
   const assetNames: Partial<Record<CollectionKind, string>> = {
     hosts: t("Host", "主机"),
-    "access-profiles": t("Access profile", "访问配置"),
+    "access-profiles": t("Login", "登录配置"),
     routes: t("Route", "路由"),
     "host-groups": t("Host group", "主机分组"),
   };
