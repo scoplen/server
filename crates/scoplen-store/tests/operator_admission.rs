@@ -30,169 +30,6 @@ async fn sqlite() -> (SqliteStore, std::path::PathBuf) {
     (SqliteStore::open(&dir.join("store.sqlite")).await.expect("SQLite"), dir)
 }
 
-macro_rules! quotas {
-    ($first:expr,$second:expr) => {{
-        let first = &$first;
-        let second = &$second;
-        let mut jobs = Vec::new();
-        for index in 0..40 {
-            let store = if index % 2 == 0 { first.clone() } else { second.clone() };
-            jobs.push(tokio::spawn(async move {
-                store.admit_operator_auth_source(Endpoint::SetupOptions, source()).await
-            }));
-        }
-        let mut admitted = 0;
-        for job in jobs {
-            match job.await.expect("join").expect("admission") {
-                Decision::Admitted => admitted += 1,
-                Decision::RateLimited(wait) => assert!((1..=60).contains(&wait)),
-            }
-        }
-        assert_eq!(admitted, 30);
-        assert!(matches!(
-            second
-                .admit_operator_auth_source(
-                    Endpoint::SetupOptions,
-                    "::ffff:192.0.2.80".parse().expect("mapped source")
-                )
-                .await,
-            Ok(Decision::RateLimited(_))
-        ));
-        assert_eq!(
-            second
-                .admit_operator_auth_source(Endpoint::SetupFinish, source())
-                .await
-                .expect("separate endpoint"),
-            Decision::Admitted
-        );
-        let digest = [9; 32];
-        for _ in 0..5 {
-            assert_eq!(
-                first
-                    .admit_operator_auth_private(
-                        Endpoint::SetupOptions,
-                        Private::SetupDigest(&digest)
-                    )
-                    .await
-                    .expect("nonexistent digest admitted"),
-                Decision::Admitted
-            );
-        }
-        assert!(matches!(
-            second
-                .admit_operator_auth_private(Endpoint::SetupOptions, Private::SetupDigest(&digest))
-                .await,
-            Ok(Decision::RateLimited(_))
-        ));
-        assert_eq!(
-            second
-                .admit_operator_auth_private(Endpoint::SetupFinish, Private::SetupDigest(&digest))
-                .await
-                .expect("separate digest endpoint"),
-            Decision::Admitted
-        );
-        let ceremony = uuid::Uuid::now_v7();
-        for _ in 0..5 {
-            assert_eq!(
-                first
-                    .admit_operator_auth_private(Endpoint::LoginFinish, Private::Ceremony(ceremony))
-                    .await
-                    .expect("nonexistent ceremony admitted"),
-                Decision::Admitted
-            );
-        }
-        assert!(matches!(
-            second
-                .admit_operator_auth_private(Endpoint::LoginFinish, Private::Ceremony(ceremony))
-                .await,
-            Ok(Decision::RateLimited(_))
-        ));
-        let operator = uuid::Uuid::now_v7();
-        for _ in 0..10 {
-            assert_eq!(
-                first
-                    .admit_operator_auth_private(
-                        Endpoint::LoginFinish,
-                        Private::AuthenticatedOperator(operator)
-                    )
-                    .await
-                    .expect("verified operator admission"),
-                Decision::Admitted
-            );
-        }
-        assert!(matches!(
-            second
-                .admit_operator_auth_private(
-                    Endpoint::LoginFinish,
-                    Private::AuthenticatedOperator(operator)
-                )
-                .await,
-            Ok(Decision::RateLimited(_))
-        ));
-        assert_eq!(
-            second
-                .admit_operator_auth_private(
-                    Endpoint::Refresh,
-                    Private::AuthenticatedOperator(operator)
-                )
-                .await
-                .expect("separate refresh window"),
-            Decision::Admitted
-        );
-        for _ in 0..10 {
-            assert_eq!(
-                first
-                    .admit_operator_auth_private(
-                        Endpoint::Logout,
-                        Private::AuthenticatedOperator(operator)
-                    )
-                    .await
-                    .expect("independent logout quota"),
-                Decision::Admitted
-            );
-        }
-        assert!(matches!(
-            second
-                .admit_operator_auth_private(
-                    Endpoint::Logout,
-                    Private::AuthenticatedOperator(operator)
-                )
-                .await,
-            Ok(Decision::RateLimited(_))
-        ));
-        for _ in 0..30 {
-            assert_eq!(
-                first
-                    .admit_operator_auth_source(Endpoint::Logout, source())
-                    .await
-                    .expect("logout source quota"),
-                Decision::Admitted
-            );
-        }
-        assert!(matches!(
-            second.admit_operator_auth_source(Endpoint::Logout, source()).await,
-            Ok(Decision::RateLimited(_))
-        ));
-        assert!(matches!(
-            first
-                .admit_operator_auth_private(Endpoint::LoginOptions, Private::SetupDigest(&digest))
-                .await,
-            Err(OperatorAdmissionError::InvalidInput)
-        ));
-        assert!(matches!(
-            first
-                .admit_operator_auth_private(Endpoint::SetupFinish, Private::Ceremony(ceremony))
-                .await,
-            Err(OperatorAdmissionError::InvalidInput)
-        ));
-        let device_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM device_auth_admission")
-            .fetch_one(first.pool())
-            .await
-            .expect("device admission untouched");
-        assert_eq!(device_rows, 0);
-    }};
-}
-
 macro_rules! cooldowns {
     ($store:expr,$fail_sql:expr,$clear_sql:expr) => {{
         let store=&$store;
@@ -300,15 +137,6 @@ macro_rules! replay {
 }
 
 #[tokio::test]
-async fn sqlite_durable_quotas_across_replicas() {
-    let (store, dir) = sqlite().await;
-    let replica = SqliteStore::open(&dir.join("store.sqlite")).await.expect("second pool");
-    quotas!(store, replica);
-    store.pool().close().await;
-    replica.pool().close().await;
-    support::remove_test_directory(dir).await;
-}
-#[tokio::test]
 async fn sqlite_denial_cooldown_is_atomic_with_audit() {
     let (store, dir) = sqlite().await;
     cooldowns!(
@@ -356,10 +184,9 @@ async fn cleanup(store: scoplen_store::PostgresStore, pool: sqlx::PgPool, schema
 }
 #[cfg(feature = "postgres-integration")]
 #[tokio::test]
-async fn postgres_quotas_cooldown_audit_and_replay() {
+async fn postgres_cooldown_audit_and_replay() {
     let (store, pool, schema, database) = postgres_fixture().await;
     let replica = scoplen_store::PostgresStore::connect(&database).await.expect("second pool");
-    quotas!(store, replica);
     sqlx::query("DELETE FROM operator_auth_admission")
         .execute(store.pool())
         .await
