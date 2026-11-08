@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-FROM node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS console-build
+FROM node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS console-dependencies
 WORKDIR /src
 COPY pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/console/package.json ./web/console/package.json
@@ -7,7 +7,32 @@ RUN npm install --global "$(node -p "require('./web/console/package.json').packa
 RUN --mount=type=cache,id=scoplen-server-pnpm,target=/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile --store-dir=/pnpm/store \
        --fetch-timeout=120000 --fetch-retries=2
+COPY scripts/sync-console-contract.mjs ./scripts/sync-console-contract.mjs
+
+FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS browser-build
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+       build-essential ca-certificates clang git llvm pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/browser-target
+COPY --from=console-dependencies /usr/local/bin/node /usr/local/bin/node
+ARG TARGETARCH
+RUN --mount=type=cache,id=scoplen-browser-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=scoplen-browser-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=scoplen-browser-target-linux-${TARGETARCH},target=/browser-target,sharing=locked \
+    rustup target add wasm32-unknown-unknown \
+    && cargo install --locked wasm-bindgen-cli --version 0.2.129
+WORKDIR /src
+COPY scripts/sync-console-contract.mjs ./scripts/sync-console-contract.mjs
+COPY web/console/scripts/prepare-browser.mjs ./web/console/scripts/prepare-browser.mjs
+RUN --mount=type=cache,id=scoplen-browser-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=scoplen-browser-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=scoplen-browser-target-linux-${TARGETARCH},target=/browser-target,sharing=locked \
+    node web/console/scripts/prepare-browser.mjs
+
+FROM console-dependencies AS console-build
 COPY web/console/ ./web/console/
+COPY --from=browser-build /src/web/console/.browser/ ./web/console/.browser/
 RUN pnpm --dir web/console build
 
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS server-build

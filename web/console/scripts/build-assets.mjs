@@ -9,15 +9,21 @@ const entries = [
 ];
 const assets = [];
 let total = 0;
+let modules = 0;
 if (entries.length > 256) throw new Error("too many console assets");
 for (const name of entries) {
-  if (!/^(index\.html|assets\/[A-Za-z0-9_.-]+\.(js|css|woff2))$/.test(name))
+  if (
+    !/^(index\.html|assets\/[A-Za-z0-9_.-]+\.(js|css|woff2|wasm))$/.test(name)
+  )
     throw new Error("unsupported console asset");
   const data = await readFile(new URL(name, root));
   total += data.length;
+  const wasm = name.endsWith(".wasm");
+  if (wasm && ++modules > 1)
+    throw new Error("too many console WebAssembly modules");
   if (
     data.length === 0 ||
-    data.length > 2 * 1024 * 1024 ||
+    data.length > (wasm ? 8 : 2) * 1024 * 1024 ||
     total > 16 * 1024 * 1024
   )
     throw new Error("console asset exceeds runtime limits");
@@ -40,6 +46,10 @@ for (const name of [
     await readFile(new URL(`../node_modules/${name}/LICENSE`, import.meta.url)),
   );
 }
+await writeFile(
+  new URL("licenses/scoplen-browser.txt", root),
+  await readFile(new URL("../.browser/LICENSE", import.meta.url)),
+);
 await writeFile(
   new URL("manifest.json", root),
   JSON.stringify({ version: 1, assets }, null, 2) + "\n",

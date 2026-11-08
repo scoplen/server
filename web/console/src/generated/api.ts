@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/a94554ee91e2c66950e9ebb90171fc56bb205f98/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/33374ca27c0bb717d0c3a47faf4e46e37e1a3c52/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -151,6 +151,14 @@ export interface components {
     AccountPasswordOptionsResponse: AccountPasswordOptionsResponse;
     AccountPasswordLoginRequest: AccountPasswordLoginRequest;
     AccountPasswordLoginResponse: AccountPasswordLoginResponse;
+    AccountBrowserPasswordOptionsRequest: AccountBrowserPasswordOptionsRequest;
+    AccountBrowserPasswordOptionsResponse: AccountBrowserPasswordOptionsResponse;
+    AccountBrowserPasswordLoginRequest: AccountBrowserPasswordLoginRequest;
+    AccountBrowserPasswordLoginResponse: AccountBrowserPasswordLoginResponse;
+    AccountBrowserRefreshRequest: AccountBrowserRefreshRequest;
+    AccountBrowserRefreshResponse: AccountBrowserRefreshResponse;
+    AccountBrowserLogoutRequest: AccountBrowserLogoutRequest;
+    AccountBrowserLogoutResponse: AccountBrowserLogoutResponse;
     AccountRegistrationRequest: AccountRegistrationRequest;
     AccountDeviceAdmissionRequest: AccountDeviceAdmissionRequest;
     AccountCommittedConfirmation: AccountCommittedConfirmation;
@@ -778,3 +786,379 @@ export interface InventoryGatewayNetworkReplaceRequest { data: { fields: Invento
 export interface InventoryGatewayNetworkResource { id: string; etag: string; created_at: string; updated_at: string; data: { schema: 1; fields: InventoryGatewayNetworkReadFields; [extension: string]: unknown }; [extension: string]: unknown; }
 export interface InventoryGatewayNetworkPage { items: InventoryGatewayNetworkResource[]; next_cursor: string | null; [extension: string]: unknown; }
 // END GENERATED OrganizationInventory
+
+// BEGIN GENERATED AccountBrowser
+export type AccountBrowserPasswordOptionsRequest = AccountPasswordOptionsRequest;
+export type AccountBrowserPasswordOptionsResponse = AccountPasswordOptionsResponse;
+export type AccountBrowserPasswordLoginRequest = AccountPasswordLoginRequest;
+export type AccountBrowserRefreshRequest = BrowserAuthRefreshRequest;
+export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
+export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
+export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
+export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
+export const initialAccountBrowserScope = "account:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const accountBrowserOperations = [
+  {
+    "method": "GET",
+    "path": "/api/v1/accounts/me",
+    "scopes": [
+      "account:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs",
+    "scopes": [
+      "orgs:create"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs",
+    "scopes": [
+      "orgs:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}",
+    "scopes": [
+      "orgs:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/orgs/{org}",
+    "scopes": [
+      "orgs:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/invitations",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/invitations",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/invitations/{invitation}",
+    "scopes": [
+      "teams:join",
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/invitations/{invitation}/accept",
+    "scopes": [
+      "teams:join"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/invitations/{invitation}",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/members",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/members/{membership}",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/v1/orgs/{org}/members/{membership}",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/members/{membership}",
+    "scopes": [
+      "teams:join",
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/dissolve",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/hosts",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/hosts/{id}",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/hosts",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/hosts/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/hosts/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/host-groups",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/host-groups/{id}",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/host-groups",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/host-groups/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/host-groups/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/access-profiles",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/access-profiles/{id}",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/access-profiles",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/access-profiles/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/access-profiles/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/routes",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/routes/{id}",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/routes",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/routes/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/routes/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/groups",
+    "scopes": [
+      "policies:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/groups/{id}",
+    "scopes": [
+      "policies:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/groups",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/groups/{id}",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/groups/{id}",
+    "scopes": [
+      "teams:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/policies",
+    "scopes": [
+      "policies:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/policies/{id}",
+    "scopes": [
+      "policies:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/policies",
+    "scopes": [
+      "policies:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/policies/{id}",
+    "scopes": [
+      "policies:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/policies/{id}",
+    "scopes": [
+      "policies:write"
+    ],
+    "writerReceipt": false
+  }
+] as const;
+// END GENERATED AccountBrowser

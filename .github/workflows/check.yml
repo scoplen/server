@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: a94554ee91e2c66950e9ebb90171fc56bb205f98
+          ref: 33374ca27c0bb717d0c3a47faf4e46e37e1a3c52
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -60,6 +60,14 @@ jobs:
         working-directory: .
       - run: pnpm install --frozen-lockfile
         working-directory: .
+      - name: Install pinned browser WebAssembly tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends clang llvm
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked wasm-bindgen-cli --version 0.2.129
+      - name: Build the shared browser package from its pinned published source
+        run: pnpm prepare:browser
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
@@ -127,7 +135,7 @@ jobs:
       - name: Show pinned toolchain
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
-        run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact
+        run: cargo test --locked -p scoplen-store --lib --features postgres-integration schema::tests:: -- --test-threads=1
       - name: Check PostgreSQL runtime readiness and audit worker together
         run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_
       - name: Check PostgreSQL deployment audit transactions and concurrency

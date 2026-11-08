@@ -5,12 +5,13 @@
   "packageManager": "pnpm@11.8.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5193 --strictPort",
-    "build": "tsc --noEmit && vite build && node scripts/build-assets.mjs",
+    "dev": "node scripts/prepare-browser.mjs --check && vite --host 127.0.0.1 --port 5193 --strictPort",
+    "build": "node scripts/prepare-browser.mjs --check && tsc --noEmit && vite build && node scripts/build-assets.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5193 --strictPort",
-    "test": "node --test src/*.test.ts",
+    "prepare:browser": "node scripts/prepare-browser.mjs",
+    "test": "node --test src/*.test.ts scripts/*.test.mjs",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "node scripts/prepare-browser.mjs --check && tsc --noEmit"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",

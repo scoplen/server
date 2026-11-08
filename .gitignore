@@ -4,3 +4,4 @@ data/
 .env
 node_modules/
 web/console/dist/
+web/console/.browser/
