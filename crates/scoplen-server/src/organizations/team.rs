@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Native, scope-separated D-136 team lifecycle routes.
+//! Scope-separated team lifecycle for genuine Device and Account-browser actors.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -28,7 +28,7 @@ use scoplen_store::account_entry_admission::{
     AccountEntryAdmissionDecision, AccountEntryEndpoint, AccountEntryPrivateBucket,
     VerifiedAccountBucket,
 };
-use scoplen_store::organizations::OrganizationStoreError;
+use scoplen_store::organizations::{OrganizationPrincipal as _, OrganizationStoreError};
 use uuid::Uuid;
 
 use super::{OrganizationState, invalid, problem, reply, specific_problem, store_problem};
@@ -46,11 +46,6 @@ pub(super) fn routes() -> Router<OrganizationState> {
         .route("/api/v1/orgs/{org}/members/{membership}", patch(handle))
         .route("/api/v1/orgs/{org}/members/{membership}", delete(handle))
         .route("/api/v1/orgs/{org}/dissolve", post(handle))
-        .route("/join-team", get(landing))
-}
-
-async fn landing() -> Response {
-    reply(StatusCode::OK,"text/html; charset=utf-8",b"<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Join a Scoplen team</title><main><h1>Join a Scoplen team</h1><p>Open Join team in Scoplen. Paste this invitation link and enter the separate invitation password supplied by your team administrator.</p><p>Sign in with the account named in the invitation. This page does not accept invitations.</p></main></html>".to_vec(),&Uuid::new_v4())
 }
 
 fn route(parts: &Parts) -> Option<(DeviceAccessOperation, &str, Option<&str>)> {
@@ -315,7 +310,7 @@ async fn handle(
         return problem(StatusCode::FORBIDDEN, "policy.denied", false, &id);
     }
     let (principal, expires_at, scopes) = match state
-        .auth
+        .account_auth
         .authenticate_request_with_scopes(operation, &parts.method, &parts.uri, &parts.headers)
         .await
     {
@@ -338,7 +333,7 @@ async fn handle(
             &state,
             endpoint,
             peer.ip(),
-            Some(Uuid::from_bytes(principal.account_id)),
+            Some(Uuid::from_bytes(principal.account_id())),
             &id,
         )
         .await
@@ -351,8 +346,18 @@ async fn handle(
     let Ok(target) = target.map(parse_organization_idempotency_key).transpose() else {
         return invalid(&id);
     };
-    let manage = DeviceAccessScope::TeamsManage.is_present_in(&scopes);
-    let join = DeviceAccessScope::TeamsJoin.is_present_in(&scopes);
+    let (manage, join) = if principal.is_account_browser() {
+        use scoplen_api::account_browser::AccountBrowserAccessScope;
+        (
+            AccountBrowserAccessScope::TeamsManage.is_present_in(&scopes),
+            AccountBrowserAccessScope::TeamsJoin.is_present_in(&scopes),
+        )
+    } else {
+        (
+            DeviceAccessScope::TeamsManage.is_present_in(&scopes),
+            DeviceAccessScope::TeamsJoin.is_present_in(&scopes),
+        )
+    };
     let paged = matches!(
         operation,
         DeviceAccessOperation::TeamInvitationList | DeviceAccessOperation::TeamMemberList
@@ -476,7 +481,7 @@ async fn handle(
                 }
             };
             if result.is_ok() {
-                super::notify_membership_account(&state, principal.account_id).await;
+                super::notify_membership_account(&state, principal.account_id()).await;
                 super::notify_organization(&state, organization).await;
             }
             receipt!(result)

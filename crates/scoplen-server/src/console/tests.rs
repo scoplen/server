@@ -15,6 +15,7 @@ async fn fixture(directory: &Path) {
     for (path, content) in [
         ("index.html", "<!doctype html><title>Console</title>"),
         ("assets/console-a.js", "export const consoleName = 'Scoplen';"),
+        ("assets/password.wasm", "manifest-listed WebAssembly fixture"),
     ] {
         tokio::fs::write(directory.join(path), content).await.expect("asset fixture");
         entries.push(json!({ "path": path, "bytes": content.len(), "sha256": format!("{:x}", Sha256::digest(content)) }));
@@ -55,7 +56,7 @@ async fn real_http_serves_only_manifest_paths_with_strict_headers() {
     let root = directory();
     fixture(&root).await;
     let router = router(&root, true).await;
-    for path in ["/", "/setup"] {
+    for path in ["/", "/operator", "/setup", "/join-team"] {
         let response = get(router.clone(), path).await;
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         for header in [
@@ -65,7 +66,9 @@ async fn real_http_serves_only_manifest_paths_with_strict_headers() {
             "x-content-type-options: nosniff",
             "frame-ancestors 'none'",
             "require-trusted-types-for 'script'",
-            "trusted-types 'none'",
+            "trusted-types scoplen-browser-worker",
+            "script-src 'self' 'wasm-unsafe-eval'",
+            "worker-src 'self'",
         ] {
             assert!(response.contains(header), "{header}");
         }
@@ -73,9 +76,14 @@ async fn real_http_serves_only_manifest_paths_with_strict_headers() {
     }
     let js = get(router.clone(), "/assets/console-a.js").await;
     assert!(js.contains("content-type: text/javascript; charset=utf-8"));
+    let wasm = get(router.clone(), "/assets/password.wasm").await;
+    assert!(wasm.starts_with("HTTP/1.1 200 OK"));
+    assert!(wasm.contains("content-type: application/wasm"));
+    assert!(wasm.ends_with("manifest-listed WebAssembly fixture"));
     for path in [
         "/manifest.json",
         "/assets/not-listed.js",
+        "/assets/not-listed.wasm",
         "/login",
         "/assets/..%2Fmanifest.json",
         "/assets/%2E%2E%2Findex.html",
@@ -89,6 +97,47 @@ async fn real_http_serves_only_manifest_paths_with_strict_headers() {
     assert!(get(router, "/").await.ends_with("<!doctype html><title>Console</title>"));
     assert_eq!(load(&root).await.err(), Some("asset integrity mismatch"));
     tokio::fs::remove_dir_all(root).await.expect("remove owned assets");
+}
+
+#[tokio::test]
+async fn one_bounded_password_module_can_exceed_the_ordinary_asset_limit() {
+    let root = directory();
+    fixture(&root).await;
+    let module = vec![b'w'; MAX_ASSET_BYTES + 1];
+    tokio::fs::write(root.join("assets/password.wasm"), &module).await.expect("owned module");
+    let mut manifest: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(root.join("manifest.json")).await.expect("manifest"),
+    )
+    .expect("JSON");
+    manifest["assets"][2]["bytes"] = module.len().into();
+    manifest["assets"][2]["sha256"] = format!("{:x}", Sha256::digest(&module)).into();
+    tokio::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).expect("JSON"))
+        .await
+        .expect("manifest");
+    assert_eq!(
+        load(&root).await.expect("one supported module")["assets/password.wasm"].content.len(),
+        module.len()
+    );
+    let mut extra = manifest["assets"][2].clone();
+    extra["path"] = "assets/second.wasm".into();
+    manifest["assets"].as_array_mut().expect("assets").push(extra);
+    tokio::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).expect("JSON"))
+        .await
+        .expect("manifest");
+    assert_eq!(load(&root).await.err(), Some("console contains multiple WebAssembly modules"));
+    manifest["assets"].as_array_mut().expect("assets").pop();
+    manifest["assets"][2]["bytes"] = (MAX_WASM_BYTES + 1).into();
+    tokio::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).expect("JSON"))
+        .await
+        .expect("manifest");
+    assert_eq!(load(&root).await.err(), Some("invalid asset metadata"));
+    manifest["assets"][2]["bytes"] = (MAX_ASSET_BYTES + 1).into();
+    manifest["assets"][2]["path"] = "assets/ordinary.js".into();
+    tokio::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).expect("JSON"))
+        .await
+        .expect("manifest");
+    assert_eq!(load(&root).await.err(), Some("invalid asset metadata"));
+    tokio::fs::remove_dir_all(root).await.expect("remove owned module fixture");
 }
 
 #[tokio::test]
@@ -107,7 +156,7 @@ async fn missing_console_keeps_real_api_health_and_readiness_independent() {
         true,
     )
     .merge(router(&root.join("missing-assets"), true).await);
-    for path in ["/", "/setup"] {
+    for path in ["/", "/operator", "/setup", "/join-team"] {
         let response = get(router.clone(), path).await;
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.contains("cache-control: no-store"));

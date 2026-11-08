@@ -19,10 +19,10 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row, Sqlite, Transaction};
 
 use super::{
-    CurrentPrincipal, OrganizationResource, OrganizationStoreError, PostgresStore, SqliteStore,
-    Uuid, append_audit_event_in_postgres_transaction, append_audit_event_in_transaction,
-    check_identity, lock_postgres, lock_sqlite, now_ms, postgres_principal, sqlite_principal,
-    timestamp,
+    OrganizationPrincipal, OrganizationResource, OrganizationStoreError, PostgresStore,
+    SqliteStore, Uuid, actor_audit, append_audit_event_in_postgres_transaction,
+    append_audit_event_in_transaction, lock_postgres, lock_sqlite, now_ms, postgres_actor,
+    sqlite_actor, timestamp,
 };
 
 const RECEIPT_MS: i64 = 86_400_000;
@@ -195,9 +195,9 @@ macro_rules! teams {
                 if Self::lock_team_row(tx,organization).await? {Ok(())} else {Err(OrganizationStoreError::NotFound)}
             }
 
-            async fn team_actor(tx:&mut Transaction<'_,$db>, expected:&CurrentPrincipal, organization:Uuid, action:&str, now:i64)
+            async fn team_actor(tx:&mut Transaction<'_,$db>, expected: &impl OrganizationPrincipal, organization:Uuid, action:&str, now:i64)
                 -> Result<OrganizationResource,OrganizationStoreError> {
-                let value=Self::read_organization_in_transaction(tx,&expected.account_id,organization.as_bytes()).await?;
+                let value=Self::read_organization_in_transaction(tx,&expected.account_id(),organization.as_bytes()).await?;
                 Self::authorize_organization_action(tx,&value,now,action).await?;
                 Ok(value)
             }
@@ -215,11 +215,10 @@ macro_rules! teams {
                 Ok(())
             }
 
-            async fn team_audit(tx:&mut Transaction<'_,$db>, expected:&CurrentPrincipal, organization:Uuid, action:&str, target:Uuid, now:i64)
+            async fn team_audit(tx:&mut Transaction<'_,$db>, expected: &impl OrganizationPrincipal, organization:Uuid, action:&str, target:Uuid, now:i64)
                 -> Result<(),OrganizationStoreError> {
-                let event=serde_json::to_vec(&serde_json::json!({"action":action,"account_id":Uuid::from_bytes(expected.account_id),
-                    "device_id":Uuid::from_bytes(expected.device_id),"organization_id":organization,"target_id":target,"at_ms":now}))
-                    .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
+                let event=actor_audit(expected,serde_json::json!({"action":action,"account_id":Uuid::from_bytes(expected.account_id()),
+                    "organization_id":organization,"target_id":target,"at_ms":now}))?;
                 $audit(tx,organization.into_bytes(),&event,now).await.map(|_|()).map_err(|_| OrganizationStoreError::StorageUnavailable)
             }
 
@@ -264,18 +263,18 @@ macro_rules! teams {
             /// # Errors
             /// Returns bounded authorization, eligibility, conflict, storage or unknown-commit classes.
             #[allow(clippy::too_many_lines)]
-            pub async fn create_team_invitation(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,key:Uuid,request:&TeamInvitationCreateRequest)
+            pub async fn create_team_invitation(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,key:Uuid,request:&TeamInvitationCreateRequest)
                 -> Result<TeamInvitationResource,OrganizationStoreError> {
                 valid_id(organization)?; valid_id(key)?;
                 let canonical=request.to_json().map_err(|_| OrganizationStoreError::InvalidRequest)?;
                 let request_digest=digest("POST",&format!("/api/v1/orgs/{organization}/invitations"),canonical.as_bytes(),None);
                 let mut tx=self.pool.begin_with($begin).await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 let now=now_ms()?;
                 let actor=Self::team_actor(&mut tx,expected,organization,"manage_members",now).await?;
-                if Self::team_receipt(&mut tx,&expected.account_id,key,&request_digest,now).await?.is_some() {
+                if Self::team_receipt(&mut tx,&expected.account_id(),key,&request_digest,now).await?.is_some() {
                     let value=Self::invitation_in_tx(&mut tx,organization,request.invitation_id,now).await?;
                     tx.commit().await?; return Ok(value);
                 }
@@ -291,14 +290,14 @@ macro_rules! teams {
                 if exists.is_some() {return Err(OrganizationStoreError::Conflict);}
                 sqlx::query("INSERT INTO organization_invitations (organization_id,id,recipient_account_id,recipient_username,issuer_account_id,roles_json,password_verifier,status,created_at_ms,updated_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$8,$9)")
                     .bind(organization.as_bytes().as_slice()).bind(request.invitation_id.as_bytes().as_slice()).bind(recipient)
-                    .bind(&request.recipient_username).bind(expected.account_id.as_slice()).bind(roles_json(&request.roles)?)
+                    .bind(&request.recipient_username).bind(expected.account_id().as_slice()).bind(roles_json(&request.roles)?)
                     .bind(request.password_verifier.as_bytes().as_slice()).bind(now)
                     .bind(now.checked_add(RECEIPT_MS).ok_or(OrganizationStoreError::StorageUnavailable)?)
                     .execute(&mut *tx).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.invitation_created",request.invitation_id,now).await?;
-                Self::save_team_receipt(&mut tx,&expected.account_id,organization,key,1,&request_digest,Some(request.invitation_id),&[],now).await?;
+                Self::save_team_receipt(&mut tx,&expected.account_id(),organization,key,1,&request_digest,Some(request.invitation_id),&[],now).await?;
                 let value=Self::invitation_in_tx(&mut tx,organization,request.invitation_id,now).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::CommitOutcomeUnknown)?;
                 Ok(value)
             }
@@ -308,15 +307,15 @@ macro_rules! teams {
             /// # Errors
             /// Foreign recipients and unavailable teams share `NotFound`.
             #[allow(clippy::too_many_arguments)]
-            pub async fn read_team_invitation(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,id:Uuid,administrative_scope:bool,recipient_scope:bool)
+            pub async fn read_team_invitation(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,id:Uuid,administrative_scope:bool,recipient_scope:bool)
                 -> Result<TeamInvitationResource,OrganizationStoreError> {
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 let now=now_ms()?;
                 let value=Self::invitation_in_tx(&mut tx,organization,id,now).await?;
-                if value.recipient_account_id.as_bytes()!=&expected.account_id || !recipient_scope {
+                if value.recipient_account_id.as_bytes()!=&expected.account_id() || !recipient_scope {
                     if !administrative_scope {return Err(OrganizationStoreError::NotFound);}
                     Self::team_actor(&mut tx,expected,organization,"manage_members",now).await?;
                 }
@@ -326,12 +325,12 @@ macro_rules! teams {
             /// List a bounded administrative invitation page under current membership.
             /// # Errors
             /// Returns current authentication, Cedar, query or storage failures.
-            pub async fn list_team_invitations(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,query:OrganizationListQuery)
+            pub async fn list_team_invitations(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,query:OrganizationListQuery)
                 -> Result<TeamInvitationPage,OrganizationStoreError> {
                 query.validate().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 let now=now_ms()?;
                 Self::team_actor(&mut tx,expected,organization,"manage_members",now).await?;
@@ -348,24 +347,24 @@ macro_rules! teams {
             /// # Errors
             /// Returns common foreign-resource, static denial, conflict or storage classes.
             #[allow(clippy::too_many_arguments,clippy::too_many_lines)]
-            pub async fn accept_team_invitation(&self,expected:&CurrentPrincipal,expires_at:u64,origin:&str,organization:Uuid,id:Uuid,key:Uuid,request:&TeamInvitationAcceptRequest)
+            pub async fn accept_team_invitation(&self,expected: &impl OrganizationPrincipal,expires_at:u64,origin:&str,organization:Uuid,id:Uuid,key:Uuid,request:&TeamInvitationAcceptRequest)
                 -> Result<TeamAcceptanceReceipt,OrganizationStoreError> {
                 valid_id(organization)?; valid_id(id)?; valid_id(key)?;
                 let canonical=request.to_json().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let request_digest=digest("POST",&format!("/api/v1/orgs/{organization}/invitations/{id}/accept"),canonical.as_bytes(),None);
                 let mut tx=self.pool.begin_with($begin).await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 let now=now_ms()?;
-                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id,key,&request_digest,now).await? {
+                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id(),key,&request_digest,now).await? {
                     let receipt=TeamAcceptanceReceipt::from_json(&response).map_err(|_|OrganizationStoreError::StorageUnavailable)?;
                     tx.commit().await?; return Ok(receipt);
                 }
                 let active=Self::lock_team_row(&mut tx,organization).await?;
                 let now=now_ms()?;
-                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id,key,&request_digest,now).await? {
+                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id(),key,&request_digest,now).await? {
                     let receipt=TeamAcceptanceReceipt::from_json(&response).map_err(|_|OrganizationStoreError::StorageUnavailable)?;
-                    check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                    $principal(&mut tx, expected, expires_at).await?;
                     tx.commit().await?; return Ok(receipt);
                 }
                 if !active {return Err(OrganizationStoreError::NotFound);}
@@ -373,7 +372,7 @@ macro_rules! teams {
                     .bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).fetch_optional(&mut *tx).await?
                     .ok_or(OrganizationStoreError::NotFound)?;
                 let value=invitation(&row,now)?;
-                if value.recipient_account_id.as_bytes()!=&expected.account_id {return Err(OrganizationStoreError::NotFound);}
+                if value.recipient_account_id.as_bytes()!=&expected.account_id() {return Err(OrganizationStoreError::NotFound);}
                 if value.status!=TeamInvitationStatus::Pending {return Err(OrganizationStoreError::InvitationDenied);}
                 let issuer_denied=|error|match error {OrganizationStoreError::PermissionDenied|OrganizationStoreError::NotFound=>OrganizationStoreError::InvitationDenied,other=>other};
                 let actor=Self::read_organization_in_transaction(&mut tx,value.issuer_account_id.as_bytes(),organization.as_bytes()).await.map_err(issuer_denied)?;
@@ -387,12 +386,12 @@ macro_rules! teams {
                     sqlx::query("UPDATE organization_invitations SET wrong_passwords=$1,status=$2,updated_at_ms=$3 WHERE organization_id=$4 AND id=$5")
                         .bind(attempts).bind(if attempts==5 {"locked"} else {"pending"}).bind(now)
                         .bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                    check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                    $principal(&mut tx, expected, expires_at).await?;
                     tx.commit().await.map_err(|_|OrganizationStoreError::CommitOutcomeUnknown)?;
                     return Err(OrganizationStoreError::InvitationDenied);
                 }
                 let previous=sqlx::query("SELECT id,status,updated_at_ms FROM organization_memberships WHERE organization_id=$1 AND account_id=$2")
-                    .bind(organization.as_bytes().as_slice()).bind(expected.account_id.as_slice()).fetch_optional(&mut *tx).await?;
+                    .bind(organization.as_bytes().as_slice()).bind(expected.account_id().as_slice()).fetch_optional(&mut *tx).await?;
                 let membership=if let Some(previous)=previous {
                     if previous.try_get::<String,_>("status")?!="deprovisioned" {return Err(OrganizationStoreError::InvitationDenied);}
                     let membership=row_id(&previous,"id")?;
@@ -404,7 +403,7 @@ macro_rules! teams {
                 } else {
                     let membership=Uuid::now_v7();
                     sqlx::query("INSERT INTO organization_memberships (id,organization_id,account_id,status,roles_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,'active',$4,$5,$5)")
-                        .bind(membership.as_bytes().as_slice()).bind(organization.as_bytes().as_slice()).bind(expected.account_id.as_slice())
+                        .bind(membership.as_bytes().as_slice()).bind(organization.as_bytes().as_slice()).bind(expected.account_id().as_slice())
                         .bind(roles_json(&value.roles)?).bind(now).execute(&mut *tx).await?;
                     membership
                 };
@@ -412,11 +411,11 @@ macro_rules! teams {
                     .bind(membership.as_bytes().as_slice()).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_revision(&mut tx,organization,now).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.invitation_accepted",id,now).await?;
-                Self::queue_memberships_notification(&mut tx,expected.account_id).await?;
-                let receipt=TeamAcceptanceReceipt{invitation_id:id,organization_id:organization,account_id:Uuid::from_bytes(expected.account_id),membership_id:membership,accepted_at:timestamp(now)?};
+                Self::queue_memberships_notification(&mut tx,expected.account_id()).await?;
+                let receipt=TeamAcceptanceReceipt{invitation_id:id,organization_id:organization,account_id:Uuid::from_bytes(expected.account_id()),membership_id:membership,accepted_at:timestamp(now)?};
                 let response=receipt.to_json().map_err(|_|OrganizationStoreError::StorageUnavailable)?;
-                Self::save_team_receipt(&mut tx,&expected.account_id,organization,key,2,&request_digest,Some(id),&response,now).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                Self::save_team_receipt(&mut tx,&expected.account_id(),organization,key,2,&request_digest,Some(id),&response,now).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::CommitOutcomeUnknown)?;
                 Ok(receipt)
             }
@@ -424,12 +423,12 @@ macro_rules! teams {
             /// Revoke a pending or locked invitation after exact current preconditions.
             /// # Errors
             /// Returns bounded current authorization, precondition, conflict or storage errors.
-            pub async fn revoke_team_invitation(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,id:Uuid,if_match:&str)
+            pub async fn revoke_team_invitation(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,id:Uuid,if_match:&str)
                 -> Result<(),OrganizationStoreError> {
                 parse_organization_if_match(Some(if_match)).map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let mut tx=self.pool.begin_with($begin).await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 let now=now_ms()?;
                 Self::team_actor(&mut tx,expected,organization,"manage_members",now).await?;
@@ -443,18 +442,18 @@ macro_rules! teams {
                 sqlx::query("UPDATE organization_invitations SET status='revoked',updated_at_ms=$1 WHERE organization_id=$2 AND id=$3")
                     .bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.invitation_revoked",id,now).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::UpdateCommitOutcomeUnknown)?; Ok(())
             }
 
             /// Read one tenant-bound member through current administrative Cedar permission.
             /// # Errors
             /// Returns current authentication, tenant, permission or representation errors.
-            pub async fn read_team_member(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,id:Uuid)
+            pub async fn read_team_member(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,id:Uuid)
                 -> Result<TeamMemberResource,OrganizationStoreError> {
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 Self::team_actor(&mut tx,expected,organization,"manage_members",now_ms()?).await?;
                 let value=Self::member_in_tx(&mut tx,organization,id).await?;
@@ -464,12 +463,12 @@ macro_rules! teams {
             /// List one bounded current administrative member page.
             /// # Errors
             /// Returns current authentication, tenant, permission, query or storage errors.
-            pub async fn list_team_members(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,query:OrganizationListQuery)
+            pub async fn list_team_members(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,query:OrganizationListQuery)
                 -> Result<TeamMemberPage,OrganizationStoreError> {
                 query.validate().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 Self::team_actor(&mut tx,expected,organization,"manage_members",now_ms()?).await?;
                 let cursor=query.cursor.unwrap_or(Uuid::nil());
@@ -486,22 +485,22 @@ macro_rules! teams {
             /// # Errors
             /// Returns current authentication, tenant, role, precondition, conflict or storage errors.
             #[allow(clippy::too_many_arguments,clippy::too_many_lines)]
-            pub async fn change_team_member(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,id:Uuid,if_match:&str,
+            pub async fn change_team_member(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,id:Uuid,if_match:&str,
                 administrative_scope:bool,recipient_scope:bool,request:Option<&TeamMemberUpdateRequest>) -> Result<Option<TeamMemberResource>,OrganizationStoreError> {
                 parse_organization_if_match(Some(if_match)).map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 if let Some(request)=request {request.validate().map_err(|_|OrganizationStoreError::InvalidRequest)?;}
                 let mut tx=self.pool.begin_with($begin).await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
                 let now=now_ms()?;
                 let current=Self::member_in_tx(&mut tx,organization,id).await?;
-                let self_leave=request.is_none() && recipient_scope && current.account_id.as_bytes()==&expected.account_id;
+                let self_leave=request.is_none() && recipient_scope && current.account_id.as_bytes()==&expected.account_id();
                 let caller=if self_leave && current.status!=TeamMemberStatus::Active {
                     if current.status==TeamMemberStatus::Removed {return Err(OrganizationStoreError::NotFound);}
                     None
                 } else {
-                    Some(Self::read_organization_in_transaction(&mut tx,&expected.account_id,organization.as_bytes()).await?)
+                    Some(Self::read_organization_in_transaction(&mut tx,&expected.account_id(),organization.as_bytes()).await?)
                 };
                 if !self_leave {
                     if !administrative_scope {return Err(OrganizationStoreError::NotFound);}
@@ -536,7 +535,7 @@ macro_rules! teams {
                 Self::team_audit(&mut tx,expected,organization,if request.is_some() {"organization.member_updated"} else {"organization.member_removed"},id,now).await?;
                 Self::queue_memberships_notification(&mut tx,current.account_id.into_bytes()).await?;
                 let result=if request.is_some() {Some(Self::member_in_tx(&mut tx,organization,id).await?)} else {None};
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::UpdateCommitOutcomeUnknown)?; Ok(result)
             }
 
@@ -545,7 +544,7 @@ macro_rules! teams {
             /// # Errors
             /// Returns bounded current authorization, echo/precondition, receipt or storage errors.
             #[allow(clippy::too_many_arguments)]
-            pub async fn dissolve_team(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,key:Uuid,if_match:&str,request:&TeamDissolveRequest)
+            pub async fn dissolve_team(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,key:Uuid,if_match:&str,request:&TeamDissolveRequest)
                 -> Result<TeamDissolutionReceipt,OrganizationStoreError> {
                 valid_id(organization)?; valid_id(key)?;
                 parse_organization_if_match(Some(if_match)).map_err(|_|OrganizationStoreError::InvalidRequest)?;
@@ -553,18 +552,18 @@ macro_rules! teams {
                 let canonical=request.to_json().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let request_digest=digest("POST",&format!("/api/v1/orgs/{organization}/dissolve"),&canonical,Some(if_match));
                 let mut tx=self.pool.begin_with($begin).await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 let now=now_ms()?;
-                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id,key,&request_digest,now).await? {
+                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id(),key,&request_digest,now).await? {
                     let receipt=TeamDissolutionReceipt::from_json(&response).map_err(|_|OrganizationStoreError::StorageUnavailable)?;
                     tx.commit().await?; return Ok(receipt);
                 }
                 let active=Self::lock_team_row(&mut tx,organization).await?;
                 let now=now_ms()?;
-                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id,key,&request_digest,now).await? {
+                if let Some(response)=Self::team_receipt(&mut tx,&expected.account_id(),key,&request_digest,now).await? {
                     let receipt=TeamDissolutionReceipt::from_json(&response).map_err(|_|OrganizationStoreError::StorageUnavailable)?;
-                    check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                    $principal(&mut tx, expected, expires_at).await?;
                     tx.commit().await?; return Ok(receipt);
                 }
                 if !active {return Err(OrganizationStoreError::NotFound);}
@@ -585,8 +584,8 @@ macro_rules! teams {
                 Self::team_audit(&mut tx,expected,organization,"organization.dissolved",organization,now).await?;
                 let receipt=TeamDissolutionReceipt{organization_id:organization,dissolved_at:timestamp(now)?};
                 let response=receipt.to_json().map_err(|_|OrganizationStoreError::StorageUnavailable)?;
-                Self::save_team_receipt(&mut tx,&expected.account_id,organization,key,3,&request_digest,None,&response,now).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                Self::save_team_receipt(&mut tx,&expected.account_id(),organization,key,3,&request_digest,None,&response,now).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::CommitOutcomeUnknown)?; Ok(receipt)
             }
         }
@@ -598,7 +597,7 @@ teams!(
     Sqlite,
     "BEGIN IMMEDIATE",
     lock_sqlite,
-    sqlite_principal,
+    sqlite_actor,
     append_audit_event_in_transaction,
     false
 );
@@ -607,7 +606,7 @@ teams!(
     Postgres,
     "BEGIN",
     lock_postgres,
-    postgres_principal,
+    postgres_actor,
     append_audit_event_in_postgres_transaction,
     true
 );

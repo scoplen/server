@@ -38,7 +38,13 @@ use uuid::Uuid;
 
 use super::{Https, Result, URL_SAFE_NO_PAD};
 use base64::Engine as _;
-use std::{fmt::Write as _, path::Path, time::Duration};
+use std::{
+    fmt::Write as _,
+    fs::OpenOptions,
+    io::Write as _,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const CHALLENGE: &str = "/api/v1/auth/accounts/requests/challenge";
 const REGISTER: &str = "/api/v1/auth/accounts/register";
@@ -239,6 +245,52 @@ impl Registration {
             &account_signature,
         )
     }
+}
+
+fn write_browser_password(path: &Path, password: &SecretVec) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file =
+        options.open(path).map_err(|_| "could not exclusively create browser password file")?;
+    file.write_all(password.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "could not complete browser password file")
+}
+
+pub(super) async fn prepare_browser_accounts(
+    https: &Https,
+    directory: &Path,
+    server_pid: u32,
+) -> Result<PathBuf> {
+    let owner = Registration::new(&https.origin)?;
+    owner.register(https).await?;
+    let member = Registration::new(&https.origin)?;
+    member.register(https).await?;
+    let owner_password = directory.join("browser-owner-password.txt");
+    let member_password = directory.join("browser-member-password.txt");
+    write_browser_password(&owner_password, &owner.password)?;
+    write_browser_password(&member_password, &member.password)?;
+    let descriptor = directory.join("browser-accounts.json");
+    let value = serde_json::json!({
+        "disposable": true,
+        "origin": https.origin,
+        "ca_certificate": directory.join("ca.pem"),
+        "server_config": directory.join("server.toml"),
+        "server_pid": server_pid,
+        "owner_username": owner.payload.username,
+        "owner_password_file": owner_password,
+        "member_username": member.payload.username,
+        "member_password_file": member_password,
+    });
+    let encoded =
+        serde_json::to_string(&value).map_err(|_| "browser Account descriptor encoding failed")?;
+    super::write_private(&descriptor, &encoded)?;
+    Ok(descriptor)
 }
 
 async fn fresh_proof(
@@ -971,4 +1023,24 @@ pub(super) async fn verify(
         verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod browser_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn browser_password_file_preserves_exact_bytes_and_refuses_replacement() {
+        let directory =
+            std::env::temp_dir().join(format!("scoplen-browser-password-{}", Uuid::now_v7()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("password.txt");
+        let synthetic = SecretVec::new(b"synthetic-fixture-password".to_vec());
+        write_browser_password(&path, &synthetic).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), synthetic.as_bytes());
+        assert!(write_browser_password(&path, &SecretVec::new(b"replacement".to_vec())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), synthetic.as_bytes());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
 }

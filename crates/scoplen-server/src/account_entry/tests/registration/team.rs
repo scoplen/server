@@ -19,6 +19,7 @@ use scoplen_store::{ObjectStorage, ObjectStorageConfig};
 
 use super::*;
 
+mod browser;
 mod inventory;
 
 struct Fixture {
@@ -409,13 +410,6 @@ async fn issue(
 
 #[allow(clippy::too_many_lines)]
 async fn lifecycle(f: &Fixture) {
-    let landing = http(f.address, "GET", "/join-team", &[], &[]).await;
-    assert_eq!(landing.status, 200);
-    landing.private();
-    assert!(landing.header("x-request-id").is_some());
-    let html = String::from_utf8(landing.body).expect("UTF-8 landing");
-    assert!(html.contains("Open Join team in Scoplen"));
-    assert!(!html.contains("<form"));
     let a = actor(f, "team-owner").await;
     let b = actor(f, "team-recipient").await;
     let c = actor(f, "other-account").await;

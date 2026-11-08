@@ -22,6 +22,11 @@ use crate::{
     },
 };
 
+mod actor;
+use actor::actor_audit;
+pub use actor::{OrganizationActor, OrganizationActorRef, OrganizationPrincipal};
+pub(crate) use actor::{postgres_actor, sqlite_actor};
+
 pub mod group_policy;
 pub mod inventory;
 mod name;
@@ -33,7 +38,7 @@ pub mod user_ca;
 pub enum OrganizationStoreError {
     #[error("invalid organization request")]
     InvalidRequest,
-    #[error("current device authentication is required")]
+    #[error("current account authentication is required")]
     AuthenticationRequired,
     #[error("organization creation is disabled")]
     CreationDisabled,
@@ -224,7 +229,7 @@ macro_rules! organizations {
             /// Returns a fixed authentication, policy, conflict, storage or uncertain-commit class.
             pub async fn create_organization(
                 &self,
-                expected: &CurrentPrincipal,
+                expected: &impl OrganizationPrincipal,
                 expires_at: u64,
                 allow_creation: bool,
                 key: Uuid,
@@ -238,18 +243,19 @@ macro_rules! organizations {
                 digest.update(canonical);
                 let digest: [u8; 32] = digest.finalize().into();
                 let mut tx = self.pool.begin_with($begin).await?;
-                $lock(&mut tx, &expected.account_id, true).await?;
-                check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
+                $lock(&mut tx, &expected.account_id(), true).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 let now = now_ms()?;
                 let receipt = sqlx::query("SELECT organization_id,request_digest FROM organization_creation_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms>$3")
-                    .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now)
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now)
                     .fetch_optional(&mut *tx).await?;
                 if let Some(receipt) = receipt {
                     if receipt.try_get::<Vec<u8>,_>("request_digest")?.as_slice()!=digest.as_slice() {
                         return Err(OrganizationStoreError::Conflict);
                     }
                     let organization: Vec<u8> = receipt.try_get("organization_id")?;
-                    let value = Self::read_organization_in_transaction(&mut tx, &expected.account_id, &organization).await?;
+                    let value = Self::read_organization_in_transaction(&mut tx, &expected.account_id(), &organization).await?;
+                    $principal(&mut tx, expected, expires_at).await?;
                     tx.commit().await?;
                     return Ok(value);
                 }
@@ -257,7 +263,7 @@ macro_rules! organizations {
                     return Err(OrganizationStoreError::CreationDisabled);
                 }
                 sqlx::query("DELETE FROM organization_creation_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms<=$3")
-                    .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now)
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now)
                     .execute(&mut *tx).await?;
                 let organization=Uuid::now_v7();
                 let membership=Uuid::now_v7();
@@ -272,12 +278,12 @@ macro_rules! organizations {
                     .execute(&mut *tx).await?;
                 sqlx::query("INSERT INTO organization_memberships (id,organization_id,account_id,status,roles_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,'active','[\"owner\"]',$4,$4)")
                     .bind(membership.as_bytes().as_slice()).bind(organization.as_bytes().as_slice())
-                    .bind(expected.account_id.as_slice()).bind(now).execute(&mut *tx).await?;
-                let event=serde_json::to_vec(&serde_json::json!({
-                    "action":"organization.created", "account_id":Uuid::from_bytes(expected.account_id),
-                    "device_id":Uuid::from_bytes(expected.device_id),"organization_id":organization,
+                    .bind(expected.account_id().as_slice()).bind(now).execute(&mut *tx).await?;
+                let event=actor_audit(expected,serde_json::json!({
+                    "action":"organization.created", "account_id":Uuid::from_bytes(expected.account_id()),
+                    "organization_id":organization,
                     "membership_id":membership,"created_at_ms":now,
-                })).map_err(|_| OrganizationStoreError::StorageUnavailable)?;
+                }))?;
                 $audit(&mut tx,organization.into_bytes(),&event,now).await
                     .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
                 let expires=now.checked_add(i64::try_from(ORGANIZATION_CREATION_RECEIPT_SECONDS)
@@ -285,12 +291,12 @@ macro_rules! organizations {
                     .ok_or(OrganizationStoreError::StorageUnavailable)?)
                     .ok_or(OrganizationStoreError::StorageUnavailable)?;
                 sqlx::query("INSERT INTO organization_creation_receipts (account_id,idempotency_key,organization_id,request_digest,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6)")
-                    .bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice())
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice())
                     .bind(organization.as_bytes().as_slice()).bind(digest.as_slice()).bind(now).bind(expires)
                     .execute(&mut *tx).await?;
-                let value=Self::read_organization_in_transaction(&mut tx,&expected.account_id,organization.as_bytes()).await?;
-                Self::queue_memberships_notification(&mut tx,expected.account_id).await?;
-                check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
+                let value=Self::read_organization_in_transaction(&mut tx,&expected.account_id(),organization.as_bytes()).await?;
+                Self::queue_memberships_notification(&mut tx,expected.account_id()).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_| OrganizationStoreError::CommitOutcomeUnknown)?;
                 Ok(value)
             }
@@ -310,12 +316,13 @@ macro_rules! organizations {
             /// # Errors
             /// Foreign, absent and inactive memberships return the same `NotFound` class.
             pub async fn read_organization(
-                &self, expected:&CurrentPrincipal, expires_at:u64, organization:Uuid,
+                &self, expected: &impl OrganizationPrincipal, expires_at:u64, organization:Uuid,
             )->Result<OrganizationResource,OrganizationStoreError>{
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
-                let value=Self::read_organization_in_transaction(&mut tx,&expected.account_id,organization.as_bytes()).await?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
+                let value=Self::read_organization_in_transaction(&mut tx,&expected.account_id(),organization.as_bytes()).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;
                 Ok(value)
             }
@@ -325,22 +332,23 @@ macro_rules! organizations {
             /// # Errors
             /// Returns authentication, invalid query or bounded storage/representation errors.
             pub async fn list_organizations(
-                &self, expected:&CurrentPrincipal, expires_at:u64, query:OrganizationListQuery,
+                &self, expected: &impl OrganizationPrincipal, expires_at:u64, query:OrganizationListQuery,
             )->Result<OrganizationPage,OrganizationStoreError>{
                 query.validate().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let mut tx=self.pool.begin().await?;
-                $lock(&mut tx,&expected.account_id,false).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $lock(&mut tx,&expected.account_id(),false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 let cursor=query.cursor.unwrap_or(Uuid::nil());
                 let length=if $postgres {"octet_length(o.name)"}else{"length(CAST(o.name AS BLOB))"};
                 let sql=format!("SELECT o.id,CASE WHEN {length} BETWEEN 1 AND 128 THEN o.name ELSE NULL END AS name,o.created_at_ms,m.id AS membership_id,m.account_id,m.roles_json,CASE WHEN o.updated_at_ms>m.updated_at_ms THEN o.updated_at_ms ELSE m.updated_at_ms END AS updated_at_ms FROM organization_memberships m JOIN organizations o ON o.id=m.organization_id WHERE m.account_id=$1 AND m.status='active' AND o.dissolved_at_ms IS NULL AND o.id>$2 ORDER BY o.id LIMIT $3");
-                let rows=sqlx::query(&sql).bind(expected.account_id.as_slice()).bind(cursor.as_bytes().as_slice())
+                let rows=sqlx::query(&sql).bind(expected.account_id().as_slice()).bind(cursor.as_bytes().as_slice())
                     .bind(i64::from(query.limit)+1).fetch_all(&mut *tx).await?;
                 let more=rows.len()>usize::from(query.limit);
                 let items=rows.iter().take(usize::from(query.limit)).map(resource).collect::<Result<Vec<_>,_>>()?;
                 let next_cursor=if more {items.last().map(|item|item.id)}else{None};
                 let page=OrganizationPage{items,next_cursor};
                 page.to_json().map_err(|_|OrganizationStoreError::StorageUnavailable)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;
                 Ok(page)
             }
@@ -367,7 +375,7 @@ organizations!(
     Sqlite,
     "BEGIN IMMEDIATE",
     lock_sqlite,
-    sqlite_principal,
+    sqlite_actor,
     append_audit_event_in_transaction,
     sqlite_organization_snapshot,
     false
@@ -377,7 +385,7 @@ organizations!(
     Postgres,
     "BEGIN",
     lock_postgres,
-    postgres_principal,
+    postgres_actor,
     append_audit_event_in_postgres_transaction,
     postgres_organization_snapshot,
     true

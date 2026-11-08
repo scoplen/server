@@ -86,6 +86,13 @@ enum Command {
         #[arg(long, requires = "with_team")]
         across_restart: bool,
     },
+    /// Once only: register two password Accounts for independent browser team acceptance.
+    PrepareBrowserAccounts {
+        directory: PathBuf,
+        /// The fixture controller's running spl-server process id; never starts or stops it.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        server_pid: u32,
+    },
 }
 
 #[derive(Deserialize)]
@@ -164,6 +171,25 @@ async fn run(command: Command) -> Result<()> {
                 )?;
             }
             println!("public Account password and encrypted sync check passed");
+        }
+        Command::PrepareBrowserAccounts { directory, server_pid } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            write_private(
+                &directory.join("browser-accounts.started"),
+                "One attempt only; discard this fixture after any failure.",
+            )?;
+            let descriptor = tokio::time::timeout(
+                Duration::from_secs(120),
+                account::prepare_browser_accounts(&https, &directory, server_pid),
+            )
+            .await
+            .map_err(
+                |_| "browser Account preparation exceeded its deadline; abandon this fixture",
+            )??;
+            println!("browser Accounts prepared: {}", descriptor.display());
         }
     }
     Ok(())

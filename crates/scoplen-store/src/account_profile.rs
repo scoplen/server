@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Current-account reads bound to the authenticated enrolled device.
+//! Current-account reads bound to the genuine Device or Account-browser actor.
 
 use std::fmt::Write as _;
 
@@ -11,25 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     PostgresStore, SqliteStore,
-    device_authentication::{
-        CurrentPrincipal, DeviceAuthenticationError, load_postgres_principal,
-        load_sqlite_principal, lock_postgres_account_key_state,
-    },
+    device_authentication::{DeviceAuthenticationError, lock_postgres_account_key_state},
+    organizations::{OrganizationPrincipal, OrganizationStoreError, postgres_actor, sqlite_actor},
 };
-
-fn check_identity(
-    current: Option<CurrentPrincipal>,
-    expected: &CurrentPrincipal,
-) -> Result<(), DeviceAuthenticationError> {
-    let current = current.ok_or(DeviceAuthenticationError::Denied { changed: false })?;
-    if current.account_id != expected.account_id
-        || current.device_id != expected.device_id
-        || current.jkt != expected.jkt
-    {
-        return Err(DeviceAuthenticationError::Denied { changed: false });
-    }
-    Ok(())
-}
 
 fn representation(
     account_id: [u8; 16],
@@ -68,67 +52,75 @@ fn representation(
 }
 
 impl SqliteStore {
-    /// Read only the current device's account after transaction-local authorization checks.
+    /// Read only the authenticated actor's account after transaction-local authorization checks.
     ///
     /// # Errors
     /// Returns a disclosure-free error for stale identity, missing/corrupt state, or storage failure.
     pub async fn read_account_profile(
         &self,
-        expected: &CurrentPrincipal,
+        expected: &impl OrganizationPrincipal,
     ) -> Result<AccountProfile, DeviceAuthenticationError> {
         let mut tx = self.pool.begin().await?;
-        check_identity(load_sqlite_principal(&mut tx, expected.device_id).await?, expected)?;
+        sqlite_actor(&mut tx, expected, u64::MAX).await.map_err(actor_error)?;
         let row = sqlx::query(
             "SELECT created_at_ms,
              CASE WHEN length(CAST(email AS BLOB)) <= 320 THEN email
                   WHEN email IS NULL THEN NULL ELSE '' END AS email
              FROM identity_accounts WHERE account_id=?",
         )
-        .bind(expected.account_id.as_slice())
+        .bind(expected.account_id().as_slice())
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(DeviceAuthenticationError::Database)?;
         let profile = representation(
-            expected.account_id,
+            expected.account_id(),
             row.try_get("created_at_ms")?,
             row.try_get("email")?,
         )?;
+        sqlite_actor(&mut tx, expected, u64::MAX).await.map_err(actor_error)?;
         tx.commit().await?;
         Ok(profile)
     }
 }
 
 impl PostgresStore {
-    /// Read only the current device's account while holding current-key and identity locks.
+    /// Read only the authenticated actor's account while holding current-key and identity locks.
     ///
     /// # Errors
     /// Returns a disclosure-free error for stale identity, missing/corrupt state, or storage failure.
     pub async fn read_account_profile(
         &self,
-        expected: &CurrentPrincipal,
+        expected: &impl OrganizationPrincipal,
     ) -> Result<AccountProfile, DeviceAuthenticationError> {
         let mut tx = self.pool.begin().await?;
-        lock_postgres_account_key_state(&mut tx, &expected.account_id).await?;
-        check_identity(
-            load_postgres_principal(&mut tx, expected.device_id, true).await?,
-            expected,
-        )?;
+        lock_postgres_account_key_state(&mut tx, &expected.account_id()).await?;
+        postgres_actor(&mut tx, expected, u64::MAX).await.map_err(actor_error)?;
         let row = sqlx::query(
             "SELECT created_at_ms,
              CASE WHEN octet_length(email) <= 320 THEN email
                   WHEN email IS NULL THEN NULL ELSE '' END AS email
              FROM identity_accounts WHERE account_id=$1",
         )
-        .bind(expected.account_id.as_slice())
+        .bind(expected.account_id().as_slice())
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(DeviceAuthenticationError::Database)?;
         let profile = representation(
-            expected.account_id,
+            expected.account_id(),
             row.try_get("created_at_ms")?,
             row.try_get("email")?,
         )?;
+        postgres_actor(&mut tx, expected, u64::MAX).await.map_err(actor_error)?;
         tx.commit().await?;
         Ok(profile)
+    }
+}
+
+fn actor_error(error: OrganizationStoreError) -> DeviceAuthenticationError {
+    match error {
+        OrganizationStoreError::AuthenticationRequired => {
+            DeviceAuthenticationError::Denied { changed: false }
+        }
+        _ => DeviceAuthenticationError::Database,
     }
 }

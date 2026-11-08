@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Bounded current-account profile on the native enrolled-device boundary.
+//! Bounded current-account profile for genuine Device and Account-browser actors.
 
 use std::sync::Arc;
 
@@ -16,14 +16,14 @@ use scoplen_store::{device_authentication::DeviceAuthenticationError, kms::Local
 use uuid::Uuid;
 
 use crate::{
+    account_actor::AccountActorAuthenticator,
     device_auth::{AuthBackend, matching_origin, response},
-    personal_sync::PersonalSyncAuthenticator,
 };
 
 #[derive(Clone)]
 struct ProfileState {
     backend: AuthBackend,
-    auth: PersonalSyncAuthenticator,
+    auth: AccountActorAuthenticator,
     trusted_origin: String,
 }
 
@@ -32,7 +32,7 @@ pub(crate) fn router(
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
 ) -> Router {
-    let auth = PersonalSyncAuthenticator::new(backend.clone(), kms, trusted_origin.clone());
+    let auth = AccountActorAuthenticator::new(backend.clone(), kms, trusted_origin.clone());
     Router::new().route("/api/v1/accounts/me", get(read)).with_state(ProfileState {
         backend,
         auth,
@@ -41,15 +41,22 @@ pub(crate) fn router(
 }
 
 async fn read(State(state): State<ProfileState>, request: Request<Body>) -> Response {
+    let id = Uuid::new_v4();
+    let mut result = read_inner(state, request, &id).await;
+    result.headers_mut().insert("x-request-id", id.to_string().parse().expect("UUID header"));
+    result
+}
+
+async fn read_inner(state: ProfileState, request: Request<Body>, id: &Uuid) -> Response {
     let (parts, body) = request.into_parts();
     if parts.headers.contains_key(header::ORIGIN)
         && !matching_origin(&parts.headers, &state.trusted_origin)
     {
-        return problem(StatusCode::FORBIDDEN);
+        return problem(StatusCode::FORBIDDEN, id);
     }
-    let principal = match state
+    let (principal, _) = match state
         .auth
-        .authenticate_operation(
+        .authenticate_request(
             DeviceAccessOperation::AccountProfileRead,
             &parts.method,
             &parts.uri,
@@ -58,10 +65,10 @@ async fn read(State(state): State<ProfileState>, request: Request<Body>) -> Resp
         .await
     {
         Ok(value) => value,
-        Err(error) => return problem(error.status),
+        Err(error) => return problem(error.status, id),
     };
     if to_bytes(body, 0).await.is_err() {
-        return problem(StatusCode::BAD_REQUEST);
+        return problem(StatusCode::BAD_REQUEST, id);
     }
     let result = match &state.backend {
         AuthBackend::Sqlite(store) => store.read_account_profile(&principal).await,
@@ -69,23 +76,25 @@ async fn read(State(state): State<ProfileState>, request: Request<Body>) -> Resp
     };
     let profile = match result {
         Ok(value) => value,
-        Err(DeviceAuthenticationError::Denied { .. }) => return problem(StatusCode::UNAUTHORIZED),
-        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE),
+        Err(DeviceAuthenticationError::Denied { .. }) => {
+            return problem(StatusCode::UNAUTHORIZED, id);
+        }
+        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, id),
     };
     let (Ok(body), Ok(etag)) = (profile.to_json(), profile.etag.parse()) else {
-        return problem(StatusCode::SERVICE_UNAVAILABLE);
+        return problem(StatusCode::SERVICE_UNAVAILABLE, id);
     };
     let mut result = response(StatusCode::OK, "application/json", body);
     result.headers_mut().insert(header::ETAG, etag);
     result
 }
 
-fn problem(status: StatusCode) -> Response {
+fn problem(status: StatusCode, id: &Uuid) -> Response {
     let (code, title, detail) = match status {
         StatusCode::UNAUTHORIZED => (
             "auth.authentication_required",
             "Authentication required",
-            "Authenticate this enrolled device and create a fresh DPoP proof for the request.",
+            "Sign in and create a fresh DPoP proof for the request.",
         ),
         StatusCode::FORBIDDEN => (
             "policy.denied",
@@ -108,7 +117,7 @@ fn problem(status: StatusCode) -> Response {
         status.as_u16(),
         title,
         detail,
-        Uuid::new_v4().to_string(),
+        id.to_string(),
         false,
         status.is_server_error(),
     )

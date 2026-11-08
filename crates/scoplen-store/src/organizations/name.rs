@@ -11,10 +11,13 @@ use scoplen_api::organization::{
 
 use sqlx::Row;
 
+#[cfg(test)]
+use super::CurrentPrincipal;
 use super::{
-    CurrentPrincipal, OrganizationResource, OrganizationStoreError, PostgresStore, SqliteStore,
-    Uuid, append_audit_event_in_postgres_transaction, append_audit_event_in_transaction,
-    check_identity, lock_postgres, lock_sqlite, now_ms, postgres_principal, sqlite_principal,
+    OrganizationPrincipal, OrganizationResource, OrganizationStoreError, PostgresStore,
+    SqliteStore, Uuid, actor_audit, append_audit_event_in_postgres_transaction,
+    append_audit_event_in_transaction, lock_postgres, lock_sqlite, now_ms, postgres_actor,
+    sqlite_actor,
 };
 
 #[cfg(test)]
@@ -128,7 +131,7 @@ macro_rules! name_settings {
             /// uncertain-update class. An uncertain update must not be replayed automatically.
             pub async fn update_organization(
                 &self,
-                expected: &CurrentPrincipal,
+                expected: &impl OrganizationPrincipal,
                 expires_at: u64,
                 organization: Uuid,
                 if_match: &str,
@@ -140,13 +143,13 @@ macro_rules! name_settings {
                     .map_err(|_| OrganizationStoreError::InvalidRequest)?;
                 request.validate().map_err(|_| OrganizationStoreError::InvalidRequest)?;
                 let mut tx = self.pool.begin_with($begin).await?;
-                $lock(&mut tx, &expected.account_id, false).await?;
-                check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
+                $lock(&mut tx, &expected.account_id(), false).await?;
+                $principal(&mut tx, expected, expires_at).await?;
                 let suffix = if $postgres { " FOR UPDATE OF o,m" } else { "" };
                 let query = format!("SELECT m.status,o.updated_at_ms FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id WHERE o.id=$1 AND m.account_id=$2 AND o.dissolved_at_ms IS NULL{suffix}");
                 let row = sqlx::query(&query)
                     .bind(organization.as_bytes().as_slice())
-                    .bind(expected.account_id.as_slice())
+                    .bind(expected.account_id().as_slice())
                     .fetch_optional(&mut *tx).await?
                     .ok_or(OrganizationStoreError::NotFound)?;
                 let status: String = row.try_get("status")?;
@@ -154,7 +157,7 @@ macro_rules! name_settings {
                     return Err(OrganizationStoreError::NotFound);
                 }
                 let current = Self::read_organization_in_transaction(
-                    &mut tx, &expected.account_id, organization.as_bytes(),
+                    &mut tx, &expected.account_id(), organization.as_bytes(),
                 ).await?;
                 let now = now_ms()?;
                 Self::authorize_organization_action(&mut tx, &current, now, "manage_organization").await?;
@@ -162,7 +165,7 @@ macro_rules! name_settings {
                     return Err(OrganizationStoreError::PreconditionFailed);
                 }
                 if current.name == request.name {
-                    check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
+                    $principal(&mut tx, expected, expires_at).await?;
                     tx.commit().await?;
                     return Ok(current);
                 }
@@ -171,17 +174,17 @@ macro_rules! name_settings {
                     .bind(&request.name).bind(updated_at)
                     .bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_revision(&mut tx, organization, now).await?;
-                let event = serde_json::to_vec(&serde_json::json!({
-                    "action":"organization.name_updated", "account_id":Uuid::from_bytes(expected.account_id),
-                    "device_id":Uuid::from_bytes(expected.device_id),"organization_id":organization,
+                let event = actor_audit(expected,serde_json::json!({
+                    "action":"organization.name_updated", "account_id":Uuid::from_bytes(expected.account_id()),
+                    "organization_id":organization,
                     "membership_id":current.membership.id,"updated_at_ms":updated_at,
-                })).map_err(|_| OrganizationStoreError::StorageUnavailable)?;
+                }))?;
                 $audit(&mut tx,organization.into_bytes(),&event,now).await
                     .map_err(|_| OrganizationStoreError::StorageUnavailable)?;
                 let value = Self::read_organization_in_transaction(
-                    &mut tx, &expected.account_id, organization.as_bytes(),
+                    &mut tx, &expected.account_id(), organization.as_bytes(),
                 ).await?;
-                check_identity($principal(&mut tx, expected.device_id).await?, expected, expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_| OrganizationStoreError::UpdateCommitOutcomeUnknown)?;
                 Ok(value)
             }
@@ -193,7 +196,7 @@ name_settings!(
     SqliteStore,
     "BEGIN IMMEDIATE",
     lock_sqlite,
-    sqlite_principal,
+    sqlite_actor,
     append_audit_event_in_transaction,
     false
 );
@@ -201,7 +204,7 @@ name_settings!(
     PostgresStore,
     "BEGIN",
     lock_postgres,
-    postgres_principal,
+    postgres_actor,
     append_audit_event_in_postgres_transaction,
     true
 );

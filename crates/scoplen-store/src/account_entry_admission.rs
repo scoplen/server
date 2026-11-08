@@ -14,7 +14,7 @@ const WINDOW_MS: i64 = 60_000;
 const IDLE_MS: i64 = 600_000;
 const RATE_CAPACITY: i64 = 131_072;
 
-/// Each native Account POST owns independent fixed-window debt.
+/// Account POST operations own fixed-window debt; native/browser password routes share theirs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(i64)]
 pub enum AccountEntryEndpoint {
@@ -58,6 +58,8 @@ pub enum AccountEntryEndpoint {
     OrganizationPolicyDelete = 38,
     OrganizationUserCaCreate = 39,
     OrganizationUserCertificateIssue = 40,
+    AccountBrowserRefresh = 41,
+    AccountBrowserLogout = 42,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.
