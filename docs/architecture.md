@@ -28,7 +28,7 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@328f16d6` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
+`proto@e34ee91d` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
 `scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
 This revision includes the Account password, Device admission and Organization inventory contracts
 and removes retired Personal invitation/enrollment and pairing formats. Consuming these
