@@ -243,21 +243,29 @@ macro_rules! admission_store {
             /// # Errors
             /// Fails closed on unavailable admission state.
             pub async fn admit_operator_auth_source(&self, endpoint: OperatorAuthEndpoint, source: IpAddr) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
-                self.admit_operator_bucket(endpoint, 1, &source_key(source)).await
+                self.admit_operator_auth_source_with_clock(endpoint,source,now_ms).await
+            }
+
+            async fn admit_operator_auth_source_with_clock(&self, endpoint: OperatorAuthEndpoint, source: IpAddr, clock: impl FnOnce() -> Result<i64,OperatorAdmissionError>) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
+                self.admit_operator_bucket(endpoint,1,&source_key(source),clock).await
             }
 
             /// Charge a structurally decoded private key without an existence lookup.
             /// # Errors
             /// Rejects a bucket that does not belong to this endpoint, or unavailable storage.
             pub async fn admit_operator_auth_private(&self, endpoint: OperatorAuthEndpoint, bucket: OperatorPrivateBucket<'_>) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
-                let (kind,key) = bucket.parts(endpoint)?;
-                self.admit_operator_bucket(endpoint,kind,&key).await
+                self.admit_operator_auth_private_with_clock(endpoint,bucket,now_ms).await
             }
 
-            async fn admit_operator_bucket(&self, endpoint: OperatorAuthEndpoint, kind: i64, key: &[u8]) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
+            async fn admit_operator_auth_private_with_clock(&self, endpoint: OperatorAuthEndpoint, bucket: OperatorPrivateBucket<'_>, clock: impl FnOnce() -> Result<i64,OperatorAdmissionError>) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
+                let (kind,key) = bucket.parts(endpoint)?;
+                self.admit_operator_bucket(endpoint,kind,&key,clock).await
+            }
+
+            async fn admit_operator_bucket(&self, endpoint: OperatorAuthEndpoint, kind: i64, key: &[u8], clock: impl FnOnce() -> Result<i64,OperatorAdmissionError>) -> Result<OperatorAdmissionDecision, OperatorAdmissionError> {
                 let mut tx = $begin(self).await?;
                 $lock(&mut tx).await?;
-                let now = now_ms()?;
+                let now = clock()?;
                 let mut bucket = $load(&mut tx, endpoint, kind, key, now).await?;
                 let limit = match kind { 1 => 30, 4 => 10, _ => 5 };
                 let decision = bucket.admit(now,limit);
@@ -445,3 +453,7 @@ mod tests {
         assert_eq!(b.retain_until_ms, b.last_failure_ms.expect("failure") + 600_000);
     }
 }
+
+#[cfg(test)]
+#[path = "operator_admission/quotas.rs"]
+mod quotas;
