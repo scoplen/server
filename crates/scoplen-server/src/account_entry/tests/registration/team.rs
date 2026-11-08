@@ -1035,6 +1035,7 @@ async fn postgres_team_original_receipts_survive_overlapping_retries() {
 async fn quotas(f: &Fixture) {
     let a = actor(f, "quota-owner").await;
     let team = create_team(f, &a).await;
+    f.execute("UPDATE account_entry_state SET time_high_water_ms=4000000020000").await;
     let path = format!("/api/v1/orgs/{}/invitations", team.id);
     for _ in 0..10 {
         problem(

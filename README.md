@@ -261,7 +261,7 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@328f16d6`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@e34ee91d`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
 The sync service retains encrypted object envelopes without reading their Credential fields.

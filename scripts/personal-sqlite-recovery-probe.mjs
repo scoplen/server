@@ -51,7 +51,7 @@ assert(
 assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
 
 const oldMigration = 20261024030000;
-const newMigration = 20261101000000;
+const newMigration = 20261102000000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -205,6 +205,37 @@ function inspectDatabase(path, current) {
       .prepare("SELECT name FROM organizations WHERE id = ?")
       .get(organizationId);
     assert.equal(organization?.name, "Disposable recovery organization");
+    const inventoryTables = database
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_inventory_vaults', 'organization_inventory_objects', 'organization_inventory_references', 'organization_inventory_receipts', 'organization_inventory_acks', 'organization_groups', 'organization_group_members', 'organization_policies') ORDER BY name",
+      )
+      .all()
+      .map((row) => row.name);
+    assert.deepEqual(
+      inventoryTables,
+      current
+        ? [
+            "organization_group_members",
+            "organization_groups",
+            "organization_inventory_acks",
+            "organization_inventory_objects",
+            "organization_inventory_receipts",
+            "organization_inventory_references",
+            "organization_inventory_vaults",
+            "organization_policies",
+          ]
+        : [],
+    );
+    if (current) {
+      const inventory = database
+        .prepare(
+          "SELECT v.vault_id, s.kind, s.current_seq FROM organization_inventory_vaults v JOIN sync_vaults s ON s.vault_id = v.vault_id WHERE v.organization_id = ?",
+        )
+        .get(organizationId);
+      assert.deepEqual(Buffer.from(inventory.vault_id), organizationId);
+      assert.equal(inventory.kind, "organization");
+      assert.equal(inventory.current_seq, 0);
+    }
     for (const table of ["sync_objects", "sync_object_versions"]) {
       const row = database
         .prepare(

@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: 328f16d66851846e6e8ea17b5c4529e08481f1f4
+          ref: e34ee91d6f8c5f63eacaad794e3ed1ff24fab4a5
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
