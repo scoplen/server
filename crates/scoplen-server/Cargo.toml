@@ -61,6 +61,7 @@ hyper = { version = "1.12.0", features = ["client", "http2"] }
 scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "33374ca27c0bb717d0c3a47faf4e46e37e1a3c52" }
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "std"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+time = { version = "0.3.55", features = ["parsing"] }
 tokio-tungstenite = "0.26.2"
 url = "2.5.8"
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
