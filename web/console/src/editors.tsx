@@ -302,14 +302,14 @@ export function ResourceEditor({
                     label: `${profile.data.fields.name ?? profile.data.fields.username} · ${profile.data.fields.username}`,
                   }))}
                 optional={optional}
-                label={t("Default access profile", "默认访问配置")}
+                label={t("Default Login", "默认登录配置")}
               />
             )}
             {!original && (
               <p className="field-help">
                 {t(
-                  "After creating this Host, add an access profile and select it as the default. Direct profiles use route 0.",
-                  "创建主机后，请添加访问配置并将其设为默认值。直连配置使用路由 0。",
+                  "After creating this Host, add a Login and select it as the default. Choose Direct to connect without a jump host or proxy.",
+                  "创建主机后，请添加登录配置并将其设为默认值。选择直连即可连接，无需跳板主机或代理。",
                 )}
               </p>
             )}
@@ -379,7 +379,7 @@ export function ResourceEditor({
               </select>
             </Field>
             <div className="form-row">
-              <Field label={t("Profile name (optional)", "配置名称（可选）")}>
+              <Field label={t("Login name (optional)", "登录配置名称（可选）")}>
                 <input name="name" defaultValue={String(initial.name ?? "")} />
               </Field>
               <Field
@@ -407,19 +407,17 @@ export function ResourceEditor({
                   : (initial.route as string | undefined)
               }
               resources={labels("routes")}
-              optional={t("Direct · route 0", "直连 · 路由 0")}
+              optional={t("Direct", "直连")}
               label={t("Route", "路由")}
             />
             <p className="field-help">
               {t(
-                "Team profiles use the team's certificate signer. Personal credentials are not available here. Saving this profile does not grant visibility or connection permission.",
-                "团队访问配置使用团队证书签名器，不能引用个人凭据。保存配置不会授予可见或连接权限。",
+                "Team Logins use team certificates. Personal credentials are not available here. Saving a Login does not grant visibility or connection permission.",
+                "团队登录配置使用团队证书，不能引用个人凭据。保存登录配置不会授予可见或连接权限。",
               )}
             </p>
             <details>
-              <summary>
-                {t("Advanced profile fields", "高级访问配置字段")}
-              </summary>
+              <summary>{t("Advanced Login settings", "高级登录设置")}</summary>
               <Field label={t("Terminal profile", "终端配置")}>
                 <input
                   name="terminal_profile"
@@ -507,12 +505,12 @@ export function ResourceEditor({
             {routeKind === 1 && (
               <Field
                 label={t(
-                  "Ordered jump access profile IDs",
-                  "按顺序排列的跳板访问配置 ID",
+                  "Ordered jump Login IDs",
+                  "按顺序排列的跳板登录配置 ID",
                 )}
                 help={t(
-                  "One UUID per line, from the first jump to the last. Each dependency needs separate view permission. Choose IDs from Access profiles.",
-                  "每行一个 UUID，按跳转顺序排列。每个依赖对象都需要单独的可见权限，可从访问配置列表获取 ID。 ",
+                  "One UUID per line, from the first jump to the last. Each dependency needs separate view permission. Choose IDs from Logins.",
+                  "每行一个 UUID，按跳转顺序排列。每个依赖对象都需要单独的可见权限，可从登录配置列表获取 ID。 ",
                 )}
               >
                 <textarea
@@ -682,8 +680,8 @@ export function ResourceEditor({
       {error && (
         <p className="notice error" role="alert">
           {t(
-            "Check the required fields, canonical IDs and JSON text maps. No request was sent.",
-            "请检查必填项、规范 ID 及 JSON 文本映射。尚未发送请求。",
+            "Check the required fields and settings. No request was sent.",
+            "请检查必填项及设置。尚未发送请求。",
           )}
         </p>
       )}

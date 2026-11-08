@@ -122,7 +122,7 @@ export function TeamWorkspace({
   const labels: Record<Section, string> = {
     hosts: t("Hosts", "主机"),
     "host-groups": t("Host groups", "主机分组"),
-    "access-profiles": t("Access profiles", "访问配置"),
+    "access-profiles": t("Logins", "登录配置"),
     routes: t("Routes", "路由"),
     groups: t("Member groups", "成员组"),
     policies: t("Access rules", "访问规则"),
@@ -1268,8 +1268,8 @@ export function TeamWorkspace({
               <p className="section-intro">
                 {section === "hosts"
                   ? t(
-                      "Create a Host, add an access profile with a remote username and direct route 0, then set that profile as the Host default. Grant asset visibility and connection permission separately in Access rules.",
-                      "创建主机后，添加包含远程用户名及直连路由 0 的访问配置，再将其设为主机默认配置。请在访问规则中分别授予资产可见及连接权限。",
+                      "Create a Host, add a Login with the remote username and a Direct connection, then select it as the Host's default Login. Grant visibility and connection permission separately in Access rules.",
+                      "创建主机后，添加包含远程用户名及直连方式的登录配置，再将其设为主机默认登录配置。请在访问规则中分别授予可见及连接权限。",
                     )
                   : section === "policies"
                     ? t(
@@ -1309,11 +1309,19 @@ export function TeamWorkspace({
                             ).fields.username,
                           )}{" "}
                           · {t("Route", "路由")}:{" "}
-                          {String(
-                            (
+                          {(() => {
+                            const route = (
                               item.data as ResourcesByKind["access-profiles"]["data"]
-                            ).fields.route ?? 0,
-                          )}
+                            ).fields.route;
+                            if (route === undefined || route === 0)
+                              return t("Direct", "直连");
+                            const selected = catalog.routes.find(
+                              (candidate) => candidate.id === route,
+                            );
+                            return selected
+                              ? resourceName(selected)
+                              : `${t("Not in this loaded view", "当前列表中不可见")} · ${route}`;
+                          })()}
                         </p>
                       )}
                       {section === "policies" && (
@@ -1338,8 +1346,8 @@ export function TeamWorkspace({
                           .default_profile && (
                           <p className="attention-text">
                             {t(
-                              "No default access profile. Add a profile, then edit this Host to link it.",
-                              "尚无默认访问配置。请先添加访问配置，再编辑此主机以关联。",
+                              "No default Login. Add a Login, then edit this Host to select it.",
+                              "尚无默认登录配置。请先添加登录配置，再编辑此主机以选择。",
                             )}
                           </p>
                         )}
