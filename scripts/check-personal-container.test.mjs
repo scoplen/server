@@ -24,12 +24,51 @@ import {
   assertOwnedFixture,
   assertOwnedResource,
   assertPrivateDirectoryArchive,
+  consoleAssetContentType,
+  consoleProbeImage,
   describeCheckFailure,
   describeImageBuildFailure,
   describeWalHolderFailure,
   prepareRecoveryProbeContext,
   runTeamRestart,
 } from "./check-personal-container.mjs";
+
+test("container probes use the current digest-pinned console dependency image", async () => {
+  const dockerfile = await readFile(
+    new URL("../Dockerfile", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    consoleProbeImage(dockerfile),
+    /^node:[^\s]+@sha256:[a-f0-9]{64}$/,
+  );
+  assert.throws(() =>
+    consoleProbeImage(
+      dockerfile.replace("AS console-dependencies", "AS other"),
+    ),
+  );
+  assert.throws(() =>
+    consoleProbeImage(dockerfile.replace(/@sha256:[a-f0-9]{64}/, "")),
+  );
+});
+
+test("bundled asset verification admits WebAssembly with its required response type", () => {
+  for (const [path, expected] of [
+    ["index.html", "text/html; charset=utf-8"],
+    ["assets/index.js", "text/javascript; charset=utf-8"],
+    ["assets/index.css", "text/css; charset=utf-8"],
+    ["assets/inter.woff2", "font/woff2"],
+    ["assets/scoplen_browser_bg.wasm", "application/wasm"],
+  ])
+    assert.equal(consoleAssetContentType(path), expected);
+  for (const path of [
+    "assets/../index.html",
+    "assets/subdir/module.wasm",
+    "module.wasm",
+    "assets/module.wasm.map",
+  ])
+    assert.throws(() => consoleAssetContentType(path));
+});
 
 function teamTestDriver(fixture, source, signal, observe = () => {}) {
   return new Promise((accept, reject) => {
