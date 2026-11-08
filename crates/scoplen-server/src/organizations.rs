@@ -32,6 +32,7 @@ use crate::{
 mod group_policy;
 mod inventory;
 mod team;
+mod user_ca;
 
 #[derive(Clone)]
 struct OrganizationState {
@@ -41,6 +42,7 @@ struct OrganizationState {
     policy: OrganizationSettings,
     notifications: scoplen_sync::notify::NotificationHub,
     read_limits: scoplen_api::sync::SyncReadLimits,
+    kms: Arc<LocalKeyFile>,
 }
 
 pub(crate) fn router(
@@ -51,7 +53,7 @@ pub(crate) fn router(
     notifications: scoplen_sync::notify::NotificationHub,
     read_body_limits: scoplen_sync::http::ReadBodyLimits,
 ) -> Router {
-    let auth = PersonalSyncAuthenticator::new(backend.clone(), kms, origin.clone());
+    let auth = PersonalSyncAuthenticator::new(backend.clone(), kms.clone(), origin.clone());
     Router::new()
         .route("/api/v1/orgs", post(create))
         .route("/api/v1/orgs", get(list))
@@ -60,12 +62,14 @@ pub(crate) fn router(
         .merge(team::routes())
         .merge(inventory::routes())
         .merge(group_policy::routes())
+        .merge(user_ca::routes())
         .with_state(OrganizationState {
             backend,
             auth,
             origin,
             policy,
             notifications,
+            kms,
             read_limits: scoplen_api::sync::SyncReadLimits {
                 max_envelope_bytes: usize::try_from(read_body_limits.max_envelope_bytes())
                     .expect("validated read limits"),
@@ -427,6 +431,10 @@ fn invalid(request_id: &Uuid) -> Response {
 
 fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> Response {
     let (title, detail) = match code {
+        "certificate.invalid_request" => (
+            "Invalid certificate request",
+            "Provide a supported SSH public key, target hosts or groups, username and lifetime.",
+        ),
         "organization.not_found" => ("Team not found", "The requested team is unavailable."),
         "organization.conflict" => (
             "Team operation conflict",

@@ -51,7 +51,7 @@ assert(
 assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
 
 const oldMigration = 20261024030000;
-const newMigration = 20261102000000;
+const newMigration = 20261103000000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -225,6 +225,16 @@ function inspectDatabase(path, current) {
             "organization_policies",
           ]
         : [],
+    );
+    const userCaTables = database
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_user_cas', 'organization_user_certificates') ORDER BY name",
+      )
+      .all()
+      .map((row) => row.name);
+    assert.deepEqual(
+      userCaTables,
+      current ? ["organization_user_cas", "organization_user_certificates"] : [],
     );
     if (current) {
       const inventory = database

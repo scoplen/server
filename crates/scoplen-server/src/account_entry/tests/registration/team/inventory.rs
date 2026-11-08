@@ -20,6 +20,8 @@ use scoplen_api::{
 use scoplen_model::{Object, ObjectType};
 use serde_json::json;
 
+mod user_ca;
+
 async fn cbor_call(f: &Fixture, a: &Actor, method: &str, path: &str, body: &[u8]) -> Reply {
     let proof = DpopProof::sign(
         &a.registration.device,

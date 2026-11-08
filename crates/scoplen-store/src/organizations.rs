@@ -26,6 +26,7 @@ pub mod group_policy;
 pub mod inventory;
 mod name;
 mod team;
+pub mod user_ca;
 
 /// Fixed public classes without submitted names, credentials or database diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]

@@ -114,19 +114,55 @@ pub(super) struct Graph {
     authorizer: OrganizationAuthorizer,
     entities: BTreeMap<(String, Uuid), Json>,
     now: i64,
+    connect_observes_source_ip: bool,
 }
 impl Graph {
     pub(super) fn authorize(&self, action: &str, kind: &str, id: Uuid) -> Result<bool, Error> {
-        let account = self.organization.membership.account_id;
         let org = self.organization.id;
         let member = self.organization.membership.id;
-        let trusted =
-            OrganizationAuthorizationContext::new(account, org, member, self.now.div_euclid(1000))
-                .map_err(|_| Error::StorageUnavailable)?;
         let context = Context::from_json_value(
             json!({"organization":entity_ref("Organization",org),
             "membership":entity_ref("Membership",member),"now":self.now.div_euclid(1000)}),
             None,
+        )
+        .map_err(|_| Error::StorageUnavailable)?;
+        self.authorize_context(action, kind, id, context)
+    }
+
+    pub(super) fn authorize_connect(
+        &self,
+        device: Uuid,
+        host: Uuid,
+        remote_user: &str,
+        source: std::net::IpAddr,
+    ) -> Result<bool, Error> {
+        if self.connect_observes_source_ip {
+            return Ok(false);
+        }
+        let context = Context::from_json_value(
+            json!({"organization":entity_ref("Organization",self.organization.id),
+                "membership":entity_ref("Membership",self.organization.membership.id),
+                "now":self.now.div_euclid(1000),"device":entity_ref("Device",device),
+                "remote_user":remote_user,"route_kind":"direct","source_ip":source.to_string()}),
+            None,
+        )
+        .map_err(|_| Error::StorageUnavailable)?;
+        self.authorize_context("connect", "Host", host, context)
+    }
+
+    fn authorize_context(
+        &self,
+        action: &str,
+        kind: &str,
+        id: Uuid,
+        context: Context,
+    ) -> Result<bool, Error> {
+        let account = self.organization.membership.account_id;
+        let trusted = OrganizationAuthorizationContext::new(
+            account,
+            self.organization.id,
+            self.organization.membership.id,
+            self.now.div_euclid(1000),
         )
         .map_err(|_| Error::StorageUnavailable)?;
         let request = Request::new(
@@ -346,9 +382,11 @@ macro_rules! inventory {
                     .bind(org.as_bytes().as_slice()).fetch_all(&mut **tx).await?;
                 let mut policies=PolicySet::new();
                 let mut policy_objects=BTreeSet::new();
+                let mut connect_observes_source_ip=false;
                 for row in rows {
                     let source:String=row.try_get("source")?;
                     let parsed=scoplen_api::group_policy::parse_policy_source(&source).map_err(|_|Error::StorageUnavailable)?;
+                    connect_observes_source_ip|=scoplen_api::group_policy::connect_policy_observes_source_ip(&parsed).map_err(|_|Error::StorageUnavailable)?;
                     for reference in scoplen_api::group_policy::policy_references(&parsed,org).map_err(|_|Error::StorageUnavailable)? {
                         if matches!(reference.type_name().to_string().as_str(),"Host"|"HostGroup"|"GatewayNetwork"|"AccessProfile"|"Route"|"TrustRecord"|"Snippet") {
                             policy_objects.insert(Uuid::parse_str(reference.id().unescaped()).map_err(|_|Error::StorageUnavailable)?);
@@ -358,7 +396,7 @@ macro_rules! inventory {
                     policies.merge(&single,true).map_err(|_|Error::StorageUnavailable)?;
                 }
                 let authorizer=OrganizationAuthorizer::new(org,&policies).map_err(|_|Error::StorageUnavailable)?;
-                let mut graph=Graph{organization,authorizer,entities,now};
+                let mut graph=Graph{organization,authorizer,entities,now,connect_observes_source_ip};
                 for id in policy_objects {
                     match Self::inventory_object(tx,org,id).await {
                         Ok((object,_))=>Self::inventory_hydrate(tx,&mut graph,&object).await?,
@@ -420,7 +458,7 @@ macro_rules! inventory {
                 Ok(())
             }
 
-            async fn inventory_readable(tx:&mut Transaction<'_,$db>,graph:&mut Graph,object:&Object)->Result<bool,Error> {
+            pub(super) async fn inventory_readable(tx:&mut Transaction<'_,$db>,graph:&mut Graph,object:&Object)->Result<bool,Error> {
                 Self::inventory_hydrate(tx,graph,object).await?;
                 graph.authorize("view_inventory",&object.object_type.to_string(),object.id)
             }

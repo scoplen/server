@@ -151,7 +151,16 @@ self-hosted server, host agent, administration CLI, and web console.
   protection and historical confirmation preserve the distinction between a past acceptance
   and current authority. Dissolution disables only its team and retains Accounts, Personal
   inventory, other teams and audit. Organization inventory supports typed asset authoring,
-  current per-object view permissions and revision-bound sync reads. Shared vaults remain open.
+  current per-object view permissions and revision-bound sync reads. The initial local user CA
+  keeps one independent encrypted Ed25519 seed per team and issues scoped user certificates
+  after current Device/Membership and per-target view/connect evaluation. Its initial profile
+  caps lifetime at 30 minutes, permits PTY and carries no forwarding or plain-username principal.
+  Current enabled source-IP-dependent connect policies deny issuance and receipt confirmation
+  before any serial or issuance mutation; full address-constrained certificates remain open.
+  Serial, certificate, original receipt and audit commit together; uncertain commits disclose
+  no certificate, and exact confirmation rechecks authority without renewal. Public CA reads
+  grant no inventory or connection access. Host CA, rotation, KRL and remote-signing workflows
+  remain open. Shared vaults remain open.
   The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of
