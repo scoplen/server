@@ -4003,6 +4003,16 @@ dependencies = [
 [[package]]
 name = "scoplen-ca"
 version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "scoplen-api",
+ "scoplen-crypto",
+ "scoplen-model",
+ "ssh-key",
+ "thiserror 2.0.21",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "scoplen-control"
@@ -4111,6 +4121,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "ssh-key",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -4141,6 +4152,7 @@ dependencies = [
  "object_store",
  "scoplen-api",
  "scoplen-audit",
+ "scoplen-ca",
  "scoplen-crypto",
  "scoplen-identity",
  "scoplen-model",

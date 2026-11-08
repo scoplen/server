@@ -204,6 +204,10 @@ jobs:
         env:
           SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
         run: cargo test --locked -p scoplen-store --test organization_inventory_migrations --features postgres-integration -- --test-threads=1
+      - name: Check populated Organization user-CA migration and retained admission debt
+        env:
+          SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
+        run: cargo test --locked -p scoplen-store --test organization_user_ca_migrations --features postgres-integration -- --test-threads=1
       - name: Create isolated team HTTP database
         run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organizations_http_ci'
       - name: Check PostgreSQL team creation, discovery, receipts and uncertain commits

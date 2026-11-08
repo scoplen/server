@@ -152,6 +152,10 @@ pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryE
         DeviceAccessOperation::OrganizationPolicyDelete => {
             AccountEntryEndpoint::OrganizationPolicyDelete
         }
+        DeviceAccessOperation::UserCaCreate => AccountEntryEndpoint::OrganizationUserCaCreate,
+        DeviceAccessOperation::UserCertificateIssue => {
+            AccountEntryEndpoint::OrganizationUserCertificateIssue
+        }
         _ => return None,
     })
 }

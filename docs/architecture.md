@@ -223,6 +223,31 @@ and view revision. The revision-fenced complete authorized view supplies indepen
 visibility, with current visibility also protecting retained history after deletion; live reads
 and complete views exclude deleted objects. Shared vault authorization
 retains its own roadmap outcome.
+
+The initial Organization user CA is a separate local Ed25519 signer in `scoplen-ca`.
+`scoplen-store` owns encrypted custody, current authority and transaction completion. One
+Organization-owned CA row stores the public Resource and a versioned XChaCha20-Poly1305 seed
+envelope bound to the Organization and CA ids under the deployment key. Corruption or a
+wrong deployment key fails issuance without generating replacement trust. Public CA reads
+require current membership but do not imply inventory or connection permission.
+
+CA creation and D-88 issuance use the Organization authority lock and current Device/Account
+verification. Issuance reuses the canonical Cedar graph for each live visible Host, actual
+Device and peer address, exact remote user, trusted current time and the direct route kind;
+unobserved SSO freshness is omitted. HostGroup selectors require a visible nonempty group
+and independent authorization of every currently selected Host. The initial certificate
+profile caps TTL at 1,800 seconds and adds only PTY and the Organization extension.
+The current enabled, non-deleted policies are inspected through the shared parsed-policy
+helper. Any connect policy observing source IP, including whole-context observations, denies
+new issuance and exact confirmation before serial, certificate, receipt or issuance-audit
+mutation. Disabling/removing that policy restores ordinary authorization; this path does not
+translate Cedar conditions into certificate address constraints.
+The seed remains private to the signer; HTTP exposes only validated public metadata or the
+D-90 Resource after its serial, certificate, original-key receipt and audit commit together.
+Exact confirmation rechecks current authority and returns the original certificate, including
+its original expiry. No new issuance is inferred from an uncertain commit. CA rotation,
+remote signers, host certificates and KRL distribution remain separate roadmap work.
+
 Worker retention scheduling visits every vault through strictly increasing id pages of at most 1,000
 entries on SQLite and PostgreSQL. Each sweep captures its greatest id before paging, defers
 later appended ids, and restarts from the beginning on the next heartbeat to discover ids

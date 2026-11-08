@@ -734,7 +734,43 @@ tenant revision, and retains final audit and a 24-hour historical receipt. Retry
 same Account, key, body and original If-Match confirms that receipt without requiring a now
 inactive team. Personal Accounts, Devices, keys, encrypted inventory and other teams remain
 usable. Installed remote host trust needs separate removal; dissolution does not edit sshd.
-Grants and certificate issuance retain their separate roadmap outcomes.
+Grants retain their separate roadmap outcome.
+
+The initial Organization user-CA API supports POST/GET `certificate-authorities` and GET
+`certificate-authorities/{id}`. Creation requires `ca:write`, current `manage_ca` permission,
+one UUIDv7 `Idempotency-Key` and exactly
+`{"id":"<UUIDv7>","data":{"kind":"user","backend":"local"}}`. One independent Ed25519
+user CA is active per team. Its seed stays encrypted under the deployment KMS key with
+immutable Organization/CA binding. Reads require `ca:read` and current membership; public CA
+metadata and its SHA-256 fingerprint supply no asset access or connection authority.
+
+POST `certificates` requires `certificates:issue` and the shared D-88 JSON request:
+`public_key`, one of `hosts` or `host_groups`, `remote_user` and `ttl_seconds`.
+The current enrolled Device, Account, Membership and independent view/connect permission for
+every selected Host are checked inside the Organization transaction. HostGroup issuance also
+requires that group's visibility and a nonempty current Host selection. This initial unmanaged
+path evaluates `route_kind="direct"`; unknown SSO freshness is absent, and hardware-backed
+Device claims are not inferred. Policies requiring unestablished facts deny issuance.
+If any enabled team policy can match `connect` and observes `context.source_ip`, this initial
+path denies issuance and original-receipt confirmation with `policy.denied`. Disable or remove
+that rule to use ordinary certificate issuance. Parsed policy inspection includes presence
+and whole-context observations; comments, string literals and non-connect policies do not
+trigger the restriction. Address-constrained certificates remain separate work.
+
+The initial certificate profile caps requested validity at 1,800 seconds, retains a shorter
+requested lifetime, and permits PTY plus the Organization extension. It adds no forwarding or
+plain-username principal. Returned user certificates contain only the selected scoped Host or
+HostGroup principals and the Account/Device-bound key id. Install the displayed public CA and
+the exact scoped principal mapping in the remote user's OpenSSH configuration, and validate
+with `sshd -t` before reload. A user CA does not replace remote host-key verification.
+
+Issuance requires an original UUIDv7 `Idempotency-Key` and no `If-Match`. The positive uint64
+serial, issued Resource, receipt and Organization audit commit together. Only a confirmed
+commit discloses the certificate. Original-key confirmation within 24 hours rechecks current
+authority and returns the original certificate without extending its lifetime. Unknown commits
+require explicit confirmation; they never trigger automatic issuance replay. Leaving or
+dissolving a team blocks new issuance but cannot recall an already disclosed unmanaged SSH
+certificate. Host CAs, KRL distribution, CA rotation and remote signers remain separate work.
 
 Team inventory uses the server-readable `hosts`, `access-profiles`, `routes`, `host-groups`,
 `trust-records`, `snippets` and `gateway-networks` collections under `/api/v1/orgs/{org}`.

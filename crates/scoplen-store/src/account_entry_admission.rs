@@ -56,6 +56,8 @@ pub enum AccountEntryEndpoint {
     OrganizationPolicyCreate = 36,
     OrganizationPolicyReplace = 37,
     OrganizationPolicyDelete = 38,
+    OrganizationUserCaCreate = 39,
+    OrganizationUserCertificateIssue = 40,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

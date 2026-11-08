@@ -59,6 +59,7 @@ ed25519-dalek.workspace = true
 futures-util.workspace = true
 hyper = { version = "1.12.0", features = ["client", "http2"] }
 scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "a94554ee91e2c66950e9ebb90171fc56bb205f98" }
+ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "std"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tokio-tungstenite = "0.26.2"
 url = "2.5.8"

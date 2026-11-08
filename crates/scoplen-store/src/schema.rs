@@ -3108,7 +3108,124 @@ const ORGANIZATION_POLICIES: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ORGANIZATION_USER_CAS: TableSpec = TableSpec {
+    name: "organization_user_cas",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "encrypted_seed",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "last_serial",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
+};
+
+const ORGANIZATION_USER_CERTIFICATES: TableSpec = TableSpec {
+    name: "organization_user_certificates",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "authority_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "device_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "serial",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_user_cas",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "authority_id",
+            target_table: "organization_user_cas",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "device_id",
+            target_table: "identity_devices",
+            target_column: "device_id",
+        },
+    ],
+    indexes: &[],
+};
+
 const TABLES: &[TableSpec] = &[
+    ORGANIZATION_USER_CAS,
+    ORGANIZATION_USER_CERTIFICATES,
     ORGANIZATION_INVENTORY_VAULTS,
     ORGANIZATION_INVENTORY_OBJECTS,
     ORGANIZATION_INVENTORY_REFERENCES,
@@ -3657,6 +3774,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261102000000_organization_inventory.sql");
     const POSTGRES_ORGANIZATION_INVENTORY: &str =
         include_str!("../migrations/postgres/20261102000000_organization_inventory.sql");
+    const SQLITE_ORGANIZATION_USER_CA: &str =
+        include_str!("../migrations/sqlite/20261103000000_organization_user_ca.sql");
+    const POSTGRES_ORGANIZATION_USER_CA: &str =
+        include_str!("../migrations/postgres/20261103000000_organization_user_ca.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -3711,6 +3832,7 @@ mod tests {
             SQLITE_ORGANIZATION_UPDATE_TIME,
             SQLITE_TEAM_LIFECYCLE,
             SQLITE_ORGANIZATION_INVENTORY,
+            SQLITE_ORGANIZATION_USER_CA,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -3745,6 +3867,7 @@ mod tests {
             POSTGRES_ORGANIZATION_UPDATE_TIME,
             POSTGRES_TEAM_LIFECYCLE,
             POSTGRES_ORGANIZATION_INVENTORY,
+            POSTGRES_ORGANIZATION_USER_CA,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
