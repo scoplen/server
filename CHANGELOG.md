@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Advance the Personal-container SQLite recovery probe to the Account-browser migration and
+  verify its three session tables only after upgrade, preserving the pinned old-image recovery
+  anchor and standalone old-schema snapshot checks.
+
 - Add independent Account-browser password options, sign-in, rotating refresh and current-family
   sign-out on SQLite and PostgreSQL. Revalidate genuine browser families inside Account/team
   transactions and retain native Device authority and receipt bytes. Purpose/key-bound attempts,
