@@ -434,10 +434,20 @@ database or complete high availability, MinIO or backup/restore.
 
 ## Personal console assets
 
-Run `pnpm --dir web/console install --frozen-lockfile` and
-`pnpm --dir web/console build` before starting an API-role development server. The build emits
-hashed scripts, styles, local fonts, their redistribution licenses, and a bounded SHA-256 manifest
-in `web/console/dist`. The API role serves `/` and `/setup` plus only manifest-listed assets,
+Run `pnpm --dir web/console install --frozen-lockfile`,
+`pnpm --dir web/console prepare:browser`, and `pnpm --dir web/console build` before starting an
+API-role development server. Preparing the shared browser package requires Rust 1.99.0, its
+`wasm32-unknown-unknown` target, wasm-bindgen-cli 0.2.129, and a native C toolchain. Linux also
+requires Clang and LLVM (`llvm-ar`). Preparation downloads the exact published proto source
+revision used by the console API types, builds its Rust WebAssembly package, and verifies the
+tool pins, source provenance and asset hashes. The ignored result is cached in
+`web/console/.browser`; development, typecheck and build commands verify it without invoking
+Cargo. `SCOPLEN_BROWSER_CARGO_CONFIG` may name an existing Cargo configuration to copy into the
+temporary source archive; CI and container builds use the published configuration directly.
+
+The console build emits hashed scripts, styles, WebAssembly, local fonts, their redistribution
+licenses, and a bounded SHA-256 manifest in `web/console/dist`. The API role serves `/`, `/setup`,
+`/operator` and `/join-team` plus only manifest-listed assets,
 with a strict CSP, Trusted Types, no inline scripts, no-store and no-referrer policies. It loads
 verified bytes once at startup; rebuild and restart after changing the assets.
 
@@ -446,7 +456,8 @@ relative to the process working directory. For an installed deployment, configur
 directory shipped by the package. Packaging must include the built directory. A missing or
 invalid build returns a clear 503 from console entry paths; API, health and readiness remain
 independent. An edge-only process has no console routes. The console requires its configured
-HTTPS origin and a current browser with passkeys, WebCrypto and Web Locks. The Vite development
+HTTPS origin and a current browser with WebCrypto, Web Locks, Workers and WebAssembly. Operator
+access additionally requires passkeys. The Vite development
 server is `pnpm --dir web/console dev`; it does not provide an API proxy or bypass these guards.
 
 Console API types are copied unchanged from the exact published proto revision by
@@ -488,6 +499,7 @@ cargo fmt --all -- --check
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 pnpm --dir web/console install --frozen-lockfile
+pnpm --dir web/console prepare:browser
 pnpm --dir web/console lint
 pnpm --dir web/console typecheck
 pnpm --dir web/console test

@@ -78,6 +78,7 @@ test("streamed JSON enforces byte ceilings and strict UTF-8 across chunks", asyn
   });
   assert.equal(await jsonResponse(new Response(stream), 4), "é");
   await assert.rejects(jsonResponse(new Response(null), 100));
+  await assert.rejects(jsonResponse(new Response("\uFEFF{}"), 100));
 });
 
 test("browser session rejects native refresh credentials and invalid lifetimes", () => {

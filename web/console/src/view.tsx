@@ -281,7 +281,7 @@ export function App({
               ? "Wait for the server to confirm sign out. No retry runs automatically. Other browser sessions are unaffected."
               : step === "session"
                 ? "Sign out revokes this session on the server. Lock this tab only removes credentials from this tab."
-                : "A passkey authenticates the deployment Operator. Account sign-in in the desktop app is separate."}
+                : "A passkey authenticates the deployment Operator. Account credentials and team memberships are separate."}
           </p>
         </section>
         <aside className="guide" aria-labelledby="guide-title">

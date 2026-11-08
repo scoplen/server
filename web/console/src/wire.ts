@@ -130,7 +130,7 @@ export async function jsonResponse(
 ): Promise<unknown> {
   if (!response.body) throw new Error("The server returned an empty response.");
   const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   let length = 0;
   let source = "";
   try {
