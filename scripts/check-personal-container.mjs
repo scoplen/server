@@ -400,7 +400,13 @@ export async function assertOwnedFixture(directory, parent, run) {
   await check(directory);
 }
 
-async function request(origin, path, ca, servername = "localhost") {
+export async function request(
+  origin,
+  path,
+  ca,
+  servername = "localhost",
+  maxBytes = 2 * 1024 * 1024,
+) {
   return await new Promise((accept, reject) => {
     const outgoing = https.get(
       new URL(path, origin),
@@ -417,7 +423,7 @@ async function request(origin, path, ca, servername = "localhost") {
         let size = 0;
         incoming.on("data", (chunk) => {
           size += chunk.length;
-          if (size > 2 * 1024 * 1024)
+          if (size > maxBytes)
             outgoing.destroy(new Error("HTTPS response exceeds check budget"));
           else chunks.push(chunk);
         });
@@ -1035,6 +1041,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         origin,
         asset.path === "index.html" ? "/" : `/${asset.path}`,
         ca,
+        undefined,
+        contentType === "application/wasm" ? 8 * 1024 * 1024 : undefined,
       );
       assert.equal(response.status, 200);
       assert.equal(response.body.length, asset.bytes);
