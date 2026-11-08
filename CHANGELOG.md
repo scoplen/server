@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Restore GitHub Actions parsing for the complete PostgreSQL schema command and align the
+  Personal-container probe with the current pinned Node stage, WebAssembly assets and license.
+
 - Advance the Personal-container SQLite recovery probe to the Account-browser migration and
   verify its three session tables only after upgrade, preserving the pinned old-image recovery
   anchor and standalone old-schema snapshot checks.

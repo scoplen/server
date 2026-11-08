@@ -70,6 +70,27 @@ export function assertTeamRestartAcceptance(receipt) {
   });
 }
 
+export function consoleProbeImage(dockerfile) {
+  const image = dockerfile.match(
+    /^FROM (node:[^\s]+@sha256:[a-f0-9]{64}) AS console-dependencies\r?$/m,
+  )?.[1];
+  assert(image, "pinned console Node dependency stage missing");
+  return image;
+}
+
+export function consoleAssetContentType(path) {
+  assert(
+    /^(index\.html|assets\/[A-Za-z0-9_.-]+\.(js|css|woff2|wasm))$/.test(path),
+  );
+  return {
+    html: "text/html; charset=utf-8",
+    js: "text/javascript; charset=utf-8",
+    css: "text/css; charset=utf-8",
+    woff2: "font/woff2",
+    wasm: "application/wasm",
+  }[path.split(".").at(-1)];
+}
+
 export function assertDoctorAcceptance(result, healthy) {
   assert.equal(
     result.error ? result.error.code : 0,
@@ -628,10 +649,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     );
     await docker(["compose", "version"]);
     const dockerfile = await readFile(join(repository, "Dockerfile"), "utf8");
-    probeImage = dockerfile.match(
-      /^FROM (node:[^\s]+@sha256:[a-f0-9]{64}) AS console-build\r?$/m,
-    )?.[1];
-    assert(probeImage, "pinned console Node stage missing");
+    probeImage = consoleProbeImage(dockerfile);
     const socket = net.createServer();
     const port = await new Promise((accept, reject) => {
       socket.once("error", reject);
@@ -1012,11 +1030,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     assert.equal(manifest.version, 1);
     assert(manifest.assets.length > 0 && manifest.assets.length <= 256);
     for (const asset of manifest.assets) {
-      assert(
-        /^(index\.html|assets\/[A-Za-z0-9_.-]+\.(js|css|woff2))$/.test(
-          asset.path,
-        ),
-      );
+      const contentType = consoleAssetContentType(asset.path);
       const response = await request(
         origin,
         asset.path === "index.html" ? "/" : `/${asset.path}`,
@@ -1024,16 +1038,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       );
       assert.equal(response.status, 200);
       assert.equal(response.body.length, asset.bytes);
-      const contentTypes = {
-        html: "text/html; charset=utf-8",
-        js: "text/javascript; charset=utf-8",
-        css: "text/css; charset=utf-8",
-        woff2: "font/woff2",
-      };
-      assert.equal(
-        response.headers["content-type"],
-        contentTypes[asset.path.split(".").at(-1)],
-      );
+      assert.equal(response.headers["content-type"], contentType);
       assert.equal(
         createHash("sha256").update(response.body).digest("hex"),
         asset.sha256,
@@ -1052,6 +1057,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       "@fontsource-variable-inter",
       "@fontsource-variable-lora",
       "@fontsource-variable-jetbrains-mono",
+      "scoplen-browser",
     ])
       assert(
         (await readFile(join(directory, "licenses", `${name}.txt`))).length > 0,

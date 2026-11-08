@@ -135,7 +135,9 @@ jobs:
       - name: Show pinned toolchain
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
-        run: cargo test --locked -p scoplen-store --lib --features postgres-integration schema::tests:: -- --test-threads=1
+        run: >-
+          cargo test --locked -p scoplen-store --lib --features postgres-integration
+          schema::tests:: -- --test-threads=1
       - name: Check PostgreSQL runtime readiness and audit worker together
         run: cargo test -p scoplen-server --lib --features postgres-integration runtime::tests::postgres_
       - name: Check PostgreSQL deployment audit transactions and concurrency
