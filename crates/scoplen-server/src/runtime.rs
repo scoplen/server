@@ -945,6 +945,9 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
                 removed_device_refresh_families = report.device_families,
                 removed_operator_refresh_tokens = report.operator_tokens,
                 removed_operator_refresh_families = report.operator_families,
+                removed_account_browser_access_tokens = report.account_browser_access,
+                removed_account_browser_refresh_tokens = report.account_browser_refresh,
+                removed_account_browser_families = report.account_browser_families,
                 "refresh retention pass"
             ),
             Err(error) => error!(%error, role = "worker", "refresh retention pass failed"),

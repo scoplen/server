@@ -242,14 +242,17 @@ Explicit audited maintenance can raise the ceiling without eviction. Capacity pr
 as non-identifying counters, and exhaustion does not change database readiness. This boundary is
 not yet mounted as registration, an operator maintenance API or a warning-delivery mechanism.
 
-The worker retires expired device and Operator refresh credentials in one atomic transaction
+The worker retires expired Device, Operator and Account-browser credentials in one atomic transaction
 per 30-second heartbeat, independently of later authentication requests. For each kind it
 locks at most 16 expired families, removes at most 256 digests and removes only empty expired
 families. Further work waits for another heartbeat; a heavily rotated family cannot cause an
 unbounded cascading deletion. Unexpired families and spent digests, including revoked families,
 remain intact until absolute expiry. Expiry is rechecked after family locks, shutdown cancels
 a blocked pass, and logs contain only confirmed counts or fixed failures. This retirement
-reuses database pages; it does not vacuum or promise a smaller database file.
+reuses database pages; it does not vacuum or promise a smaller database file. Each pass also
+removes at most 256 expired Account-browser access digests. An expired browser family remains
+until its refresh digests are gone and every original access expiry has passed, so eligible
+fresh-proof logout confirmation retains its original lifetime.
 The API also mounts native `POST /api/v1/auth/accounts/requests/challenge`. Independent durable
 Account-entry source admission runs before reading the body. Strict shared JSON and HTTP
 metadata validation reject browser credentials, query parameters and mismatched origins.
@@ -261,7 +264,7 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@a94554ee`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@33374ca2`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
 The sync service retains encrypted object envelopes without reading their Credential fields.
@@ -646,16 +649,18 @@ distinguish source admission, keyring loading and the refresh transaction. A con
 timeout returns `auth.storage_unavailable` without consuming the refresh credential; this
 coverage does not establish the cause of the unresolved native post-reopen refresh failure.
 Unknown commit outcomes retain their separate non-retryable device-challenge recovery.
-`GET /api/v1/accounts/me` uses the same enrolled-device boundary with the exact
-`account:read` scope. It rechecks the account, device, proof key, certificate publication and
-revocation inside the read transaction, and returns only the caller's bounded account Resource.
+`GET /api/v1/accounts/me` accepts an enrolled Device or a current Account-browser family with
+the exact `account:read` scope. It rechecks the original actor inside the read transaction:
+Account, Device, proof key, certificate publication and revocation for a Device; Account,
+credential generation and the original unexpired, unrevoked family for a browser. It returns
+only the caller's bounded account Resource.
 The HTTP ETag equals the stable strong body tag; responses disable caching and preserve
 `email: null` for legacy Accounts without email. Stored email is returned exactly when valid;
-missing or corrupt state and storage failures disclose no profile. Origin is optional for
-native callers and must match the deployment exactly when supplied; GET bodies are rejected.
+missing or corrupt state and storage failures disclose no profile. The read permits an omitted
+Origin; every supplied Origin must match the deployment exactly. GET bodies are rejected.
 Profiles currently have no mutation endpoint, so both timestamps come from persisted identity
 time. Profile mutation and email verification remain separate work.
-`GET /api/v1/accounts/me/devices` uses the same exact `account:read` boundary and returns the
+`GET /api/v1/accounts/me/devices` remains Device-only with exact `account:read` and returns the
 complete signed certificate and revocation snapshot for that account. Each artifact is at most
 64 KiB, their combined decoded size is at most 4 MiB, and the JSON response is at most 6 MiB.
 The read transaction rechecks caller admission and verifies every stored signature, account
@@ -664,7 +669,45 @@ Missing key state, corrupt collections and capacity failures return a non-cachea
 partial data. The read accepts no body, query, `Idempotency-Key` or `If-Match`, and returns no ETag
 or pagination fields. Names and platforms remain signed account claims. Remaining device
 lifecycle mutations remain separate work. The protected Personal
-sync subset above also uses these credentials.
+sync subset above also uses these Device credentials.
+
+Existing password Accounts can use an independent same-origin browser API without enrolling
+a browser as a Device. Production console sign-in and team workflow acceptance remain separate
+roadmap outcomes. The Account-browser authentication endpoints are:
+
+| POST path | Request | Successful response |
+| --- | --- | --- |
+| `/api/v1/auth/accounts/browser/password/options` | `{"username":"..."}` | Fixed profile-one options |
+| `/api/v1/auth/accounts/browser/password/login` | `{"attempt_id":"...","auth_secret":"..."}` | Four-field browser session and scoped refresh cookie |
+| `/api/v1/auth/accounts/browser/refresh` | `{}` and exactly one Account refresh cookie | Rotated browser session and scoped refresh cookie |
+| `/api/v1/auth/accounts/browser/logout` | `{}` and the original opaque access token | `{"revoked":true}` |
+
+Every endpoint requires the exact deployment Origin and a fresh DPoP proof. Options/login share
+the native password source, username, verified-Account and outstanding-attempt budgets. Each
+attempt is bound to its purpose, original browser proof key and Origin. Browser password
+consumers derive AuthSecret with the published Rust/WebAssembly adapter in a one-use Worker;
+raw passwords are not part of these HTTP requests. Browser login returns no Personal keys,
+encrypted bootstrap or Device admission.
+Initial browser registration, password recovery and password reset are unsupported.
+
+Browser credentials use independent `ab1_` access and `ar1_` refresh profiles. Access lasts ten
+minutes and a family expires thirty days after the original login. Only confirmed login/refresh
+commits disclose credentials. Refresh uses only `__Secure-spl-account-refresh`, with `HttpOnly`,
+`Secure`, `SameSite=Strict` and `Path=/api/v1/auth/accounts/browser/refresh`; it never selects an
+Operator or native Device session. Spent-token reuse revokes only the matching browser family.
+Unconfirmed login/refresh commits return no credentials and require a fresh password sign-in.
+
+Logout ignores cookies and never sets or clears one. It revokes only the original family,
+with its audit, and an eligible fresh-proof retry can confirm that terminal result without
+another revocation audit. An unknown logout commit has `changed: true, retryable: true` and
+retains the original proof key/access token only for explicit confirmation before expiry.
+Discarding local credentials does not confirm server sign out.
+
+Account-browser access is restricted to Account profile and the team administration, Host,
+HostGroup, AccessProfile, Route, Group and Policy routes described below. Protected business
+requests use the opaque token and a token-bound fresh proof with `credentials: "omit"`.
+Every supplied Origin must match; mutations require it. Browser sessions cannot access Personal
+or Shared sync, Device/key APIs, CA administration or certificate issuance, and cannot execute SSH.
 
 `POST /api/v1/orgs`, `GET /api/v1/orgs` and `GET /api/v1/orgs/{org}` provide team creation and
 the caller Account's current active memberships on SQLite and PostgreSQL. Creation is disabled
@@ -686,7 +729,7 @@ Personal vault.
 
 `PATCH /api/v1/orgs/{org}` changes only the team name. Send `{"data":{"name":"Operations"}}`
 with `orgs:write` and the exact current Resource ETag in one strong `If-Match` header. Current
-Account, Device and tenant Membership are checked inside the transaction; the canonical Cedar
+Account, the original authenticated actor and tenant Membership are checked inside the transaction; the canonical Cedar
 `manage_organization` action permits the current Owner or Administrator. Other built-in roles
 cannot rename a team, and creation policy does not disable name settings. A missing precondition
 returns 428, a malformed one returns 400, and an authorized stale edit returns 412. Read the
@@ -699,8 +742,9 @@ mutation replay. This is independent of original-key creation confirmation. Curr
 team policies also apply to name and member administration.
 
 The team lifecycle API uses `teams:manage` for administration and `teams:join` for the named
-recipient's preview/acceptance and self-leave. Obtain a fresh Device session when an existing
-refresh family lacks these scopes. All paths below retain `/api/v1/orgs/{org}`:
+recipient's preview/acceptance and self-leave. Both current Account-browser families and enrolled
+Devices can use these routes. Obtain a fresh Device session when an existing native refresh
+family lacks these scopes. All paths below retain `/api/v1/orgs/{org}`:
 
 | Path | Operations |
 | --- | --- |
@@ -713,10 +757,12 @@ refresh family lacks these scopes. All paths below retain `/api/v1/orgs/{org}`:
 
 Creation takes `invitation_id`, an existing canonical `recipient_username`, built-in `roles`
 and the shared protocol's `password_verifier`. Generate the invitation's separate eight-symbol
-password in the native core and derive that verifier with the deployment origin, Organization
+password through the shared Rust generator and derive that verifier with the deployment origin, Organization
 and invitation ids. The server retains only the verifier. Share the public
-`/join-team#organization=...&invitation=...` link and the password separately. That page explains
-how to open Join team in Scoplen and performs no acceptance. Another Account cannot preview
+`/join-team#organization=...&invitation=...` link and the password separately. The `/join-team`
+entry serves configured production console assets for the named Account's sign-in, review and
+explicit acceptance with the separate password. Complete shipped-console acceptance remains a
+separate roadmap outcome. Another Account cannot preview
 or accept the invitation, even with its password. Invitations expire after 24 hours; five
 incorrect matching-recipient password attempts lock acceptance. An administrator can revoke
 a pending or locked invitation. A lost password cannot be retrieved; revoke and issue a new one.
@@ -724,8 +770,8 @@ a pending or locked invitation. A lost password cannot be retrieved; revoke and 
 Creation and acceptance require the original UUIDv7 `Idempotency-Key` and no `If-Match`.
 Creation confirmation rechecks current administrative permission and returns the current
 Invitation Resource. Acceptance takes exactly `{"password":"..."}` and returns an immutable
-receipt. An exact acceptance replay returns that historical receipt after current Device and
-Account authentication, including after removal or dissolution; it never restores membership.
+receipt. An exact acceptance replay returns that historical receipt after current Device or
+Account-browser authentication, including after removal or dissolution; it never restores membership.
 Both retain the original 24-hour confirmation deadline. Source and authenticated Account
 admission allow 30 and ten attempts per minute respectively, independently per mutation kind,
 using the existing bounded durable admission store.
@@ -795,6 +841,11 @@ The server assigns TrustRecord attribution. Credentials, authenticated-proxy sec
 Personal credential fallback cannot be stored in this inventory. References must resolve to
 independently readable objects in the same team; an active reference prevents target deletion.
 Equal replacements and original-create confirmations add no revision, sequence or audit.
+Account browsers can author only Host, HostGroup, AccessProfile and Route objects. Their K-1
+writer is the genuine server-generated browser-family UUID, with no fabricated Device. Inventory
+and Group/Policy create receipts bind the `account-browser` writer kind and original family;
+refresh within that family can confirm them, while another login family or Device conflicts.
+Native writer ids and receipt bytes remain unchanged. Team lifecycle receipts remain Account-bound.
 
 `groups` and `policies` use the same Resource, pagination and conditional-write conventions.
 Groups contain current Membership ids and are managed through `teams:manage` and

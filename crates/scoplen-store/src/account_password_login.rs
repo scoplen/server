@@ -80,11 +80,11 @@ impl From<AccountEntryStateError> for AccountPasswordLoginError {
     }
 }
 
-fn attempt_digest(attempt: &[u8; 32]) -> [u8; 32] {
+pub(crate) fn attempt_digest(attempt: &[u8; 32]) -> [u8; 32] {
     account_capability_digest(attempt)
 }
 
-fn origin_digest(origin: &str) -> [u8; 32] {
+pub(crate) fn origin_digest(origin: &str) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(b"spl-account-password-origin-v1");
     hash.update(origin.as_bytes());
@@ -169,7 +169,7 @@ macro_rules! password_transaction {
 macro_rules! password_store {
     ($store:ty,$begin:ident,$now:ident,$admit:ident,$audit:ident,$outcome:ident,$snapshot:ident,$append:path,$length:literal) => {
         impl $store {
-            async fn password_storage_failure_audit(&self,endpoint:AccountEntryEndpoint,source:IpAddr)
+            pub(crate) async fn password_storage_failure_audit(&self,endpoint:AccountEntryEndpoint,source:IpAddr)
                 -> Result<(),AccountPasswordLoginError> {
                 let deadline=Instant::now()+FAILURE_AUDIT_BUDGET;
                 let mut tx=timeout_at(deadline,$begin(self)).await
@@ -183,7 +183,7 @@ macro_rules! password_store {
                 Ok(())
             }
 
-            async fn password_retained_probe(&self,kms:&dyn KeyManagementService,deadline:Instant,
+            pub(crate) async fn password_retained_probe(&self,kms:&dyn KeyManagementService,deadline:Instant,
                 endpoint:AccountEntryEndpoint,source:IpAddr) -> Result<AccountProbeKey,AccountPasswordLoginError> {
                 match timeout_at(deadline,self.read_account_probe_key(kms)).await {
                     Ok(Ok(key))=>Ok(key),
@@ -199,6 +199,12 @@ macro_rules! password_store {
             /// Returns only content-free invalid-input, rate or storage outcomes.
             pub async fn issue_account_password_options(&self,source:IpAddr,origin:&str,
                 request_body:&[u8],kms:&dyn KeyManagementService,deadline:Instant)
+                ->Result<AccountPasswordOptionsResponse,AccountPasswordLoginError> {
+                self.issue_bound_account_password_options(source,origin,request_body,kms,deadline,None).await
+            }
+
+            pub(crate) async fn issue_bound_account_password_options(&self,source:IpAddr,origin:&str,
+                request_body:&[u8],kms:&dyn KeyManagementService,deadline:Instant,browser_jkt:Option<&str>)
                 ->Result<AccountPasswordOptionsResponse,AccountPasswordLoginError> {
                 let endpoint=AccountEntryEndpoint::PasswordOptions;
                 let decoded=AccountPasswordOptionsRequest::from_json(request_body);
@@ -245,9 +251,9 @@ macro_rules! password_store {
                         expires_at_ms:u64::try_from(expires).map_err(|_|AccountPasswordLoginError::StorageUnavailable)?};
                     let _encoded=Zeroizing::new(response.to_json().map_err(|_|AccountPasswordLoginError::StorageUnavailable)?);
                     let digest=attempt_digest(response.attempt_id.as_bytes());
-                    if sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms) VALUES ($1,$2,$3,1,$4,$5,$6)")
+                    if sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms,purpose,browser_jkt) VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8)")
                         .bind(digest.as_slice()).bind(origin_digest(origin).as_slice()).bind(&request.username).bind(salt.as_slice())
-                        .bind(now).bind(expires).execute(&mut *tx).await?.rows_affected()!=1 {
+                        .bind(now).bind(expires).bind(i64::from(browser_jkt.is_some())).bind(browser_jkt).execute(&mut *tx).await?.rows_affected()!=1 {
                         return Err(AccountPasswordLoginError::StorageUnavailable);
                     }
                     require_live($now(&mut tx).await?,expires,deadline)?;
@@ -280,7 +286,7 @@ macro_rules! password_store {
                     };
                     let digest=attempt_digest(request.attempt_id.as_bytes());
                     let length=$length;
-                    let row=sqlx::query(&format!("SELECT CASE WHEN {length}(origin_digest)=32 THEN origin_digest END AS origin_digest,CASE WHEN {length}(username)<=64 THEN username END AS username,password_profile,CASE WHEN {length}(password_salt)=16 THEN password_salt END AS password_salt,issued_at_ms,expires_at_ms FROM account_password_attempts WHERE attempt_digest=$1"))
+                    let row=sqlx::query(&format!("SELECT CASE WHEN {length}(origin_digest)=32 THEN origin_digest END AS origin_digest,CASE WHEN {length}(username)<=64 THEN username END AS username,password_profile,CASE WHEN {length}(password_salt)=16 THEN password_salt END AS password_salt,issued_at_ms,expires_at_ms FROM account_password_attempts WHERE attempt_digest=$1 AND purpose=0 AND browser_jkt IS NULL"))
                         .bind(digest.as_slice()).fetch_optional(&mut *tx).await?;
                     let Some(row)=row else {
                         $audit(&mut tx,endpoint,source,AccountEntryFailureReason::AuthenticationDenied,&[]).await?;

@@ -119,11 +119,13 @@ self-hosted server, host agent, administration CLI, and web console.
   Actual HTTP lifecycle coverage reaches ordinary Device authentication and same-Account
   K-4/session reads on both databases. The schema has no Account active/suspended state; that
   enforcement and complete identity acceptance remain independent gaps.
-  Worker refresh retirement is atomic across device and Operator state: each heartbeat examines
+  Worker refresh retirement is atomic across Device, Operator and Account-browser state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;
   every unexpired family and spent digest, including revoked families, remains intact. Ordinary
-  shutdown can cancel blocked maintenance. Logs contain only confirmed counts and fixed errors.
+  shutdown can cancel blocked maintenance. Browser access cleanup removes at most 256 expired
+  digests independently, and a family cannot cascade-delete access records before their original
+  expiry. Logs contain only confirmed counts and fixed errors.
   Enrolled devices can read their complete signed certificate/revocation snapshot with current
   admission checked in the same account transaction. Every statement is verified before
   disclosure; inactive peer rows do not silently filter the signed set, and invalid or
@@ -132,8 +134,8 @@ self-hosted server, host agent, administration CLI, and web console.
   pairing production modules, routes, privileges and worker cleanup are removed. Their historical
   migrations and tables remain untouched and unused by runtime. Existing Device authentication
   and Personal sync continue. Complete password-account acceptance remains incomplete.
-  Account-owned team creation and current-membership discovery use the same enrolled Device
-  boundary, independently of asset authorization. Explicit creation policy defaults to closed;
+  Account-owned team creation and current-membership discovery use a current enrolled Device
+  or a genuine Account-browser family, independently of asset authorization. Explicit creation policy defaults to closed;
   one transaction persists the team, sole initial owner, organization audit and 24-hour receipt.
   Exact confirmation requires current membership and preserves the original mutation. Bounded
   worker maintenance retires only expired receipts. Authentication and refresh include every
@@ -144,7 +146,7 @@ self-hosted server, host agent, administration CLI, and web console.
   do not write. Unconfirmed updates require an explicit read and reviewed edit, independently of
   original-key creation confirmation. Persisted custom policies and local Membership groups
   share the current Cedar graph with Organization asset authoring and per-object views.
-  Named-Account invitations and member transitions use current Device/Account admission,
+  Named-Account invitations and member transitions use current Account actor admission,
   current Cedar authority, fixed recipient and role-grant checks, conditional Resource ETags
   and audit-atomic transactions on both databases. Separate invitation passwords are verified
   through the shared digest profile with bounded matching-recipient attempts. Last-Owner
@@ -161,6 +163,15 @@ self-hosted server, host agent, administration CLI, and web console.
   no certificate, and exact confirmation rechecks authority without renewal. Public CA reads
   grant no inventory or connection access. Host CA, rotation, KRL and remote-signing workflows
   remain open. Shared vaults remain open.
+  Existing password Accounts have an independent same-origin browser authentication profile.
+  Bound attempts share native password budgets, while opaque access/refresh families, cookies,
+  scopes and current-session checks stay separate from Device and Operator authority. Browser
+  business mutations revalidate the genuine family and current tenant authority in their original
+  transaction. Host/HostGroup/AccessProfile/Route writers use that server-generated family UUID;
+  Inventory and Group/Policy receipts distinguish it from native Device bindings. Browser login
+  returns no encrypted Personal bootstrap, enrolled Device or certificate capability. The shared
+  fixed-profile password adapter runs in a one-use Worker. Production browser acceptance remains
+  an open roadmap outcome until the shipped-assets, dual-store and desktop-consumption checks pass.
   The Operator React console connects setup, fresh passkey sign-in and
   explicit server sign out through the generated public API contract. Its proof key
   and access token stay in memory; reloads require a new login. Manifest-validated static assets fail independently of

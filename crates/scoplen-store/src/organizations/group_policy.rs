@@ -2,9 +2,9 @@
 //! Current-tenant local groups and validated persisted Cedar policies.
 
 use super::{
-    CurrentPrincipal, OrganizationStoreError as Error, PostgresStore, SqliteStore, Uuid,
-    append_audit_event_in_postgres_transaction, append_audit_event_in_transaction, check_identity,
-    now_ms, postgres_principal, sqlite_principal, timestamp,
+    OrganizationPrincipal, OrganizationStoreError as Error, PostgresStore, SqliteStore, Uuid,
+    actor_audit, append_audit_event_in_postgres_transaction, append_audit_event_in_transaction,
+    now_ms, postgres_actor, sqlite_actor, timestamp,
 };
 use scoplen_api::{
     group_policy::{
@@ -279,7 +279,7 @@ macro_rules! controls {
             /// Read a current Group or Policy through current tenant Cedar authority.
             /// # Errors
             /// Missing tenant membership and foreign ids share the fixed `NotFound` result.
-            pub async fn read_organization_control(&self,expected:&CurrentPrincipal,expires_at:u64,target:ControlTarget)->Result<ControlResource,Error> {
+            pub async fn read_organization_control(&self,expected: &impl OrganizationPrincipal,expires_at:u64,target:ControlTarget)->Result<ControlResource,Error> {
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,target.organization,false).await?;
                 let graph=Self::inventory_graph(&mut tx,current,now_ms()?).await?;
@@ -287,14 +287,14 @@ macro_rules! controls {
                     || (target.kind==ControlKind::Group&&graph.authorize("manage_members","Organization",target.organization)?);
                 if !can_read{return Err(Error::PermissionDenied);}
                 let value=Self::control_resource(&mut tx,target).await?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;Ok(value)
             }
 
             /// Read one authorized live, ascending and complete-body bounded page.
             /// # Errors
             /// Current identity, membership, policy, query and storage errors fail closed.
-            pub async fn list_organization_control(&self,expected:&CurrentPrincipal,expires_at:u64,organization:Uuid,kind:ControlKind,query:OrganizationListQuery)->Result<ControlPage,Error> {
+            pub async fn list_organization_control(&self,expected: &impl OrganizationPrincipal,expires_at:u64,organization:Uuid,kind:ControlKind,query:OrganizationListQuery)->Result<ControlPage,Error> {
                 query.validate().map_err(|_|Error::InvalidRequest)?;
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,organization,false).await?;
@@ -310,7 +310,7 @@ macro_rules! controls {
                     if page.to_json().is_err(){page.items.pop();page.next_cursor=page.items.last().map(ControlResource::id);if page.items.is_empty(){return Err(Error::StorageUnavailable);}break;}
                 }
                 page.to_json().map_err(|_|Error::StorageUnavailable)?;
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await?;Ok(page)
             }
 
@@ -318,7 +318,7 @@ macro_rules! controls {
             /// # Errors
             /// Returns fixed current authority, precondition, reference or storage errors.
             #[allow(clippy::too_many_lines)]
-            pub async fn write_organization_control(&self,expected:&CurrentPrincipal,expires_at:u64,origin:&str,target:ControlTarget,write:ControlWrite<'_>)->Result<ControlWriteResult,Error> {
+            pub async fn write_organization_control(&self,expected: &impl OrganizationPrincipal,expires_at:u64,origin:&str,target:ControlTarget,write:ControlWrite<'_>)->Result<ControlWriteResult,Error> {
                 scoplen_model::validate_uuid_v7(target.id).map_err(|_|Error::InvalidRequest)?;
                 let mut tx=self.pool.begin_with($begin).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,target.organization,true).await?;
@@ -333,15 +333,17 @@ macro_rules! controls {
                         if fields.kind()!=target.kind{return Err(Error::InvalidRequest);}
                         let canonical=fields.canonical(target.id)?;
                         let mut hash=Sha256::new();
-                        for part in [b"spl-organization-control-create-v1".as_slice(),origin.as_bytes(),expected.account_id.as_slice(),expected.device_id.as_slice(),b"POST",format!("/api/v1/orgs/{}/{}",target.organization,target.kind.segment()).as_bytes()] {hash.update(part);hash.update([0]);}
+                        for part in [b"spl-organization-control-create-v1".as_slice(),origin.as_bytes(),expected.account_id().as_slice()] {hash.update(part);hash.update([0]);}
+                        if let Some(kind)=expected.receipt_writer_kind() {hash.update(kind);hash.update([0]);}
+                        for part in [expected.writer_id().as_slice(),b"POST",format!("/api/v1/orgs/{}/{}",target.organization,target.kind.segment()).as_bytes()] {hash.update(part);hash.update([0]);}
                         hash.update(canonical);let digest:[u8;32]=hash.finalize().into();
                         Self::control_references(&mut tx,target.organization,fields).await?;
-                        let stored=sqlx::query("SELECT request_digest,response_json FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms>$3").bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?;
+                        let stored=sqlx::query("SELECT request_digest,response_json FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms>$3").bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?;
                         if let Some(row)=stored {
                             if row.try_get::<Vec<u8>,_>("request_digest")?.as_slice()!=digest {return Err(Error::Conflict);}
                             let retained=ControlResource::decode(target.kind,&row.try_get::<Vec<u8>,_>("response_json")?)?;
                             if retained.id()!=target.id{return Err(Error::StorageUnavailable);}
-                            check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                            $principal(&mut tx, expected, expires_at).await?;
                             tx.commit().await?;return Ok(ControlWriteResult{resource:Some(retained),changed:false});
                         }
                         let used=sqlx::query_scalar::<_,Vec<u8>>(&format!("SELECT id FROM {} WHERE organization_id=$1 AND id=$2",target.kind.table())).bind(org).bind(id).fetch_optional(&mut *tx).await?;
@@ -355,7 +357,7 @@ macro_rules! controls {
                         if matches!(&current,ControlResource::Group(value) if value.source!=GroupSource::Local){return Err(Error::PermissionDenied);}
                         if current.etag()!=if_match{return Err(Error::PreconditionFailed);}
                         Self::control_references(&mut tx,target.organization,fields).await?;
-                        if current.fields().canonical(target.id)?==fields.canonical(target.id)? {check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;tx.commit().await?;return Ok(ControlWriteResult{resource:Some(current),changed:false});}
+                        if current.fields().canonical(target.id)?==fields.canonical(target.id)? {$principal(&mut tx, expected, expires_at).await?;tx.commit().await?;return Ok(ControlWriteResult{resource:Some(current),changed:false});}
                         (Some(current),Some(fields.clone()))
                     }
                     ControlWrite::Delete{if_match}=>{
@@ -389,30 +391,24 @@ macro_rules! controls {
                     if let Some(ControlResource::Group(value))=&resource {for member in &value.fields.members {sqlx::query("INSERT INTO organization_group_members (organization_id,group_id,membership_id) VALUES ($1,$2,$3)").bind(org).bind(id).bind(member.as_bytes().as_slice()).execute(&mut *tx).await?;}}
                 }
                 Self::team_revision(&mut tx,target.organization,now).await?;
-                let event=serde_json::to_vec(&serde_json::json!({"action":format!("organization.{}_{}",target.kind.segment(),if resource.is_none(){"deleted"}else if receipt.is_some(){"created"}else{"updated"}),"account_id":Uuid::from_bytes(expected.account_id),"device_id":Uuid::from_bytes(expected.device_id),"organization_id":target.organization,"object_id":target.id})).map_err(|_|Error::StorageUnavailable)?;
+                let event=actor_audit(expected,serde_json::json!({"action":format!("organization.{}_{}",target.kind.segment(),if resource.is_none(){"deleted"}else if receipt.is_some(){"created"}else{"updated"}),"account_id":Uuid::from_bytes(expected.account_id()),"organization_id":target.organization,"object_id":target.id}))?;
                 $audit(&mut tx,target.organization.into_bytes(),&event,now).await.map_err(|_|Error::StorageUnavailable)?;
                 if let Some((key,digest))=receipt {
-                    sqlx::query("DELETE FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms<=$3").bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
-                    sqlx::query("INSERT INTO organization_inventory_receipts (account_id,idempotency_key,organization_id,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(expected.account_id.as_slice()).bind(key.as_bytes().as_slice()).bind(org).bind(digest.as_slice()).bind(resource.as_ref().ok_or(Error::StorageUnavailable)?.to_json().map_err(|_|Error::StorageUnavailable)?).bind(now).bind(now.checked_add(86_400_000).ok_or(Error::StorageUnavailable)?).execute(&mut *tx).await?;
+                    sqlx::query("DELETE FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms<=$3").bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
+                    sqlx::query("INSERT INTO organization_inventory_receipts (account_id,idempotency_key,organization_id,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)").bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(org).bind(digest.as_slice()).bind(resource.as_ref().ok_or(Error::StorageUnavailable)?.to_json().map_err(|_|Error::StorageUnavailable)?).bind(now).bind(now.checked_add(86_400_000).ok_or(Error::StorageUnavailable)?).execute(&mut *tx).await?;
                 }
-                check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|if receipt.is_some(){Error::CommitOutcomeUnknown}else{Error::UpdateCommitOutcomeUnknown})?;
                 Ok(ControlWriteResult{resource,changed:true})
             }
         }
     };
 }
-controls!(
-    SqliteStore,
-    Sqlite,
-    "BEGIN IMMEDIATE",
-    sqlite_principal,
-    append_audit_event_in_transaction
-);
+controls!(SqliteStore, Sqlite, "BEGIN IMMEDIATE", sqlite_actor, append_audit_event_in_transaction);
 controls!(
     PostgresStore,
     Postgres,
     "BEGIN",
-    postgres_principal,
+    postgres_actor,
     append_audit_event_in_postgres_transaction
 );

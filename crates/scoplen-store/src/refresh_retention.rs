@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Bounded retirement of expired device and independent Operator refresh credentials.
+//! Bounded retirement of expired Device, Operator and Account-browser credentials.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -22,6 +22,12 @@ pub struct RefreshCleanupReport {
     pub operator_tokens: u64,
     /// Empty expired Operator families removed, at most 16.
     pub operator_families: u64,
+    /// Expired Account-browser access digests removed, at most 256.
+    pub account_browser_access: u64,
+    /// Expired Account-browser refresh digests removed, at most 256.
+    pub account_browser_refresh: u64,
+    /// Empty expired Account-browser families removed, at most 16.
+    pub account_browser_families: u64,
 }
 
 /// Fixed, content-free refresh-retention failures.
@@ -54,6 +60,7 @@ fn now_ms() -> Result<i64, RefreshCleanupError> {
 enum PrincipalKind {
     Device,
     Operator,
+    AccountBrowser,
 }
 
 impl PrincipalKind {
@@ -61,6 +68,7 @@ impl PrincipalKind {
         match self {
             Self::Device => ("device_refresh_families", "device_refresh_tokens"),
             Self::Operator => ("operator_refresh_families", "operator_refresh_tokens"),
+            Self::AccountBrowser => ("account_browser_families", "account_browser_refresh_tokens"),
         }
     }
 }
@@ -107,9 +115,12 @@ macro_rules! retention_store {
                     }
                     // Deleting only empty families makes ON DELETE CASCADE unable to bypass
                     // the digest-row budget, even for a heavily rotated expired family.
+                    let retained_access = if matches!(kind, PrincipalKind::AccountBrowser) {
+                        " AND NOT EXISTS (SELECT 1 FROM account_browser_access_tokens WHERE family_id=$1)"
+                    } else { "" };
                     removed_families += sqlx::query::<$db>(&format!(
                         "DELETE FROM {families} WHERE family_id=$1 AND expires_at_ms <= $2 \
-                         AND NOT EXISTS (SELECT 1 FROM {tokens} WHERE family_id=$1)"
+                         AND NOT EXISTS (SELECT 1 FROM {tokens} WHERE family_id=$1){retained_access}"
                     ))
                     .bind(&family)
                     .bind(now)
@@ -131,11 +142,19 @@ macro_rules! retention_store {
                         retire(&mut tx, PrincipalKind::Device, &clock).await?;
                     let (operator_tokens, operator_families) =
                         retire(&mut tx, PrincipalKind::Operator, &clock).await?;
+                    let account_browser_access = sqlx::query::<$db>(
+                        "DELETE FROM account_browser_access_tokens WHERE token_digest IN (SELECT token_digest FROM account_browser_access_tokens WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 256) AND expires_at_ms<=$1",
+                    ).bind(clock()?).execute(&mut *tx).await?.rows_affected();
+                    let (account_browser_refresh, account_browser_families) =
+                        retire(&mut tx, PrincipalKind::AccountBrowser, &clock).await?;
                     Ok::<_, RefreshCleanupError>(RefreshCleanupReport {
                         device_tokens,
                         device_families,
                         operator_tokens,
                         operator_families,
+                        account_browser_access,
+                        account_browser_refresh,
+                        account_browser_families,
                     })
                 }
                 .await;
@@ -157,11 +176,12 @@ macro_rules! retention_store {
         }
 
         impl $store {
-            /// Retire one bounded batch of expired device and Operator refresh credentials.
+            /// Retire one bounded batch of expired Device, Operator and Account-browser credentials.
             ///
             /// Each principal kind examines at most 16 expired families and removes at most
             /// 256 digests and 16 empty families. All unexpired families, including revoked
-            /// families and spent digests, remain intact. Both kinds commit atomically.
+            /// families and spent digests, remain intact. Account-browser access digests are
+            /// retained through their original expiry. All three kinds commit atomically.
             ///
             /// # Errors
             /// Returns a fixed storage, clock or unconfirmed-commit error. Counts are returned
@@ -262,6 +282,7 @@ mod tests {
                 device_families: 1,
                 operator_tokens: 1,
                 operator_families: 1,
+                ..RefreshCleanupReport::default()
             }
         );
         store.pool().close().await;

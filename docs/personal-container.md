@@ -279,7 +279,9 @@ The check also archives the pinned server revision
 server binaries into a disposable image with the current check's runtime files. That revision
 precedes the `20261024040000` configurable-limit and `20261025000000` durable write-admission
 SQLite migrations. The recovery anchor remains `20261024030000`; the current-image check follows
-the latest migration and verifies both new admission tables and the initial clock watermark.
+the latest migration and verifies the new admission, Organization inventory, user-CA and
+Account-browser tables, plus the initial admission-clock watermark. The standalone old-schema
+snapshot must exclude those tables.
 The old image starts a real Personal volume;
 the check seeds committed organization and sync-object rows and an object file, then starts the
 current image against that volume while the seeding SQLite connection keeps its committed WAL

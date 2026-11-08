@@ -38,6 +38,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 mod admission;
+mod browser;
 mod password;
 
 use crate::{
@@ -115,6 +116,7 @@ fn routes() -> Router<Arc<EntryState>> {
         )
         .merge(admission::routes())
         .merge(password::routes())
+        .merge(browser::routes())
 }
 
 impl AuthBackend {

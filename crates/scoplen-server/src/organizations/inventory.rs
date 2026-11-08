@@ -22,7 +22,7 @@ use scoplen_api::{
     sync::SyncOrganizationViewQuery,
 };
 use scoplen_store::organizations::{
-    OrganizationStoreError,
+    OrganizationPrincipal as _, OrganizationStoreError,
     inventory::{InventoryTarget, InventoryWrite},
 };
 use uuid::Uuid;
@@ -102,7 +102,7 @@ async fn handle(
         return response;
     }
     let (principal, expires_at) = match state
-        .auth
+        .account_auth
         .authenticate_request(operation, &parts.method, &parts.uri, &parts.headers)
         .await
     {
@@ -125,7 +125,7 @@ async fn handle(
             &state,
             endpoint,
             peer.ip(),
-            Some(Uuid::from_bytes(principal.account_id)),
+            Some(Uuid::from_bytes(principal.account_id())),
             &id,
         )
         .await

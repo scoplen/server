@@ -2603,9 +2603,163 @@ const ACCOUNT_REQUEST_CHALLENGES: TableSpec = TableSpec {
     }],
 };
 
+const ACCOUNT_BROWSER_FAMILIES: TableSpec = TableSpec {
+    name: "account_browser_families",
+    columns: &[
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential_generation",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "dpop_jkt",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trusted_origin",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "scope", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "revoked_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[
+        IndexSpec { name: "account_browser_families_expiry", columns: &["expires_at_ms"] },
+        IndexSpec {
+            name: "account_browser_families_account",
+            columns: &["account_id", "expires_at_ms"],
+        },
+    ],
+};
+
+const ACCOUNT_BROWSER_ACCESS_TOKENS: TableSpec = TableSpec {
+    name: "account_browser_access_tokens",
+    columns: &[
+        ColumnSpec {
+            name: "token_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "family_id",
+        target_table: "account_browser_families",
+        target_column: "family_id",
+    }],
+    indexes: &[
+        IndexSpec { name: "account_browser_access_expiry", columns: &["expires_at_ms"] },
+        IndexSpec { name: "account_browser_access_family", columns: &["family_id"] },
+    ],
+};
+
+const ACCOUNT_BROWSER_REFRESH_TOKENS: TableSpec = TableSpec {
+    name: "account_browser_refresh_tokens",
+    columns: &[
+        ColumnSpec {
+            name: "token_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "issued_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "spent_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "family_id",
+        target_table: "account_browser_families",
+        target_column: "family_id",
+    }],
+    indexes: &[IndexSpec { name: "account_browser_refresh_family", columns: &["family_id"] }],
+};
+
 const ACCOUNT_PASSWORD_ATTEMPTS: TableSpec = TableSpec {
     name: "account_password_attempts",
     columns: &[
+        ColumnSpec {
+            name: "purpose",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "browser_jkt",
+            kind: LogicalType::Text,
+            nullable: true,
+            primary_key: false,
+        },
         ColumnSpec {
             name: "attempt_digest",
             kind: LogicalType::Bytes,
@@ -3224,6 +3378,9 @@ const ORGANIZATION_USER_CERTIFICATES: TableSpec = TableSpec {
 };
 
 const TABLES: &[TableSpec] = &[
+    ACCOUNT_BROWSER_FAMILIES,
+    ACCOUNT_BROWSER_ACCESS_TOKENS,
+    ACCOUNT_BROWSER_REFRESH_TOKENS,
     ORGANIZATION_USER_CAS,
     ORGANIZATION_USER_CERTIFICATES,
     ORGANIZATION_INVENTORY_VAULTS,
@@ -3778,6 +3935,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261103000000_organization_user_ca.sql");
     const POSTGRES_ORGANIZATION_USER_CA: &str =
         include_str!("../migrations/postgres/20261103000000_organization_user_ca.sql");
+    const SQLITE_ACCOUNT_BROWSER: &str =
+        include_str!("../migrations/sqlite/20261108000000_account_browser.sql");
+    const POSTGRES_ACCOUNT_BROWSER: &str =
+        include_str!("../migrations/postgres/20261108000000_account_browser.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -3833,6 +3994,7 @@ mod tests {
             SQLITE_TEAM_LIFECYCLE,
             SQLITE_ORGANIZATION_INVENTORY,
             SQLITE_ORGANIZATION_USER_CA,
+            SQLITE_ACCOUNT_BROWSER,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -3868,6 +4030,7 @@ mod tests {
             POSTGRES_TEAM_LIFECYCLE,
             POSTGRES_ORGANIZATION_INVENTORY,
             POSTGRES_ORGANIZATION_USER_CA,
+            POSTGRES_ACCOUNT_BROWSER,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
@@ -3898,6 +4061,106 @@ mod tests {
         store.pool().close().await;
         drop(store);
         remove_test_directory(directory).await;
+    }
+
+    #[tokio::test]
+    async fn browser_migration_preserves_native_attempts_and_requires_browser_key_binding() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("owned migration database");
+        for migration in
+            crate::SQLITE_MIGRATIONS.iter().filter(|item| item.version < 20_261_108_000_000)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.expect("preceding migration");
+        }
+        sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms) VALUES ($1,$2,'native-test',1,$3,1,120001)")
+            .bind([1_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+            .execute(&pool).await.expect("retained native attempt");
+        sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (1,1,$1,0,29,0,1,600001)")
+            .bind([127_u8,0,0,1].as_slice()).execute(&pool).await.expect("retained admission debt");
+        sqlx::raw_sql(SQLITE_ACCOUNT_BROWSER).execute(&pool).await.expect("browser migration");
+        let retained: (i64, Option<String>) = sqlx::query_as(
+            "SELECT purpose,browser_jkt FROM account_password_attempts WHERE attempt_digest=$1",
+        )
+        .bind([1_u8; 32].as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("retained binding");
+        assert_eq!(retained, (0, None));
+        let debt: i64 =
+            sqlx::query_scalar("SELECT attempts FROM account_entry_admission WHERE endpoint=1")
+                .fetch_one(&pool)
+                .await
+                .expect("retained admission debt");
+        assert_eq!(debt, 29);
+        for (purpose, key) in [(1, None), (0, Some("A".repeat(43))), (1, Some("short".into()))] {
+            let result = sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms,purpose,browser_jkt) VALUES ($1,$2,'browser-test',1,$3,1,120001,$4,$5)")
+                .bind([4_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+                .bind(purpose).bind(key).execute(&pool).await;
+            assert!(result.is_err(), "invalid native/browser binding must fail");
+        }
+        sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms,purpose,browser_jkt) VALUES ($1,$2,'browser-test',1,$3,1,120001,1,$4)")
+            .bind([4_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+            .bind("A".repeat(43)).execute(&pool).await.expect("browser-bound attempt");
+        pool.close().await;
+    }
+
+    #[cfg(feature = "postgres-integration")]
+    #[tokio::test]
+    async fn postgres_browser_migration_preserves_native_attempts_and_admission_debt() {
+        let database = std::env::var("SCOPLEN_TEST_DATABASE_URL").expect("PostgreSQL fixture URL");
+        let owner = sqlx::PgPool::connect(&database).await.expect("owned PostgreSQL pool");
+        let schema = format!("account_browser_upgrade_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&owner)
+            .await
+            .expect("isolated migration schema");
+        let mut url = url::Url::parse(&database).expect("database URL");
+        url.query_pairs_mut().append_pair("options", &format!("-csearch_path={schema}"));
+        let pool = sqlx::PgPool::connect(url.as_str()).await.expect("isolated PostgreSQL pool");
+        for migration in
+            crate::POSTGRES_MIGRATIONS.iter().filter(|item| item.version < 20_261_108_000_000)
+        {
+            sqlx::raw_sql(&migration.sql).execute(&pool).await.expect("preceding migration");
+        }
+        sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms) VALUES ($1,$2,'native-test',1,$3,1,120001)")
+            .bind([1_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+            .execute(&pool).await.expect("retained native attempt");
+        sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (1,1,$1,0,29,0,1,600001)")
+            .bind([127_u8,0,0,1].as_slice()).execute(&pool).await.expect("retained admission debt");
+        sqlx::raw_sql(POSTGRES_ACCOUNT_BROWSER).execute(&pool).await.expect("browser migration");
+        let retained: (i64, Option<String>) = sqlx::query_as(
+            "SELECT purpose,browser_jkt FROM account_password_attempts WHERE attempt_digest=$1",
+        )
+        .bind([1_u8; 32].as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("retained binding");
+        assert_eq!(retained, (0, None));
+        let debt: i64 =
+            sqlx::query_scalar("SELECT attempts FROM account_entry_admission WHERE endpoint=1")
+                .fetch_one(&pool)
+                .await
+                .expect("retained admission debt");
+        assert_eq!(debt, 29);
+        for (purpose, key) in [(1_i64, None), (0, Some("A".repeat(43))), (1, Some("short".into()))]
+        {
+            let result = sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms,purpose,browser_jkt) VALUES ($1,$2,'browser-test',1,$3,1,120001,$4,$5)")
+                .bind([4_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+                .bind(purpose).bind(key).execute(&pool).await;
+            assert!(result.is_err(), "invalid native/browser binding must fail");
+        }
+        sqlx::query("INSERT INTO account_password_attempts (attempt_digest,origin_digest,username,password_profile,password_salt,issued_at_ms,expires_at_ms,purpose,browser_jkt) VALUES ($1,$2,'browser-test',1,$3,1,120001,1,$4)")
+            .bind([4_u8; 32].as_slice()).bind([2_u8; 32].as_slice()).bind([3_u8; 16].as_slice())
+            .bind("A".repeat(43)).execute(&pool).await.expect("browser-bound attempt");
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&owner)
+            .await
+            .expect("remove owned migration schema");
+        owner.close().await;
     }
 
     #[cfg(feature = "postgres-integration")]

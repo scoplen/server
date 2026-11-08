@@ -17,8 +17,9 @@ use tokio::{fs::File, io::AsyncReadExt};
 
 const MAX_MANIFEST_BYTES: usize = 65_536;
 const MAX_ASSET_BYTES: usize = 2 * 1024 * 1024;
+const MAX_WASM_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
+const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types scoplen-browser-worker";
 const UNAVAILABLE: &str = "The Scoplen console is unavailable. Build it with pnpm --dir web/console build and configure console.assets_dir (SPL_CONSOLE_ASSETS_DIR) to the shipped dist directory. Public APIs remain available.\n";
 
 #[derive(Deserialize)]
@@ -61,7 +62,9 @@ pub(crate) async fn router(directory: &Path, api_enabled: bool) -> Router {
     };
     Router::new()
         .route("/", get(entry))
+        .route("/operator", get(entry))
         .route("/setup", get(entry))
+        .route("/join-team", get(entry))
         .route("/assets/{name}", get(asset))
         .with_state(assets)
 }
@@ -118,6 +121,7 @@ fn content_type(path: &str) -> Option<&'static str> {
         "js" => Some("text/javascript; charset=utf-8"),
         "css" => Some("text/css; charset=utf-8"),
         "woff2" => Some("font/woff2"),
+        "wasm" => Some("application/wasm"),
         _ => None,
     }
 }
@@ -155,10 +159,20 @@ async fn load(directory: &Path) -> Result<BTreeMap<String, Asset>, &'static str>
     }
     let mut files = BTreeMap::new();
     let mut total = 0;
+    let mut wasm_modules = 0;
     for asset in manifest.assets {
         let content_type = content_type(&asset.path).ok_or("invalid asset path")?;
+        let maximum = if content_type == "application/wasm" {
+            wasm_modules += 1;
+            if wasm_modules > 1 {
+                return Err("console contains multiple WebAssembly modules");
+            }
+            MAX_WASM_BYTES
+        } else {
+            MAX_ASSET_BYTES
+        };
         if asset.bytes == 0
-            || asset.bytes > MAX_ASSET_BYTES
+            || asset.bytes > maximum
             || files.contains_key(&asset.path)
             || asset.sha256.len() != 64
             || !asset
