@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Compare parsed Resource timestamps in team-name HTTP checks so variable RFC 3339 fractional
+  precision preserves the existing nondecreasing-time assertion.
+
 - Restore GitHub Actions parsing for the complete PostgreSQL schema command and align the
   Personal-container probe with the current pinned Node stage, bounded WebAssembly assets and
   license. Keep the ordinary HTTPS response budget while admitting the module's existing limit.

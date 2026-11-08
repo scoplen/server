@@ -175,7 +175,11 @@ async fn contract(mut f: Fixture) {
     assert_eq!(updated.id, original.id);
     assert_eq!(updated.membership, original.membership);
     assert_eq!(updated.created_at, original.created_at);
-    assert!(updated.updated_at >= original.updated_at);
+    let timestamp = |value: &str| {
+        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+            .expect("Resource timestamp")
+    };
+    assert!(timestamp(&updated.updated_at) >= timestamp(&original.updated_at));
     assert_ne!(updated.etag, original.etag);
     assert_eq!(updated.name, "Production");
     assert_eq!(
