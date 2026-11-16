@@ -23,8 +23,10 @@ import { InvitationPanel, type InvitationHandle } from "./invitation-view.tsx";
 import type { InvitationCrypto, JoinTarget } from "./invitation.ts";
 import { SimpleRuleEditor, type RuleGenerator } from "./rule-editor.tsx";
 import { requestFeedback } from "./feedback.ts";
+import { AuditPanel } from "./audit-view.tsx";
 
-type Section = CollectionKind | "members" | "invitations" | "settings" | "join";
+type Section =
+  CollectionKind | "members" | "invitations" | "audit" | "settings" | "join";
 type Catalog = { [K in CollectionKind]: ResourcesByKind[K][] };
 const emptyCatalog = (): Catalog => ({
   hosts: [],
@@ -128,6 +130,7 @@ export function TeamWorkspace({
     policies: t("Access rules", "访问规则"),
     members: t("Members", "成员"),
     invitations: t("Invitations", "邀请"),
+    audit: t("Audit", "审计"),
     settings: t("Team settings", "团队设置"),
     join: t("Join a team", "加入团队"),
   };
@@ -246,7 +249,7 @@ export function TeamWorkspace({
     setTeamNext(page.next_cursor);
   }
   async function load(target: Section, selected = team, append = false) {
-    if (target === "join" || !selected) return;
+    if (target === "join" || target === "audit" || !selected) return;
     const cursor = append ? (next ?? undefined) : undefined;
     if (target === "settings") {
       const current = await api.organization(selected.id);
@@ -593,6 +596,7 @@ export function TeamWorkspace({
                     "invitations",
                     "groups",
                     "policies",
+                    "audit",
                     "settings",
                   ] as Section[]
                 ).map((item) => (
@@ -631,15 +635,19 @@ export function TeamWorkspace({
               </h1>
             </div>
             <div className="inline-actions">
-              {team && section !== "join" && !editor && !createTeam && (
-                <button
-                  className="secondary"
-                  disabled={disabled}
-                  onClick={() => void run(() => load(section))}
-                >
-                  {t("Refresh view", "刷新当前列表")}
-                </button>
-              )}
+              {team &&
+                section !== "join" &&
+                section !== "audit" &&
+                !editor &&
+                !createTeam && (
+                  <button
+                    className="secondary"
+                    disabled={disabled}
+                    onClick={() => void run(() => load(section))}
+                  >
+                    {t("Refresh view", "刷新当前列表")}
+                  </button>
+                )}
               {team &&
                 kinds.includes(section as CollectionKind) &&
                 !editor &&
@@ -834,6 +842,22 @@ export function TeamWorkspace({
                 </p>
               )}
             </div>
+          ) : section === "audit" ? (
+            session.busy || session.blocked || session.expired ? (
+              <p className="notice" role="status">
+                {t(
+                  "Audit is unavailable while this session is ending or expired. Sign in again to continue.",
+                  "会话正在结束或已过期，审计内容已隐藏。请重新登录以继续。",
+                )}
+              </p>
+            ) : (
+              <AuditPanel
+                key={team.id}
+                transport={api.transport}
+                organization={team.id}
+                disabled={busy || session.busy}
+              />
+            )
           ) : editor ? (
             <>
               <h2>
@@ -1428,6 +1452,7 @@ export function TeamWorkspace({
             !editor &&
             !createTeam &&
             section !== "join" &&
+            section !== "audit" &&
             section !== "settings" && (
               <button
                 className="secondary load-more"

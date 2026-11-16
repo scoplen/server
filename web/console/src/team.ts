@@ -34,6 +34,7 @@ export interface RequestOptions {
   etag?: string;
   success?: number;
   maximum?: number;
+  decode?: (source: string) => unknown;
 }
 export interface ApiResponse {
   value: unknown;
