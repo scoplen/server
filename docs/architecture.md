@@ -34,6 +34,19 @@ This revision includes Account password, Device admission and Organization inven
 plus bounded immutable Organization audit queries and range verification. It removes retired
 Personal invitation/enrollment and pairing formats. Consuming these
 contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
+
+Organization audit reads reuse the transaction-current Account actor, active tenant/Membership
+and Cedar graph used by inventory. The exact `audit:read` operation map does not imply
+`view_audit`; only current policy grants it. List reads stream descending sequence positions,
+validate mandatory row metadata before shared AND filtering and retain unknown historical
+body metadata without changing hashed bytes. Range verification first admits the selected
+original-byte total, including its immediate predecessor, then streams at most 4,096 selected
+events. It validates sequence gaps, original-byte hashes/links and every included checkpoint
+with the verification key explicitly passed from the prepared independent audit signer.
+The current Organization read lock and final actor recheck bound both surfaces to the same
+authorized transaction. Responses report first failure or the highest included checkpoint and
+its uncovered suffix; no cursor, background verification job or result receipt is persisted.
+
 The server stores encrypted object envelopes
 without inspecting Credential fields. D-121 interactive SSH authentication belongs to
 `scoplen-ssh`, which this workspace does not consume. Server SSH execution and host-agent

@@ -32,6 +32,7 @@ use crate::{
     personal_sync::PersonalSyncAuthenticator,
 };
 
+mod audit;
 mod group_policy;
 mod inventory;
 mod team;
@@ -47,6 +48,7 @@ struct OrganizationState {
     notifications: scoplen_sync::notify::NotificationHub,
     read_limits: scoplen_api::sync::SyncReadLimits,
     kms: Arc<LocalKeyFile>,
+    audit_verification_key: [u8; 32],
 }
 
 pub(crate) fn router(
@@ -56,6 +58,7 @@ pub(crate) fn router(
     policy: OrganizationSettings,
     notifications: scoplen_sync::notify::NotificationHub,
     read_body_limits: scoplen_sync::http::ReadBodyLimits,
+    audit_verification_key: [u8; 32],
 ) -> Router {
     let auth = PersonalSyncAuthenticator::new(backend.clone(), kms.clone(), origin.clone());
     let account_auth = crate::account_actor::AccountActorAuthenticator::new(
@@ -72,6 +75,7 @@ pub(crate) fn router(
         .merge(inventory::routes())
         .merge(group_policy::routes())
         .merge(user_ca::routes())
+        .merge(audit::routes())
         .with_state(OrganizationState {
             backend,
             auth,
@@ -80,6 +84,7 @@ pub(crate) fn router(
             policy,
             notifications,
             kms,
+            audit_verification_key,
             read_limits: scoplen_api::sync::SyncReadLimits {
                 max_envelope_bytes: usize::try_from(read_body_limits.max_envelope_bytes())
                     .expect("validated read limits"),
@@ -395,6 +400,9 @@ fn resource_response(
 fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
     let (status, code, changed) = match error {
         OrganizationStoreError::InvalidRequest => return invalid(request_id),
+        OrganizationStoreError::AuditTooLarge => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "organization.invalid_request", false)
+        }
         OrganizationStoreError::AuthenticationRequired => {
             (StatusCode::UNAUTHORIZED, "auth.authentication_required", false)
         }

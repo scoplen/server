@@ -471,6 +471,14 @@ verifier. Unit credential stubs exercise only controller boundaries. Physical pa
 cross-browser authenticator interoperability, TLS deployment and release packaging require
 separate verification.
 
+The Account team console includes an Audit view for sessions with `audit:read` and current
+`view_audit`. It offers recorded-field search, sequence paging, event details and explicit
+contiguous range verification. Unknown historical metadata remains visibly unknown. The view
+separates a verified hash chain from included checkpoint coverage and identifies the unsigned
+suffix of the selected interval. Console controller tests, type/lint checks and production
+asset builds do not establish rendered Console or native desktop acceptance; those checks and
+the complete administration gates remain separate roadmap work.
+
 ## Development
 
 For independent Personal integration tests, build the registered
@@ -716,10 +724,33 @@ retains the original proof key/access token only for explicit confirmation befor
 Discarding local credentials does not confirm server sign out.
 
 Account-browser access is restricted to Account profile and the team administration, Host,
-HostGroup, AccessProfile, Route, Group and Policy routes described below. Protected business
+HostGroup, AccessProfile, Route, Group, Policy and read-only audit routes described below. Protected business
 requests use the opaque token and a token-bound fresh proof with `credentials: "omit"`.
 Every supplied Origin must match; mutations require it. Browser sessions cannot access Personal
 or Shared sync, Device/key APIs, CA administration or certificate issuance, and cannot execute SSH.
+
+`GET /api/v1/orgs/{org}/audit-events` reads the team's immutable audit timeline. Both enrolled
+Devices and Account-browser sessions need exact `audit:read`, current active membership and
+the current Cedar `view_audit` permission. Owner and Security auditor have built-in permits;
+Administrator, Approver and Member need an explicit policy. Existing refresh families keep
+their original scope ceilings; obtain a fresh Device exchange or password login for audit access.
+Pages use descending sequence positions, with at most 500 events and a continuation cursor
+only when another matching event exists. The finite AND filter supports recorded actor Account,
+primary resource, action, outcome and inclusive/exclusive millisecond time bounds. Historical
+unknown bodies remain events with unknown metadata. Reads disclose validated identifiers and
+stored hashes, without raw event bodies, account names or credentials, and never rewrite history.
+
+`GET /api/v1/orgs/{org}/audit-events/verify?from_sequence=1&to_sequence=10` verifies a contiguous
+interval against original event bytes, hash links and every included checkpoint using the
+deployment's independent audit key. Each request allows 4,096 selected events and 16 MiB of
+original bytes, including the immediate predecessor. Oversized requests return 413 without
+partial results. An integrity failure returns the first failed sequence and only the preceding
+verified count; storage failures return 503. Successful hash verification and checkpoint coverage
+are distinct: a range without an included checkpoint has no signature-coverage claim, even if
+it may have been checkpointed later. Adjacent verified ranges join only through equal boundary
+hashes. Neither GET accepts a body, `If-Match`, `Idempotency-Key` or cookie authentication; both
+require a fresh token-bound DPoP proof and return no-store/no-cache responses without cookies.
+Audit export and external archive verification remain separate work.
 
 `POST /api/v1/orgs`, `GET /api/v1/orgs` and `GET /api/v1/orgs/{org}` provide team creation and
 the caller Account's current active memberships on SQLite and PostgreSQL. Creation is disabled

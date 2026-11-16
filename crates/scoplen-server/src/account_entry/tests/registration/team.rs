@@ -111,6 +111,7 @@ impl Fixture {
             notifications,
             AccountSettings { registration_enabled: true, ..AccountSettings::default() },
             crate::OrganizationSettings { allow_creation: true },
+            crate::runtime::test_audit_verification_key(),
         )
     }
 

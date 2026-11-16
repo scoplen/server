@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add current-authorized Organization audit timeline and contiguous range-verification GETs
+  for enrolled Devices and Account-browser families on SQLite and PostgreSQL. Preserve original
+  bytes, project only registered safe metadata, and validate hash links and included checkpoints
+  against the independent deployment audit key within bounded read transactions. Distinguish
+  integrity failures, storage failures and interval-only signature coverage.
+  Add team Console search, paging, recorded-event details and explicit range verification with
+  separate hash-chain and checkpoint-coverage states. Rendered/native acceptance remains unverified.
+
 - Update protocol consumers and generated Console API bindings to the published immutable
   Organization audit query and bounded range-verification contracts.
 
