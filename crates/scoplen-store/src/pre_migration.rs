@@ -234,7 +234,7 @@ async fn write_snapshot(
     fs::remove_file(partial).map_err(|_| failed("snapshot staging removal"))
 }
 
-async fn verify_snapshot(path: &Path) -> Result<(), StoreError> {
+pub(crate) async fn verify_snapshot(path: &Path) -> Result<(), StoreError> {
     let options = SqliteConnectOptions::new().filename(path).read_only(true).immutable(true);
     let mut connection = SqliteConnection::connect_with(&options)
         .await

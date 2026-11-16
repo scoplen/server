@@ -296,8 +296,9 @@ Device, vault or operation-id collection, and never commits independently. Ordin
 deletion cannot cascade into the retained set. Maintenance quiesces new registration writers;
 audited ceiling increases preserve every digest. These storage methods grant no operator
 authorization and expose no new HTTP route. API preparation and the registration adapter compose
-them under the configured ceiling with aggregate capacity warnings. Complete backup/restore
-acceptance remains separate roadmap work.
+them under the configured ceiling with aggregate capacity warnings. [Offline deployment
+archives](operations.md) preserve this retained state with the SQLite database and local keys;
+scheduled, PostgreSQL and remote backup profiles remain separate roadmap work.
 
 Initial password Account persistence is a transaction-local storage prerequisite. The caller
 passes a validated public registration payload and trusted origin/time to the backend helper.

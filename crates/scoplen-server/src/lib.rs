@@ -7,6 +7,7 @@ mod account_actor;
 mod account_devices;
 mod account_entry;
 mod account_profile;
+pub mod backup;
 mod config;
 mod console;
 pub mod deployment_lease;
@@ -52,3 +53,6 @@ pub use runtime::{
 
 /// The server's current package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Full source revision supplied explicitly by the release or container build.
+pub const BUILD_REVISION: Option<&str> = option_env!("SCOPLEN_BUILD_REVISION");

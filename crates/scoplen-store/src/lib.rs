@@ -25,6 +25,7 @@ pub mod device_token_keys;
 pub mod jobs;
 pub mod kms;
 pub mod object_storage;
+pub mod offline;
 pub mod operator_admission;
 pub mod operator_sessions;
 pub mod operator_setup;

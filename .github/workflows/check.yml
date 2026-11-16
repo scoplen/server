@@ -7,6 +7,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SCOPLEN_BUILD_REVISION: ${{ github.sha }}
+
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
@@ -20,7 +23,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: a96b28a69d657e6b139597e9e051af41230919a7
+          ref: 15566c7d26ca178edd3631cf61996e7ec94884bd
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:

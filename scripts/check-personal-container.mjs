@@ -44,6 +44,12 @@ const failurePhases = new Set([
   "public Account password entry and encrypted sync",
   "team membership and Personal Host after restart",
   "restart and persistent setup/key verification",
+  "offline archive source and fresh volume",
+  "public encrypted archive creation",
+  "public encrypted archive verification",
+  "public encrypted archive restoration",
+  "restored archive data verification",
+  "restored Compose startup and persistent restart",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
@@ -68,6 +74,30 @@ export function assertTeamRestartAcceptance(receipt) {
     team_settings_restart_verified: true,
     team_account_isolation_restart_verified: true,
   });
+}
+
+export function assertBackupAcceptance(result, operation) {
+  const messages = {
+    create: "Backup created.",
+    verify: "Backup verified.",
+    restore: "Backup restored.",
+  };
+  assert(Object.hasOwn(messages, operation), "unknown backup operation");
+  assert.equal(
+    result.error ? result.error.code : 0,
+    0,
+    "backup command failed",
+  );
+  assert.equal(
+    result.stderr,
+    "",
+    "successful backup command has no diagnostic",
+  );
+  assert.equal(
+    result.stdout.replaceAll("\r\n", "\n").split("\n")[0],
+    messages[operation],
+    "backup command did not confirm its operation",
+  );
 }
 
 export function consoleProbeImage(dockerfile) {
@@ -528,6 +558,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
   const walHolder = `${project}-wal-holder`;
   const recoveryContainer = `${project}-recovery`;
   const recoveryVolume = `${project}_recovery`;
+  const archiveVolume = `${project}_archive`;
   let sequence = 0;
   let phase = "preflight";
   let succeeded = false;
@@ -708,12 +739,39 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     const emptyEnv = join(directory, "compose.env");
     const override = join(directory, "compose.override.json");
     await writeFile(emptyEnv, "", { flag: "wx", mode: 0o600 });
-    const overrideContent = (selectedImage) =>
+    const overrideContent = (selectedImage, restored = false) =>
       JSON.stringify({
         services: {
-          server: { image: selectedImage, labels: { [ownerLabel]: run } },
+          server: {
+            image: selectedImage,
+            labels: { [ownerLabel]: run },
+            ...(restored
+              ? {
+                  environment: {
+                    SPL_SERVER_DATA_DIR: "/var/lib/spl/restored",
+                    SPL_STORAGE_KMS_KEY_FILE: "/var/lib/spl/restored/kms.key",
+                    SPL_STORAGE_KMS_AUDIT_KEY_FILE:
+                      "/var/lib/spl/restored/audit-signing.key",
+                    SPL_STORAGE_OBJECT_DIRECTORY:
+                      "/var/lib/spl/restored/objects",
+                  },
+                  volumes: [
+                    {
+                      type: "volume",
+                      source: "archive",
+                      target: "/var/lib/spl",
+                    },
+                  ],
+                }
+              : {}),
+          },
         },
-        volumes: { data: { labels: { [ownerLabel]: run } } },
+        volumes: {
+          data: { labels: { [ownerLabel]: run } },
+          ...(restored
+            ? { archive: { external: true, name: archiveVolume } }
+            : {}),
+        },
         networks: { default: { labels: { [ownerLabel]: run } } },
       });
     await writeFile(override, overrideContent(image), {
@@ -776,6 +834,10 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     );
 
     progress("production image build");
+    const revision = (
+      await command("git", ["rev-parse", "HEAD"])
+    ).stdout.trim();
+    assert(/^[a-f0-9]{40}$/.test(revision), "full build revision unavailable");
     const build = await docker(
       [
         "build",
@@ -783,6 +845,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         `${ownerLabel}=${run}`,
         "--tag",
         image,
+        "--build-arg",
+        `SCOPLEN_BUILD_REVISION=${revision}`,
         "--progress",
         "plain",
         ".",
@@ -1018,8 +1082,6 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     await nodeProbe("check-data", ["--volumes-from", container], "65532:65532");
     progress("SQLite migration snapshot");
     await sqliteProbe("check-upgrade", ["--volumes-from", `${container}:ro`]);
-    await docker(["stop", "--time", "30", walHolderId]);
-    assert.equal((await inspect("container", walHolderId)).State.ExitCode, 0);
 
     progress("native doctor on production HTTPS");
     await doctor(true);
@@ -1176,6 +1238,153 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           0,
           "service restarted unexpectedly",
         );
+
+        progress("offline archive source and fresh volume");
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await sqliteProbe("check-archive-source", [
+          "--mount",
+          `type=volume,source=${project}_data,target=/source,readonly`,
+        ]);
+        await docker([
+          "volume",
+          "create",
+          "--label",
+          `${ownerLabel}=${run}`,
+          archiveVolume,
+        ]);
+        assertOwnedResource(
+          (await inspect("volume", archiveVolume)).Labels,
+          run,
+        );
+        await sqliteProbe(
+          "prepare-archive-parent",
+          ["--mount", `type=volume,source=${archiveVolume},target=/recovery`],
+          "0:0",
+        );
+        const archiveCommand = async (operation, args, source = false) => {
+          const result = await docker([
+            "run",
+            "--rm",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+            "--user",
+            "65532:65532",
+            "--label",
+            `${ownerLabel}=${run}`,
+            "--env",
+            "SPL_SERVER_PUBLIC_HOST=localhost",
+            "--env",
+            `SPL_SERVER_PUBLIC_PORT=${port}`,
+            "--mount",
+            `type=volume,source=${archiveVolume},target=/recovery`,
+            ...(source
+              ? [
+                  "--mount",
+                  `type=volume,source=${project}_data,target=/var/lib/spl`,
+                  "--mount",
+                  `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
+                ]
+              : []),
+            "--entrypoint",
+            "/app/splctl",
+            image,
+            "backup",
+            operation,
+            ...args,
+            "--passphrase-file",
+            "/recovery/passphrase.txt",
+          ]);
+          assertBackupAcceptance(result, operation);
+        };
+        progress("public encrypted archive creation");
+        await archiveCommand(
+          "create",
+          [
+            "--config",
+            "/etc/scoplen/personal.toml",
+            "--output",
+            "/recovery/backup.age",
+          ],
+          true,
+        );
+        await docker(["stop", "--time", "30", walHolderId]);
+        assert.equal(
+          (await inspect("container", walHolderId)).State.ExitCode,
+          0,
+        );
+        progress("public encrypted archive verification");
+        await archiveCommand("verify", ["--archive", "/recovery/backup.age"]);
+        progress("public encrypted archive restoration");
+        await archiveCommand("restore", [
+          "--archive",
+          "/recovery/backup.age",
+          "--data-dir",
+          "/recovery/restored",
+        ]);
+        progress("restored archive data verification");
+        await sqliteProbe("check-archive-restore", [
+          "--mount",
+          `type=volume,source=${project}_data,target=/source,readonly`,
+          "--mount",
+          `type=volume,source=${archiveVolume},target=/recovery,readonly`,
+        ]);
+
+        progress("restored Compose startup and persistent restart");
+        await writeFile(override, overrideContent(image, true));
+        await compose(["config", "--quiet"]);
+        await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+        container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+        assert(/^[a-f0-9]{12,64}$/.test(container));
+        const restoredService = await inspect("container", container);
+        assertOwnedResource(restoredService.Config.Labels, run, project);
+        assert.equal(restoredService.Image, imageId);
+        assert(
+          restoredService.Mounts.some(
+            (mount) =>
+              mount.Destination === "/var/lib/spl" &&
+              mount.Name === archiveVolume,
+          ),
+          "restored Compose service must mount the fresh parent volume",
+        );
+        const checkRestored = async () => {
+          const restoredDeadline = Date.now() + 60_000;
+          for (;;) {
+            try {
+              if ((await request(origin, "/readyz", ca)).status === 200) break;
+            } catch {}
+            assert(
+              Date.now() < restoredDeadline,
+              "restored production HTTPS readiness timed out",
+            );
+            await new Promise((accept) => setTimeout(accept, 500));
+          }
+          await doctor(true);
+          for (const [index, path] of paths.entries()) {
+            const response = await request(origin, path, ca);
+            assert.equal(response.status, 200);
+            assert.deepEqual(
+              response.body,
+              keys[index],
+              "restore changed a persisted token keyring",
+            );
+          }
+          assert.equal((await inspect("container", container)).RestartCount, 0);
+        };
+        await checkRestored();
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await compose(["up", "--detach", "--no-build"]);
+        await checkRestored();
         progress("team membership and Personal Host after restart");
       },
     });
@@ -1346,6 +1555,11 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           run,
         );
         await docker(["volume", "rm", recoveryVolume]);
+        assertOwnedResource(
+          (await inspect("volume", archiveVolume)).Labels,
+          run,
+        );
+        await docker(["volume", "rm", archiveVolume]);
         for (const [tag, expectedId] of [
           [image, imageId],
           [historicalImage, historicalImageId],
@@ -1384,7 +1598,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, native refresh and complete team/Personal isolation across restart, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, native refresh and complete team/Personal isolation across restart and public encrypted-archive restoration into a fresh Compose parent volume with a further persistent restart, retained database/audit/key/object state and committed WAL Accounts, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

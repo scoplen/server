@@ -18,16 +18,25 @@ const DENIED: &str = "Windows data-directory or key permissions are unsafe or un
 struct AdmissionInput<'a> {
     directory: &'a Path,
     files: &'a [PathBuf],
+    destination: Option<&'a Path>,
 }
 
 pub(crate) fn prepare_directory(directory: &Path, files: &[PathBuf]) -> io::Result<()> {
+    run(&AdmissionInput { directory, files, destination: None })
+}
+
+pub(crate) fn move_directory(directory: &Path, destination: &Path) -> io::Result<()> {
+    run(&AdmissionInput { directory, files: &[], destination: Some(destination) })
+}
+
+fn run(input: &AdmissionInput<'_>) -> io::Result<()> {
     let system_root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, UNAVAILABLE))?;
     // Use the OS executable directly: PATH and shell profiles cannot select another program.
     let executable = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let input = serde_json::to_string(&AdmissionInput { directory, files })
+    let input = serde_json::to_string(input)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, DENIED))?;
     let child = Command::new(executable)
         .args([

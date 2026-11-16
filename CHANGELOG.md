@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add password-encrypted offline SQLite/local-filesystem deployment archives through
+  `splctl backup create`, `verify` and `restore`. Preserve committed WAL state, objects,
+  deployment keys, managed certificate state and available audit proofs. Require exclusive
+  deployment admission and the matching build, publish without replacing existing data,
+  and restore the Personal Compose profile into a fresh volume before restarting.
+
 - Update bundled SQLite to 3.54.1 through a minimal SQLx 0.8.6 driver dependency patch, fixing
   RUSTSEC-2026-0459 without changing driver Rust sources or migration bytes. Include the reviewed
   vendor source and licenses in production-container builds.
