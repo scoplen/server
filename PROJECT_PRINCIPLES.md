@@ -173,6 +173,10 @@ self-hosted server, host agent, administration CLI, and web console.
   scope checks preserve each family's stored finite ceiling across refresh and upgrades; only
   fresh login receives the current initial permission set. Business mutations revalidate the
   genuine family and current tenant authority in their original transaction.
+  Read-only audit queries separately require exact `audit:read` and current tenant `view_audit`.
+  Both stores preserve original bytes, retain unknown historical metadata, bound contiguous
+  verification and check included signatures against the independent deployment audit key.
+  Hash-chain integrity and interval-only checkpoint coverage remain distinct in the response.
   Host/HostGroup/AccessProfile/Route writers use that server-generated family UUID;
   Inventory and Group/Policy receipts distinguish it from native Device bindings. Browser login
   returns no encrypted Personal bootstrap, enrolled Device or certificate capability. The shared

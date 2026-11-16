@@ -716,5 +716,6 @@ async fn postgres_account_browser_logout_lost_commit_requires_explicit_terminal_
     lost_commit(LOGOUT, 3).await;
 }
 
+mod audit;
 mod business;
 mod scope;

@@ -7,7 +7,7 @@ use scoplen_api::account_browser::{
 
 use super::{business::business, *};
 
-async fn current_session(
+pub(super) async fn current_session(
     f: &Fixture,
     browser: &Browser,
 ) -> Option<scoplen_store::account_browser_sessions::CurrentAccountBrowserSession> {
@@ -19,7 +19,7 @@ async fn current_session(
     .expect("current family lookup")
 }
 
-async fn set_scope(f: &Fixture, family: [u8; 16], scope: &str) {
+pub(super) async fn set_scope(f: &Fixture, family: [u8; 16], scope: &str) {
     let query = "UPDATE account_browser_families SET scope=$1 WHERE family_id=$2";
     let result = match &f.backend {
         AuthBackend::Sqlite(store) => sqlx::query(query)

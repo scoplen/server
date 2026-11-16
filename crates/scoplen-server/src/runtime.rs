@@ -97,6 +97,7 @@ pub(crate) struct ListenerLifecycle {
     pub(crate) lease: DeploymentLease,
     pub(crate) notifications: NotificationHub,
     pub(crate) shutdown: watch::Receiver<bool>,
+    pub(crate) audit_verification_key: [u8; 32],
 }
 
 /// Create the data directory, deployment key and internal CA as needed.
@@ -498,6 +499,7 @@ async fn ensure_device_token_keyring(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_roles_inner(
     config: Config,
     roles: Vec<Role>,
@@ -547,6 +549,10 @@ async fn run_roles_inner(
             lease: lease.clone(),
             notifications: notifications.clone(),
             shutdown: shutdown_receiver.clone(),
+            audit_verification_key: audit_signer
+                .as_ref()
+                .ok_or(ServerError::MissingKeyManagement)?
+                .verification_key(),
         };
         tasks.spawn(async move {
             let _lease = lease;
@@ -1267,6 +1273,11 @@ async fn worker_deployment_audit_checkpoint_pass_at<S: WorkerStoreBackend>(
 }
 
 #[cfg(test)]
+pub(crate) fn test_audit_verification_key() -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(&[23; 32]).verifying_key().to_bytes()
+}
+
+#[cfg(test)]
 pub(crate) fn api_router(
     database: ListenerDatabase,
     object_storage: Arc<ObjectStorage>,
@@ -1310,6 +1321,7 @@ pub(crate) fn api_router_with_limits(
         NotificationHub::default(),
         crate::AccountSettings::default(),
         crate::OrganizationSettings::default(),
+        test_audit_verification_key(),
     )
 }
 
@@ -1326,6 +1338,7 @@ pub(crate) fn api_router_with_notifications(
     notifications: NotificationHub,
     accounts: crate::AccountSettings,
     organizations: crate::OrganizationSettings,
+    audit_verification_key: [u8; 32],
 ) -> Router {
     let auth_backend = match &database {
         ListenerDatabase::Sqlite(store) => device_auth::AuthBackend::Sqlite(store.clone()),
@@ -1395,6 +1408,7 @@ pub(crate) fn api_router_with_notifications(
                 organizations,
                 notifications.clone(),
                 read_body_limits,
+                audit_verification_key,
             ))
             .merge(device_auth::router(
                 trusted_origin.clone(),
@@ -1426,7 +1440,12 @@ pub(crate) async fn run_public_listener(
     key_management: Arc<LocalKeyFile>,
     lifecycle: ListenerLifecycle,
 ) -> Result<(), ServerError> {
-    let ListenerLifecycle { lease: deployment_lease, notifications, mut shutdown } = lifecycle;
+    let ListenerLifecycle {
+        lease: deployment_lease,
+        notifications,
+        mut shutdown,
+        audit_verification_key,
+    } = lifecycle;
     let address = config.listen_address();
     let trusted_origin = config.public_origin()?;
     let api_enabled = roles.contains(&Role::Api);
@@ -1461,6 +1480,7 @@ pub(crate) async fn run_public_listener(
         notifications.clone(),
         config.accounts,
         config.organizations,
+        audit_verification_key,
     )
     .merge(crate::console::router(&config.console.assets_dir, api_enabled).await)
     .layer(Extension(deployment_lease));
@@ -2493,6 +2513,7 @@ mod tests {
                     server_notifications,
                     crate::AccountSettings::default(),
                     crate::OrganizationSettings::default(),
+                    test_audit_verification_key(),
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
