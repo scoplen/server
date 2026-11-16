@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Update protocol consumers and generated Console API bindings to the published immutable
+  Organization audit query and bounded range-verification contracts.
+
 - Preserve each Account-browser family's stored canonical scope ceiling during access and
   refresh, including valid narrower families. Existing sessions do not gain newly registered
   permissions after an upgrade; fresh password login still receives the current initial set.
