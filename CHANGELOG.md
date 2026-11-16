@@ -4,6 +4,11 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Preserve each Account-browser family's stored canonical scope ceiling during access and
+  refresh, including valid narrower families. Existing sessions do not gain newly registered
+  permissions after an upgrade; fresh password login still receives the current initial set.
+  Reject unknown, duplicated or unordered stored scopes without rotating refresh credentials.
+
 - Add password-encrypted offline SQLite/local-filesystem deployment archives through
   `splctl backup create`, `verify` and `restore`. Preserve committed WAL state, objects,
   deployment keys, managed certificate state and available audit proofs. Require exclusive

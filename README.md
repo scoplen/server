@@ -704,6 +704,9 @@ minutes and a family expires thirty days after the original login. Only confirme
 commits disclose credentials. Refresh uses only `__Secure-spl-account-refresh`, with `HttpOnly`,
 `Secure`, `SameSite=Strict` and `Path=/api/v1/auth/accounts/browser/refresh`; it never selects an
 Operator or native Device session. Spent-token reuse revokes only the matching browser family.
+Current-session checks and refresh retain each family's stored, canonical browser scope ceiling;
+an upgrade does not grant existing families newly added permissions. A fresh password login
+receives the current initial ceiling. Unknown, duplicated or unordered stored scopes are denied.
 Unconfirmed login/refresh commits return no credentials and require a fresh password sign-in.
 
 Logout ignores cookies and never sets or clears one. It revokes only the original family,

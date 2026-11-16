@@ -5,8 +5,8 @@ use std::{fmt, net::IpAddr};
 
 use scoplen_api::{
     account_browser::{
-        ACCOUNT_BROWSER_ACCESS_SECONDS, ACCOUNT_BROWSER_FAMILY_SECONDS, AccountBrowserAccessToken,
-        AccountBrowserCodecError, AccountBrowserPasswordLoginRequest,
+        ACCOUNT_BROWSER_ACCESS_SECONDS, ACCOUNT_BROWSER_FAMILY_SECONDS, AccountBrowserAccessScope,
+        AccountBrowserAccessToken, AccountBrowserCodecError, AccountBrowserPasswordLoginRequest,
         AccountBrowserPasswordLoginResponse, AccountBrowserPasswordOptionsRequest,
         AccountBrowserPasswordOptionsResponse, AccountBrowserRefreshResponse,
         AccountBrowserRefreshToken, INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE,
@@ -179,6 +179,19 @@ fn now_ms() -> Result<i64, AccountBrowserSessionError> {
         .ok_or(AccountBrowserSessionError::StorageUnavailable)
 }
 
+fn valid_scope_ceiling(scope: &str) -> bool {
+    let mut previous = None;
+    for token in scope.split(' ') {
+        if AccountBrowserAccessScope::from_token(token).is_none()
+            || previous.is_some_and(|earlier| earlier >= token)
+        {
+            return false;
+        }
+        previous = Some(token);
+    }
+    true
+}
+
 async fn sqlite_begin(store: &SqliteStore) -> Result<Transaction<'_, sqlx::Sqlite>, sqlx::Error> {
     store.pool().begin_with("BEGIN IMMEDIATE").await
 }
@@ -224,10 +237,11 @@ macro_rules! browser_store {
             let now=now_ms()?;
             let generation:i64=row.try_get("credential_generation")?;
             let expires:i64=row.try_get("expires_at_ms")?;
+            let scope:String=row.try_get("scope")?;
             if row.try_get::<String,_>("trusted_origin")?!=origin
                 || row.try_get::<String,_>("credential_origin")?!=origin
                 || row.try_get::<i64,_>("current_profile")?!=1
-                || row.try_get::<String,_>("scope")?!=INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE
+                || !valid_scope_ceiling(&scope)
                 || !row.try_get::<bool,_>("password_owned")?
                 || generation<=0 || generation!=row.try_get::<i64,_>("current_generation")?
                 || now<row.try_get::<i64,_>("issued_at_ms")? || now>=expires
@@ -237,7 +251,7 @@ macro_rules! browser_store {
             }
             let account:[u8;16]=row.try_get::<Vec<u8>,_>("account_id")?.try_into().map_err(|_|AccountBrowserSessionError::StorageUnavailable)?;
             let family:[u8;16]=row.try_get::<Vec<u8>,_>("family_id")?.try_into().map_err(|_|AccountBrowserSessionError::StorageUnavailable)?;
-            Ok(Some(CurrentAccountBrowserSession{account_id:account,family_id:family,jkt:row.try_get("dpop_jkt")?,scope:INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE.into(),expires_at_ms:expires,access_digest:*digest,origin:origin.into(),credential_generation:generation}))
+            Ok(Some(CurrentAccountBrowserSession{account_id:account,family_id:family,jkt:row.try_get("dpop_jkt")?,scope,expires_at_ms:expires,access_digest:*digest,origin:origin.into(),credential_generation:generation}))
         }
 
         /// Revalidate the real browser family inside the protected business transaction.
@@ -429,7 +443,7 @@ macro_rules! browser_store {
                     let family_expires:i64=row.try_get("expires_at_ms")?;
                     if row.try_get::<String,_>("dpop_jkt")?!=jkt || row.try_get::<String,_>("trusted_origin")?!=origin
                         || row.try_get::<String,_>("credential_origin")?!=origin || row.try_get::<i64,_>("current_profile")?!=1
-                        || row.try_get::<String,_>("scope")?!=INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE
+                        || !valid_scope_ceiling(&row.try_get::<String,_>("scope")?)
                         || !row.try_get::<bool,_>("password_owned")? || generation<=0 || generation!=row.try_get::<i64,_>("current_generation")?
                         || row.try_get::<Option<i64>,_>("revoked_at_ms")?.is_some()
                         || now<row.try_get::<i64,_>("created_at_ms")? || family_expires.saturating_sub(now)<1000 {

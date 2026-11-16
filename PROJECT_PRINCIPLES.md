@@ -170,8 +170,10 @@ self-hosted server, host agent, administration CLI, and web console.
   Existing password Accounts have an independent same-origin browser authentication profile.
   Bound attempts share native password budgets, while opaque access/refresh families, cookies,
   scopes and current-session checks stay separate from Device and Operator authority. Browser
-  business mutations revalidate the genuine family and current tenant authority in their original
-  transaction. Host/HostGroup/AccessProfile/Route writers use that server-generated family UUID;
+  scope checks preserve each family's stored finite ceiling across refresh and upgrades; only
+  fresh login receives the current initial permission set. Business mutations revalidate the
+  genuine family and current tenant authority in their original transaction.
+  Host/HostGroup/AccessProfile/Route writers use that server-generated family UUID;
   Inventory and Group/Policy receipts distinguish it from native Device bindings. Browser login
   returns no encrypted Personal bootstrap, enrolled Device or certificate capability. The shared
   fixed-profile password adapter runs in a one-use Worker. Production browser acceptance remains

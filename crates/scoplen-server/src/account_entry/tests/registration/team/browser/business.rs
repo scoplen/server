@@ -14,7 +14,7 @@ use serde_json::json;
 
 use super::*;
 
-async fn business(
+pub(super) async fn business(
     f: &Fixture,
     browser: &Browser,
     method: &str,
