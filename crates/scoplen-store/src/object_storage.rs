@@ -261,6 +261,14 @@ fn build_s3(
     builder.build().map_err(ObjectStorageError::Backend)
 }
 
+/// Validate a logical object key without constructing or initializing an object store.
+///
+/// # Errors
+/// Rejects keys outside the existing filesystem/object-store path contract.
+pub fn validate_object_key(key: &str) -> Result<(), ObjectStorageError> {
+    object_path(key).map(|_| ())
+}
+
 fn object_path(key: &str) -> Result<ObjectPath, ObjectStorageError> {
     if key.is_empty()
         || key.len() > MAX_OBJECT_KEY_BYTES

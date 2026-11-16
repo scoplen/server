@@ -449,6 +449,25 @@ where
     })
 }
 
+pub(crate) async fn verify_offline(
+    store: &SqliteStore,
+    kms: &dyn KeyManagementService,
+) -> Result<(), OperatorTokenKeyError> {
+    let mut transaction = store.pool().begin().await?;
+    let rows = load_sqlite_rows(&mut transaction).await?;
+    for row in &rows {
+        validate_row(row)?;
+        if decrypt_key(row, kms)?.public_key().as_slice() != row.public_key.as_slice() {
+            return Err(OperatorTokenKeyError::Integrity);
+        }
+    }
+    if !rows.is_empty() && rows.iter().filter(|row| row.active_slot == Some(1)).count() != 1 {
+        return Err(OperatorTokenKeyError::Integrity);
+    }
+    transaction.rollback().await?;
+    Ok(())
+}
+
 async fn load_sqlite_rows(
     transaction: &mut Transaction<'_, Sqlite>,
 ) -> Result<Vec<StoredKey>, OperatorTokenKeyError> {

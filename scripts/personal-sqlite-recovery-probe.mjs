@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Runs only in the pinned Node check image against disposable Docker volumes.
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
 import {
   chownSync,
   chmodSync,
@@ -58,7 +59,9 @@ const organizationId = Buffer.alloc(16, 0x33);
 const envelope = Buffer.from(
   "disposable pre-upgrade encrypted-envelope fixture",
 );
-const objectMarker = Buffer.from("disposable object-file recovery fixture\n");
+const objectMarker = Buffer.from(
+  Array.from({ length: 256 }, (_, index) => index),
+);
 const keyNames = [
   "deployment.key",
   "audit-signing.key",
@@ -349,6 +352,72 @@ function copyObjects(source, destination) {
   }
 }
 
+function databaseState(path) {
+  ordinary(path);
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal(
+      database.prepare("PRAGMA integrity_check").get().integrity_check,
+      "ok",
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    const tables = database
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+      )
+      .all()
+      .map((row) => row.name);
+    return JSON.stringify(
+      tables.map((table) => {
+        assert(/^[A-Za-z0-9_]+$/.test(table), "unsupported fixture table name");
+        const query = database.prepare(`SELECT * FROM "${table}"`);
+        query.setReadBigInts(true);
+        const rows = query
+          .all()
+          .map((row) =>
+            JSON.stringify(row, (_key, value) => {
+              if (typeof value === "bigint")
+                return { integer: value.toString() };
+              if (value instanceof Uint8Array)
+                return { bytes: Buffer.from(value).toString("hex") };
+              return value;
+            }),
+          )
+          .sort();
+        return [table, rows];
+      }),
+    );
+  } finally {
+    database.close();
+  }
+}
+
+function compareObjects(source, restored) {
+  ordinary(source, true);
+  ordinary(restored, true);
+  const names = readdirSync(source).sort();
+  assert.deepEqual(
+    readdirSync(restored).sort(),
+    names,
+    "restored object names changed",
+  );
+  for (const name of names) {
+    const from = join(source, name);
+    const to = join(restored, name);
+    const metadata = lstatSync(from);
+    assert(!metadata.isSymbolicLink(), "redirected source object");
+    if (metadata.isDirectory()) compareObjects(from, to);
+    else {
+      ordinary(from);
+      ordinary(to);
+      assert(
+        readFileSync(from).equals(readFileSync(to)),
+        "restored object bytes changed",
+      );
+    }
+  }
+}
+
 if (operation === "check-context") {
   assert.equal(process.getuid(), 65532);
   assert.equal(process.getgid(), 65532);
@@ -410,6 +479,9 @@ if (operation === "check-context") {
   failurePhase = "verify-material";
   assertMaterial(root);
   assertLiveCommittedWal(root);
+  // Pin the checkpoint boundary before subsequent public Account writes.
+  database.exec("BEGIN");
+  database.prepare("SELECT COUNT(*) FROM organizations").get();
   failurePhase = "hold-seed";
   process.on("SIGTERM", () => {
     database.close();
@@ -418,7 +490,7 @@ if (operation === "check-context") {
   setTimeout(() => {
     database.close();
     process.exit(1);
-  }, 300_000);
+  }, 600_000);
   console.log("ready");
   setInterval(() => {}, 60_000);
 } else if (operation === "check-live-wal") {
@@ -428,6 +500,118 @@ if (operation === "check-context") {
   inspectStandaloneSnapshot(root);
   inspectDatabase(join(root, "scoplen.sqlite"), true);
   assertMaterial(root);
+} else if (operation === "check-archive-source") {
+  failurePhase = "archive-source";
+  const root = "/source";
+  assertMaterial(root);
+  assert(
+    ordinary(join(root, "scoplen.sqlite-wal")).size > 0,
+    "archive fixture must retain committed WAL pages",
+  );
+  const source = new DatabaseSync(join(root, "scoplen.sqlite"), {
+    readOnly: true,
+  });
+  const barePath = "/tmp/archive-source-without-wal.sqlite";
+  copyFileSync(join(root, "scoplen.sqlite"), barePath, constants.COPYFILE_EXCL);
+  const bare = new DatabaseSync(barePath, { readOnly: true });
+  try {
+    const count = (database, table) =>
+      database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
+    const accounts = count(source, "identity_accounts");
+    assert(accounts >= 2, "archive source must include both public Accounts");
+    assert(
+      count(bare, "identity_accounts") < accounts,
+      "at least one public Account must still be committed only in WAL",
+    );
+    assert(
+      count(source, "deployment_audit_events") > 0,
+      "archive source must include deployment audit",
+    );
+    assert(
+      count(source, "audit_events") > 0,
+      "archive source must include team audit",
+    );
+    assert(
+      count(source, "sync_objects") >= 3,
+      "archive source must include both encrypted Personal Hosts",
+    );
+  } finally {
+    bare.close();
+    source.close();
+    unlinkSync(barePath);
+  }
+} else if (operation === "prepare-archive-parent") {
+  failurePhase = "archive-parent";
+  const root = "/recovery";
+  ordinary(root, true);
+  assert.deepEqual(
+    readdirSync(root),
+    [],
+    "archive parent volume must be fresh",
+  );
+  chownSync(root, 65532, 65532);
+  chmodSync(root, 0o700);
+  const passphrase = join(root, "passphrase.txt");
+  writeFileSync(passphrase, randomBytes(32).toString("base64url"), {
+    flag: "wx",
+    mode: 0o600,
+  });
+  chownSync(passphrase, 65532, 65532);
+  chmodSync(passphrase, 0o600);
+  assert(!existsSync(join(root, "restored")), "restore target must be absent");
+} else if (operation === "check-archive-restore") {
+  failurePhase = "archive-restore";
+  const source = "/source";
+  const restored = "/recovery/restored";
+  const metadata = ordinary(restored, true);
+  assert.equal(metadata.uid, 65532);
+  assert.equal(metadata.gid, 65532);
+  assert.equal(metadata.mode & 0o7777, 0o700);
+  for (const name of keyNames) {
+    ordinary(join(source, name));
+    ordinary(join(restored, name));
+    assert(
+      readFileSync(join(source, name)).equals(
+        readFileSync(join(restored, name)),
+      ),
+      "archive changed required key bytes",
+    );
+  }
+  assert(
+    readFileSync(join(restored, "kms.key")).equals(
+      readFileSync(join(source, "deployment.key")),
+    ),
+    "archive changed the configured KMS key",
+  );
+  const sourceDatabase = join(source, "scoplen.sqlite");
+  ordinary(sourceDatabase);
+  assert(
+    !existsSync(`${sourceDatabase}-wal`),
+    "source WAL must be checkpointed before state comparison",
+  );
+  // A WAL-mode header still needs writable sidecar storage when read-only.
+  const temporary = "/tmp/archive-source-checkpointed.sqlite";
+  copyFileSync(sourceDatabase, temporary, constants.COPYFILE_EXCL);
+  try {
+    assert(
+      databaseState(temporary) ===
+        databaseState(join(restored, "scoplen.sqlite")),
+      "archive changed retained database, audit or Account state",
+    );
+  } finally {
+    unlinkSync(temporary);
+  }
+  compareObjects(join(source, "objects"), join(restored, "objects"));
+  for (const name of [
+    "deployment.lease",
+    "scoplen.sqlite-wal",
+    "scoplen.sqlite-shm",
+    "scoplen.sqlite.migration-snapshots",
+  ])
+    assert(
+      !existsSync(join(restored, name)),
+      "archive copied excluded operational state",
+    );
 } else if (operation === "restore-offline") {
   const source = "/source";
   const recovery = "/recovery";

@@ -397,7 +397,7 @@ in a private Docker volume, and serves direct HTTPS using an external certificat
 configured DNS name and public port. The runtime is distroless and non-root; ordinary setup uses
 the one-time Operator setup link, fresh Passkey sign-in, and explicit server sign out. Deployment and
 release gates remain Incomplete; this entry does not establish signed release artifacts,
-backup/restore, physical Passkey interoperability, or every `all`-role workflow.
+physical Passkey interoperability, or every `all`-role workflow.
 Account-owned team creation is disabled by default. Set the existing
 `SPL_ORGANIZATIONS_ALLOW_CREATION=true` deployment variable and recreate the service to opt in;
 existing membership discovery, exact creation confirmation and name settings remain available
@@ -419,7 +419,10 @@ and repeats the team and Personal isolation checks. Separate content-free team a
 receipts require these completed checks; the Account receipt and integration descriptor remain
 unchanged. It also runs a populated pre-migration SQLite database through the
 current image, then starts a matching old server against an explicit offline snapshot recovery.
-It covers that upgrade path without implementing complete deployment backup/restore.
+It also exercises the encrypted offline archive through create, verify and fresh-volume restore,
+preserving original keys, objects, Account/Device authority and encrypted state across another
+persistent restart. See [backup and restore](docs/operations.md) for the supported SQLite/local
+filesystem profile and its matching-build, original-origin and external-TLS requirements.
 The same check runs native `splctl doctor` against the container's configured public HTTPS
 origin, verifies fixed successful findings, stopped-service failure and restart recovery,
 and checks that the diagnostic inputs and absent local deployment state remain unchanged.
@@ -1046,5 +1049,6 @@ links are private deployment material; keep the data directory out of source con
 backups. Copying only `scoplen.sqlite` while the server is running is not a consistent backup in WAL
 mode. Upgrade snapshots contain database material and need the same protection. They do not
 include object files, deployment/CA/audit keys, external key paths, or certificates. Preserve a
-consistent complete deployment backup before upgrading. Single-archive encrypted backup,
-scheduled backup and `splctl backup` recovery remain roadmap work.
+consistent complete deployment backup before upgrading. Use [the offline `splctl backup`
+procedure](docs/operations.md) for encrypted SQLite/local-filesystem archives. Scheduled backups,
+PostgreSQL archives and S3 archive storage remain roadmap work.

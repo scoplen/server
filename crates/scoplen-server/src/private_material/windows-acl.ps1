@@ -75,6 +75,17 @@ try {
 
     $root = Local-Path ([string]$inputValue.directory)
     Assert-NoReparse $root
+    if ($null -ne $inputValue.destination) {
+        Assert-Private $root $true
+        $destination = Local-Path ([string]$inputValue.destination)
+        $parent = [System.IO.Path]::GetDirectoryName($destination)
+        Assert-NoReparse $parent
+        Assert-Private $parent $true
+        if ($null -ne (Attributes $destination)) { exit 2 }
+        # Directory.Move uses same-volume MoveFile and refuses any existing destination.
+        [System.IO.Directory]::Move($root, $destination)
+        exit 0
+    }
     $missing = [System.Collections.Generic.List[string]]::new()
     $current = [System.IO.DirectoryInfo]::new($root)
     while (-not $current.Exists) {

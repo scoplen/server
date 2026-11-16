@@ -18,6 +18,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   assertAccountAcceptance,
+  assertBackupAcceptance,
   assertDoctorAcceptance,
   assertTeamAcceptance,
   assertTeamRestartAcceptance,
@@ -32,6 +33,39 @@ import {
   prepareRecoveryProbeContext,
   runTeamRestart,
 } from "./check-personal-container.mjs";
+
+test("archive acceptance requires command success and the matching confirmation before optional mappings", () => {
+  for (const [operation, first] of [
+    ["create", "Backup created."],
+    ["verify", "Backup verified."],
+    ["restore", "Backup restored."],
+  ]) {
+    const success = { stdout: `${first}\n`, stderr: "" };
+    assertBackupAcceptance(success, operation);
+    assertBackupAcceptance(
+      { ...success, stdout: `${first}\r\nConfiguration mapping follows.\r\n` },
+      operation,
+    );
+    for (const result of [
+      { ...success, error: { code: 1 } },
+      { ...success, error: { signal: "SIGTERM" } },
+      { ...success, error: { code: "ENOENT" } },
+      { ...success, stderr: "unexpected diagnostic" },
+      { ...success, stdout: "" },
+      { ...success, stdout: "Backup failed.\n" },
+    ])
+      assert.throws(() => assertBackupAcceptance(result, operation));
+  }
+  assert.throws(() =>
+    assertBackupAcceptance({ stdout: "", stderr: "" }, "unknown"),
+  );
+  assert.throws(() =>
+    assertBackupAcceptance(
+      { stdout: "Backup verified.\n", stderr: "" },
+      "restore",
+    ),
+  );
+});
 
 test("container probes use the current digest-pinned console dependency image", async () => {
   const dockerfile = await readFile(

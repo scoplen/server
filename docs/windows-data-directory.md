@@ -45,7 +45,24 @@ Before storage startup, an existing `scoplen.sqlite.migration-snapshots` directo
 checked with the same native ACL policy without repair. New upgrade-snapshot directories and
 files inherit the admitted data-directory DACL. A rejected recovery point must be inspected,
 not deleted to bypass admission; see [the container operations notes](personal-container.md)
-for snapshot retention and the separate complete-backup requirement.
+for snapshot retention and the [offline archive procedure](operations.md) for complete recovery.
+
+The offline `splctl backup create` command requires an exclusive deployment lease and does not
+initialize, migrate or repair the source. Stop every server and local accessor first. Existing
+source directories and the lease use the native private-directory admission. Backup rejects
+linked or non-ordinary source files and validates their required encodings; operators remain
+responsible for source-file permissions. Missing required keys cause failure rather than
+replacement. Keep the archive output and its private passphrase file outside the source data
+and object roots.
+
+Archive restoration requires an absent child of an existing admitted private parent directory.
+Its private staging directory inherits the restricted DACL, and publication moves that complete
+directory without replacing an existing destination. A wrong passphrase or failed validation
+cannot publish a partial deployment. Apply the reported KMS/audit/object configuration paths,
+retain the original public HTTPS origin and supply any external TLS files before starting the
+matching server build. Existing destination ACLs are not repaired or bypassed by restoration.
+The first official deployment archive profile is offline SQLite with local keys and filesystem
+objects; scheduled backups and PostgreSQL/S3 archives remain separate work.
 
 For a new deployment, run under the intended server account, select a missing data directory
 below a parent controlled by that account, and set `server.data_dir` or `SPL_SERVER_DATA_DIR`

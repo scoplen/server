@@ -9,9 +9,11 @@ private data volume. No image is published by these commands.
 For a new single-node PostgreSQL deployment, use the
 [PostgreSQL Compose override](postgres-container.md) with this same server image and TLS setup.
 
-Maturity remains Exploration. Complete deployment/release gates, signed images, SBOM/provenance,
-Helm and MinIO examples, backup/restore, and physical Passkey interoperability remain
-separate roadmap work. `all` retains the existing role semantics; the CA and gateway roles do
+Maturity remains Exploration. The first [offline encrypted SQLite archive](operations.md) uses
+the bundled `splctl` to create, verify and restore a complete local deployment. Scheduled backups,
+PostgreSQL/S3 archives, complete deployment/release gates, signed images, SBOM/provenance,
+Helm and MinIO examples, and physical Passkey interoperability remain separate roadmap work.
+`all` retains the existing role semantics; the CA and gateway roles do
 not yet provide the complete managed-access workflow.
 
 ## Prerequisites
@@ -47,9 +49,13 @@ directory is rejected rather than created. Keep the environment file and all key
 
 ```text
 docker compose --env-file deploy/.env -f deploy/compose.personal.yaml config --quiet
-docker compose --env-file deploy/.env -f deploy/compose.personal.yaml build
+docker compose --env-file deploy/.env -f deploy/compose.personal.yaml build --build-arg SCOPLEN_BUILD_REVISION=<full-source-revision>
 docker compose --env-file deploy/.env -f deploy/compose.personal.yaml up --detach --no-build
 ```
+
+Replace `<full-source-revision>` with the complete 40-character source commit from
+`git rev-parse HEAD`. This build identity is retained in offline archives; a build without a
+known revision cannot create or validate one. Preserve the matching image for recovery.
 
 The pinned Node/Rust stages build from the lockfiles; pnpm's version comes from the console
 manifest. BuildKit reuses one Rust target cache per Linux architecture and separate Cargo
@@ -181,17 +187,23 @@ database with the newer database's WAL/SHM files. Interrupted `.partial` files a
 entries are not retention candidates and remain for inspection. Snapshot files contain private
 database material and are not an encrypted, complete deployment archive.
 
-Single-archive encrypted backup, scheduled backups, `splctl backup` restoration, and reversible
-upgrades remain unimplemented. Keep this an explicit trial environment until those gates are
-complete; retain a consistent offline copy of the entire data volume and the matching image
-before an upgrade. SQLite-only snapshots omit the deployment, CA and audit keys and object files.
-Custom object/KMS paths and the external TLS directory also need their own complete backup.
+Use the [offline archive procedure](operations.md) before an upgrade: stop all deployment
+accessors, then run the matching image's public `splctl backup create` and `backup verify`
+commands. The archive includes the standalone WAL-complete database, required local keys and
+objects. External TLS requirements are recorded and must be provisioned separately.
+Restore with the exact archived revision into an absent child of a fresh private parent volume,
+then apply the reported data/KMS/audit/object paths and retain the original public origin.
+Do not restore over the mounted volume root or an existing deployment. Check the recovered
+service and a subsequent persistent restart before retiring the original volume.
+Scheduled backups, PostgreSQL/S3 archives and general reversible upgrades remain separate gates;
+SQLite-only migration snapshots do not replace this encrypted, complete recovery unit.
 
 ## Repeatable container check
 
 The `Personal container (Linux amd64)` CI job runs the same repository check that can be run
 locally with Node 24 and a local Linux-container Docker daemon. Build the registered native
-`personal_live_bootstrap` example and `splctl`, then pass their executable paths:
+`personal_live_bootstrap` example and `splctl`, with the full source commit supplied in the
+`SCOPLEN_BUILD_REVISION` environment variable, then pass their executable paths:
 
 ```text
 cargo build --locked -p scoplen-server --example personal_live_bootstrap
@@ -223,7 +235,8 @@ explicit fixture CA. Exact fixed configuration/health/readiness findings and exi
 before and after the existing restart; while stopped, the same command must return exit 1
 with fixed health/readiness connection failures. Each invocation preserves its input files
 and fixture entries and leaves its configured local data directory absent. This verifies the
-native CLI against the production server; it does not execute the image's bundled CLI.
+native diagnostic CLI against the production server. The archive acceptance below separately
+executes the image's bundled `splctl`.
 It performs
 one public setup, fresh resident software-passkey login and current-session logout with the
 registered driver, confirms an eligible terminal logout retry, and checks that all eight retired
@@ -252,7 +265,8 @@ Personal sync also produces `team-acceptance.json`, requiring the creation, name
 `team_account_isolation_verified` success fields; the Account receipt and descriptor are unchanged.
 With `--across-restart`, the native process retains both Devices' keys, original unused refresh
 credentials, renamed team Resources and expected Hosts in memory while the controller performs the same
-graceful stop/start and readiness checks. Only fixed ready/resume markers cross the process
+graceful stop/start and readiness checks, followed by the offline archive recovery checks below.
+Only fixed ready/resume markers cross the process
 boundary. Its first authentication requests after restart refresh those original credentials,
 then repeat both Accounts' own-team discovery, foreign-versus-absent refusals, exact creation
 confirmation and complete Resource comparisons, including ETags, update times and sole owner
@@ -267,6 +281,18 @@ No SQL identity seed or internal server coordinator is used. Repeated bootstrap 
 changing their completed artifacts. The controller verifies unchanged public
 keyrings and completed setup state during that same service restart. Every HTTPS exchange has a whole-request deadline and
 operations are not retried automatically.
+
+During that retained-process pause, the check stops the source Compose service and proves that
+at least one public Account is committed only in its still-open WAL. It runs the production
+image's public `backup create`, `backup verify` and `backup restore` commands with a separate
+private passphrase file. A fresh named volume is mounted as a parent and restoration targets
+its previously absent `restored` child. Before starting the recovered service, the check compares
+every retained database row, including Account, encrypted sync and audit state, every required
+key, and all binary object bytes with the source. Leases, migration snapshots and WAL/SHM files
+must be excluded. Compose then starts the recovered child under the original public origin and
+TLS certificate, verifies its original public token keyrings and native doctor results, and
+performs a further persistent stop/start. Only then does the original native process resume
+to refresh its unchanged Device credentials and verify both Accounts' teams and encrypted Hosts.
 
 The Account check exercises an independent protocol consumer against the production image;
 native desktop interaction, reopen/restart behavior and independent client acceptance retain
@@ -293,8 +319,9 @@ foreign-key integrity. After stopping the current
 server, the check copies only the completed snapshot, original keys, and object files into a
 separate empty recovery volume. The matching old server must reach `/readyz` and preserve those
 rows and files; newer WAL/SHM files are excluded from the copy. CI fetches the repository's full
-history so this fixed old revision is available. This is one Linux amd64 upgrade and offline
-recovery acceptance case, not a complete encrypted deployment backup or general restore tool.
+history so this fixed old revision is available. This old-version snapshot case remains separate
+from the encrypted archive recovery check; neither establishes scheduling, PostgreSQL/S3
+archives, other platforms or all deployment and release gates.
 It does not seed identity tables. Independent
 desktop Account registration/device admission/SSH, physical authenticators, arm64 and full deployment/release gates need
 their own evidence.

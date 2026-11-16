@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Deployment diagnostics and explicit local administration operations.
 
+mod backup;
 mod doctor;
 
 use clap::{Parser, Subcommand};
@@ -17,6 +18,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create, verify or restore an encrypted offline deployment archive.
+    Backup {
+        #[command(subcommand)]
+        command: backup::Command,
+    },
     /// Check configuration and public HTTPS health/readiness without changing deployment state.
     Doctor {
         /// Existing local server configuration, with normal SPL_ environment overrides.
@@ -41,6 +47,7 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Backup { command } => return backup::run(command).await,
         Command::Doctor { config, ca_certificate } => {
             return if doctor::run(&config, ca_certificate.as_deref()).await {
                 ExitCode::SUCCESS

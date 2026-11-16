@@ -36,6 +36,8 @@ COPY --from=browser-build /src/web/console/.browser/ ./web/console/.browser/
 RUN pnpm --dir web/console build
 
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS server-build
+ARG SCOPLEN_BUILD_REVISION
+ENV SCOPLEN_BUILD_REVISION=${SCOPLEN_BUILD_REVISION}
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
        build-essential ca-certificates cmake git perl pkg-config \
