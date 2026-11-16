@@ -178,6 +178,61 @@ creates `browser-accounts.started` before its first request; after any failure, 
 owned fixture instead of repeating a possibly committed registration. These Accounts and
 their initial Devices share the fixture's disposable lifecycle.
 
+## Organization audit acceptance
+
+Build the server and example from the same current checkout. Prepare a fresh fixture with
+only the default `api` role, enable `[organizations] allow_creation = true` in its private
+`server.toml` before startup, and complete `bootstrap` as above. Run once:
+
+```text
+personal_live_bootstrap verify-audit <fixture-directory>
+```
+
+Run this flow independently with SQLite and a new owned PostgreSQL database. It registers two
+password Accounts through public HTTPS, authenticates and refreshes their genuine Devices,
+and signs into independent Account-browser families with separately generated proof keys.
+Each Account creates a team; a named invitation and browser acceptance establish the second
+Account's membership in the first team. All business mutations use public APIs, without SQL
+identity seeds, forged tokens or direct audit inserts.
+
+The check exercises both audit GET routes with both credential profiles. Owner and Security
+auditor can read; Member, Administrator and Approver receive no implicit permit. Original
+credentials remain in use across role changes, an explicit Account policy permit, policy
+disable/enable, membership suspension/reactivation and removal. A custom permit never bypasses
+current membership or tenant isolation. The other Account's independent team stays usable.
+Foreign, absent and inactive-member reads return the common bounded 404 problem.
+
+Real team creation/name, invitation, member, Host and policy mutations produce the history.
+The consumer checks recorded Device and browser-family attribution, including the same browser
+family across a real refresh and the accepting Account's retained actor after member removal.
+It compares every filter dimension, both time boundaries and the complete AND combination
+against captured history. Small pages exercise descending cursor continuation and exact
+sequence/hash relationships; Device/browser and subsequent reads must preserve the same
+immutable projections. Bodies and headers use a dedicated reader: Page 1 MiB, Verification
+and problems 4 KiB, with request binding, no-store/no-cache, request id, no ETag and no cookie
+changes. The pre-existing bootstrap and Account readers retain their original bounds.
+
+Genesis, a later range with its immediate predecessor, and adjacent range joining are checked
+against those captured hashes. The API-only fixture deliberately has no checkpoint worker:
+successful results must honestly identify the whole selected interval as uncheckpointed.
+This flow does not establish checkpoint signatures, corruption/large-byte boundaries, original
+database-byte preservation, legacy scope upgrades, CA/KRL behavior, restart/backup recovery or
+rendered Console acceptance. Those require their independent suites; no synthetic historical
+attribution substitutes for genuine producers here.
+
+`audit-check.started` is created exclusively before the first request. Any failure abandons
+the fixture rather than retrying possibly committed mutations. Only complete success writes
+`audit-acceptance.json` with exactly these content-free fields, all `true`:
+
+```json
+{"audit_device_browser_https_verified":true,"audit_current_authority_verified":true,"audit_filter_pagination_verified":true,"audit_unsigned_ranges_verified":true}
+```
+
+No Account password, Device/browser key, access token, refresh cookie or event body is printed
+or exported. The command does not start/stop services, create/drop databases, install system
+trust roots or change the original integration descriptor. Its caller retains responsibility
+for the existing private diagnostics and exact owned-resource cleanup.
+
 ## Descriptor, privacy and failures
 
 After confirmed Operator setup, login, logout, eligible terminal logout confirmation and

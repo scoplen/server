@@ -93,6 +93,8 @@ enum Command {
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
         server_pid: u32,
     },
+    /// Once only: verify Organization audit reads with genuine Device and browser sessions.
+    VerifyAudit { directory: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -190,6 +192,31 @@ async fn run(command: Command) -> Result<()> {
                 |_| "browser Account preparation exceeded its deadline; abandon this fixture",
             )??;
             println!("browser Accounts prepared: {}", descriptor.display());
+        }
+        Command::VerifyAudit { directory } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            write_private(
+                &directory.join("audit-check.started"),
+                "One attempt only; discard this fixture after any failure.",
+            )?;
+            tokio::spawn(async move {
+                tokio::time::timeout(
+                    Duration::from_secs(240),
+                    Box::pin(account::verify_audit(&https)),
+                )
+                .await
+                .map_err(|_| "Audit check exceeded its deadline; abandon this fixture")?
+            })
+            .await
+            .map_err(|_| "Audit check task failed; abandon this fixture")??;
+            write_private(
+                &directory.join("audit-acceptance.json"),
+                "{\"audit_device_browser_https_verified\":true,\"audit_current_authority_verified\":true,\"audit_filter_pagination_verified\":true,\"audit_unsigned_ranges_verified\":true}",
+            )?;
+            println!("public Device and Account-browser audit check passed");
         }
     }
     Ok(())
