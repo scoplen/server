@@ -14,6 +14,7 @@ use axum::{
 use scoplen_api::{
     auth::DeviceAccessOperation,
     certificate::{CertificateIssuanceRequest, MAX_CERTIFICATE_ISSUANCE_REQUEST_BYTES},
+    krl::USER_CA_KRL_CONTENT_TYPE,
     organization::{OrganizationListQuery, parse_organization_idempotency_key},
     user_ca::{MAX_USER_CA_CREATE_BYTES, UserCaCreateRequest},
 };
@@ -25,6 +26,7 @@ pub(super) fn routes() -> Router<OrganizationState> {
         .route("/api/v1/orgs/{org}/certificate-authorities", get(handle))
         .route("/api/v1/orgs/{org}/certificate-authorities", post(handle))
         .route("/api/v1/orgs/{org}/certificate-authorities/{id}", get(handle))
+        .route("/api/v1/orgs/{org}/certificate-authorities/{id}/krl", get(handle))
         .route("/api/v1/orgs/{org}/certificates", post(handle))
 }
 
@@ -47,6 +49,9 @@ async fn handle(
         }
         ["", "api", "v1", "orgs", org, "certificate-authorities", target] => {
             (*org, Some(*target), "/api/v1/orgs/{org}/certificate-authorities/{id}")
+        }
+        ["", "api", "v1", "orgs", org, "certificate-authorities", target, "krl"] => {
+            (*org, Some(*target), "/api/v1/orgs/{org}/certificate-authorities/{id}/krl")
         }
         ["", "api", "v1", "orgs", org, "certificates"] => {
             (*org, None, "/api/v1/orgs/{org}/certificates")
@@ -106,6 +111,14 @@ async fn handle(
         if let Some(target) = target {
             if parts.uri.query().is_some() {
                 return invalid(&id);
+            }
+            if operation == DeviceAccessOperation::UserCaKrlRead {
+                return match store!(read_organization_user_ca_krl(
+                    &principal, expires_at, org, target
+                )) {
+                    Ok(bytes) => reply(StatusCode::OK, USER_CA_KRL_CONTENT_TYPE, bytes, &id),
+                    Err(error) => store_problem(error, &id),
+                };
             }
             return match store!(read_organization_user_ca(&principal, expires_at, org, target)) {
                 Ok(value) => team::encoded(value.to_json(), Some(&value.etag), StatusCode::OK, &id),

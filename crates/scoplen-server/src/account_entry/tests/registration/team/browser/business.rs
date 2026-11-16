@@ -363,6 +363,29 @@ async fn authoring_and_receipts(f: &Fixture) {
     business(f, &browser, "GET", &format!("{root}/certificate-authorities"), &[], &[])
         .await
         .problem(401, "auth.authentication_required", false);
+    let request =
+        scoplen_api::user_ca::UserCaCreateRequest { id: Uuid::now_v7() }.to_json().unwrap();
+    let created = call(
+        f,
+        &native,
+        "POST",
+        &format!("{root}/certificate-authorities"),
+        &request,
+        &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+    )
+    .await;
+    assert_eq!(created.status, 201);
+    let trust = scoplen_api::user_ca::UserCaResource::from_json(&created.body).unwrap();
+    business(
+        f,
+        &browser,
+        "GET",
+        &format!("{root}/certificate-authorities/{}/krl", trust.id),
+        &[],
+        &[],
+    )
+    .await
+    .problem(401, "auth.authentication_required", false);
     let denied = business(
         f,
         &browser,
@@ -373,6 +396,14 @@ async fn authoring_and_receipts(f: &Fixture) {
     )
     .await;
     assert_eq!(denied.status, 401);
+    let path = format!("{root}/certificate-authorities/{}/krl", trust.id);
+    let before = call(f, &native, "GET", &path, &[], &[]).await;
+    assert_eq!(before.status, 200);
+    let logout = super::request(f, &browser.key, LOGOUT, b"{}", Some(&browser.access), None).await;
+    assert_eq!(logout.status, 200);
+    let after = call(f, &native, "GET", &path, &[], &[]).await;
+    assert_eq!(after.status, 200);
+    assert_eq!(after.body, before.body, "Account-browser logout preserves Device KRL state");
 }
 
 fn created_asset_id(body: &[u8]) -> Uuid {

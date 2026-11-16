@@ -7,4 +7,5 @@ mod local_user;
 
 pub use local_user::{
     DEFAULT_USER_CERTIFICATE_TTL_SECONDS, LocalUserCa, LocalUserCaError, UserCertificateContext,
+    verify_stored_user_certificate,
 };

@@ -8,6 +8,9 @@ use scoplen_api::{
 };
 use ssh_key::{Certificate, PublicKey, certificate::CertType, private::Ed25519Keypair};
 
+mod krl;
+mod tls;
+
 fn ca(reply: &Reply, status: u16) -> UserCaResource {
     assert_eq!(reply.status, status, "{}", String::from_utf8_lossy(&reply.body));
     reply.private();

@@ -826,9 +826,46 @@ Issuance requires an original UUIDv7 `Idempotency-Key` and no `If-Match`. The po
 serial, issued Resource, receipt and Organization audit commit together. Only a confirmed
 commit discloses the certificate. Original-key confirmation within 24 hours rechecks current
 authority and returns the original certificate without extending its lifetime. Unknown commits
-require explicit confirmation; they never trigger automatic issuance replay. Leaving or
-dissolving a team blocks new issuance but cannot recall an already disclosed unmanaged SSH
-certificate. Host CAs, KRL distribution, CA rotation and remote signers remain separate work.
+require explicit confirmation; they never trigger automatic issuance replay. Suspending or
+removing a member, self-leave and dissolution atomically revoke that Account's unexpired serials
+with the member state, tenant revision, notifications and audit. Restore/rejoin preserves old
+serial revocation; a new authorized connection gets a new serial, including with the same key.
+Exact confirmation of a revoked issuance returns `409 certificate.revoked`, without a certificate.
+Each CA permits 100,000 unexpired issued certificates, including revoked ones. An exact nonrevoked
+receipt returns before this cap; a new issuance at capacity returns `413 certificate.quota_exceeded`
+without consuming a serial, certificate, receipt or issuance audit. Both problems have
+`changed: false, retryable: false` and require another explicit connection after reviewing access
+or waiting for certificates to expire.
+
+Current Devices with `ca:read` and active team membership can download the complete unsigned
+OpenSSH KRL from `GET /api/v1/orgs/{org}/certificate-authorities/{id}/krl`. It accepts no body,
+query, `If-Match` or `Idempotency-Key`. Success is raw `application/octet-stream` with `no-store`,
+`Pragma: no-cache` and a request id; there is no Resource, ETag or partial response. Reads preserve
+the persisted snapshot's version/time/bytes. Missing or damaged snapshots fail closed. Removed
+or suspended members and dissolved teams return 404; browser and Operator credentials grant
+no download authority. Dissolution preserves a final KRL but grants no subsequent member read.
+Install the downloaded file as the owned Host's `RevokedKeys`, validate with `sshd -t`, and
+start a fresh handshake to verify enforcement. Download alone does not distribute it to Hosts
+or terminate existing SSH sessions. Automatic KRL delivery, Host CAs, rotation and remote
+signers remain separate work.
+
+For upgrade, stop older writers before starting this version; mixed old/new writers are unsupported.
+The paired forward migrations preserve historical Resources and receipts. Before API admission,
+one transaction verifies every stored certificate's CA signature, serial and Account/Device/team
+binding, reads its actual signed expiry and initializes complete snapshots. Currently inactive
+or absent memberships and dissolved teams contribute their known unexpired serials. Corrupt,
+incomplete or over-cap state stops activation without partial changes; a valid over-cap store
+can retry after natural expiry. Historical remove-and-rejoin epochs cannot be reconstructed.
+Keep the matching pre-upgrade database, deployment keys and object backup for offline recovery.
+
+For disposable OpenSSH acceptance, set `SCOPLEN_KRL_ACCEPTANCE_DIRECTORY` to a new directory,
+run `cargo test --locked -p scoplen-server --lib user_ca_krl_download_over_verified_tls`, then
+run `node scripts/check-user-ca-krl.mjs <directory>/sqlite`. The test exports synthetic keys,
+real issued certificates and KRL bytes downloaded through verified HTTPS. The script creates
+an isolated Docker fixture, installs the downloaded file as `RevokedKeys`, validates sshd
+configuration, and checks fresh revoked/fresh same-key/other-member/other-CA/Personal handshakes.
+It removes only its labeled container/image. PostgreSQL uses the same test with
+`--features postgres-integration`, an owned `SCOPLEN_TEST_DATABASE_URL`, and `<directory>/postgres`.
 
 Team inventory uses the server-readable `hosts`, `access-profiles`, `routes`, `host-groups`,
 `trust-records`, `snippets` and `gateway-networks` collections under `/api/v1/orgs/{org}`.

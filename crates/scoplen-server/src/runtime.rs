@@ -321,6 +321,18 @@ async fn prepare_roles_with_setup(
     result
 }
 
+async fn initialize_user_ca_krls(
+    store: Option<&SqliteStore>,
+    postgres_store: Option<&PostgresStore>,
+) -> Result<(), ServerError> {
+    let initialized = match (store, postgres_store) {
+        (Some(store), _) => store.initialize_organization_user_ca_krls().await,
+        (_, Some(store)) => store.initialize_organization_user_ca_krls().await,
+        _ => return Err(ServerError::MissingStore),
+    };
+    initialized.map_err(|error| ServerError::Task(error.to_string()))
+}
+
 async fn prepare_roles_guarded(
     config: Config,
     roles: Vec<Role>,
@@ -383,6 +395,7 @@ async fn prepare_roles_guarded(
             config.storage.kms_audit_key_file(&config.server.data_dir)?,
         )?);
         let setup_link = if roles.contains(&Role::Api) {
+            initialize_user_ca_krls(store.as_ref(), postgres_store.as_ref()).await?;
             let backend = match (&store, &postgres_store) {
                 (Some(store), _) => device_auth::AuthBackend::Sqlite(Arc::new(store.clone())),
                 (_, Some(store)) => device_auth::AuthBackend::Postgres(Arc::new(store.clone())),

@@ -408,6 +408,12 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
             (StatusCode::NOT_FOUND, "organization.not_found", false)
         }
         OrganizationStoreError::Conflict => (StatusCode::CONFLICT, "organization.conflict", false),
+        OrganizationStoreError::CertificateRevoked => {
+            (StatusCode::CONFLICT, "certificate.revoked", false)
+        }
+        OrganizationStoreError::CertificateQuotaExceeded => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "certificate.quota_exceeded", false)
+        }
         OrganizationStoreError::ViewChanged => {
             (StatusCode::CONFLICT, "organization.conflict", false)
         }
@@ -444,6 +450,14 @@ fn problem(status: StatusCode, code: &str, changed: bool, request_id: &Uuid) -> 
         "certificate.invalid_request" => (
             "Invalid certificate request",
             "Provide a supported SSH public key, target hosts or groups, username and lifetime.",
+        ),
+        "certificate.revoked" => (
+            "Certificate revoked",
+            "The original certificate was revoked. Review current access and explicitly start a new connection.",
+        ),
+        "certificate.quota_exceeded" => (
+            "Certificate limit reached",
+            "No new certificate was issued. Wait for issued certificates to expire before explicitly starting a new connection.",
         ),
         "organization.not_found" => ("Team not found", "The requested team is unavailable."),
         "organization.conflict" => (

@@ -1,2 +1,3 @@
 crates/scoplen-store/migrations/**/*.sql text eol=lf
 web/console/src/generated/api.ts text eol=lf
+scripts/krl-sshd-probe.sh text eol=lf

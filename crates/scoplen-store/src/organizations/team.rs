@@ -353,6 +353,7 @@ macro_rules! teams {
                 let canonical=request.to_json().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let request_digest=digest("POST",&format!("/api/v1/orgs/{organization}/invitations/{id}/accept"),canonical.as_bytes(),None);
                 let mut tx=self.pool.begin_with($begin).await?;
+                Self::activate_user_ca_krls(&mut tx).await?;
                 $lock(&mut tx,&expected.account_id(),false).await?;
                 $principal(&mut tx, expected, expires_at).await?;
                 let now=now_ms()?;
@@ -490,6 +491,7 @@ macro_rules! teams {
                 parse_organization_if_match(Some(if_match)).map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 if let Some(request)=request {request.validate().map_err(|_|OrganizationStoreError::InvalidRequest)?;}
                 let mut tx=self.pool.begin_with($begin).await?;
+                Self::activate_user_ca_krls(&mut tx).await?;
                 $lock(&mut tx,&expected.account_id(),false).await?;
                 $principal(&mut tx, expected, expires_at).await?;
                 Self::lock_team(&mut tx,organization).await?;
@@ -528,6 +530,7 @@ macro_rules! teams {
                     if !another_owner {return Err(OrganizationStoreError::Conflict);}
                 }
                 let status=match next_status {TeamMemberStatus::Active=>"active",TeamMemberStatus::Suspended=>"suspended",TeamMemberStatus::Removed=>"deprovisioned"};
+                if next_status!=TeamMemberStatus::Active {Self::revoke_user_ca_serials(&mut tx,organization,Some(current.account_id),now).await?;}
                 sqlx::query("UPDATE organization_memberships SET status=$1,roles_json=$2,updated_at_ms=CASE WHEN updated_at_ms>=$3 THEN updated_at_ms+1 ELSE $3 END WHERE organization_id=$4 AND id=$5")
                     .bind(status).bind(roles_json(next_roles)?).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
                 if next_status!=TeamMemberStatus::Active {Self::clear_organization_groups(&mut tx,organization,Some(id),now).await?;}
@@ -552,6 +555,7 @@ macro_rules! teams {
                 let canonical=request.to_json().map_err(|_|OrganizationStoreError::InvalidRequest)?;
                 let request_digest=digest("POST",&format!("/api/v1/orgs/{organization}/dissolve"),&canonical,Some(if_match));
                 let mut tx=self.pool.begin_with($begin).await?;
+                Self::activate_user_ca_krls(&mut tx).await?;
                 $lock(&mut tx,&expected.account_id(),false).await?;
                 $principal(&mut tx, expected, expires_at).await?;
                 let now=now_ms()?;
@@ -570,6 +574,7 @@ macro_rules! teams {
                 let actor=Self::team_actor(&mut tx,expected,organization,"manage_organization",now).await?;
                 if !owner(&actor) {return Err(OrganizationStoreError::PermissionDenied);}
                 if actor.etag!=if_match {return Err(OrganizationStoreError::PreconditionFailed);}
+                Self::revoke_user_ca_serials(&mut tx,organization,None,now).await?;
                 let accounts=sqlx::query_scalar::<_,Vec<u8>>("SELECT account_id FROM organization_memberships WHERE organization_id=$1 AND status='active'")
                     .bind(organization.as_bytes().as_slice()).fetch_all(&mut *tx).await?;
                 for account in accounts {Self::queue_memberships_notification(&mut tx,account.try_into().map_err(|_|OrganizationStoreError::StorageUnavailable)?).await?;}

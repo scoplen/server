@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use scoplen_api::certificate::{CertificateIssuanceRequest, CertificateTargets};
-use scoplen_ca::{LocalUserCa, LocalUserCaError, UserCertificateContext};
+use scoplen_ca::{
+    LocalUserCa, LocalUserCaError, UserCertificateContext, verify_stored_user_certificate,
+};
 use ssh_key::{Certificate, PublicKey, certificate::CertType};
 use uuid::Uuid;
 
@@ -56,6 +58,47 @@ fn real_user_certificate_has_exact_scoped_principals_and_initial_extensions() {
         now_seconds: 1_800_000_000,
     };
     let line = signer.issue(&request, &context).expect("real signing");
+    let public = signer.public_key().unwrap();
+    let verify = |ca: &str, org, account, device, resource, serial| {
+        verify_stored_user_certificate(&line, ca, org, account, device, resource, serial)
+    };
+    assert_eq!(
+        verify(
+            &public,
+            context.organization,
+            context.account,
+            context.device,
+            context.certificate,
+            context.serial
+        ),
+        Ok(context.now_seconds + 1_800)
+    );
+    for (org, account, device, resource, serial) in [
+        (Uuid::now_v7(), context.account, context.device, context.certificate, context.serial),
+        (context.organization, Uuid::now_v7(), context.device, context.certificate, context.serial),
+        (
+            context.organization,
+            context.account,
+            Uuid::now_v7(),
+            context.certificate,
+            context.serial,
+        ),
+        (context.organization, context.account, context.device, Uuid::now_v7(), context.serial),
+        (context.organization, context.account, context.device, context.certificate, 1),
+    ] {
+        assert!(verify(&public, org, account, device, resource, serial).is_err());
+    }
+    assert!(
+        verify(
+            &LocalUserCa::generate().unwrap().public_key().unwrap(),
+            context.organization,
+            context.account,
+            context.device,
+            context.certificate,
+            context.serial
+        )
+        .is_err()
+    );
     let certificate = Certificate::from_openssh(&line).expect("OpenSSH user certificate");
     certificate.verify_signature().expect("authentic signature");
     assert_eq!(certificate.cert_type(), CertType::User);
