@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Persist local-user-CA serial revocations and complete bounded KRL snapshots atomically with
+  member suspension/removal, self-leave and dissolution on SQLite and PostgreSQL. Add authenticated
+  native KRL download, exact revoked-receipt and issuance-cap outcomes, and forward-only verified
+  activation from actual stored certificate expiry. Restored members use new serials; automatic
+  Host delivery and existing-session termination remain separate work.
+
 - Compare parsed Resource timestamps in team-name HTTP checks so variable RFC 3339 fractional
   precision preserves the existing nondecreasing-time assertion.
 

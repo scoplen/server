@@ -3351,6 +3351,12 @@ const ORGANIZATION_USER_CERTIFICATES: TableSpec = TableSpec {
             nullable: false,
             primary_key: false,
         },
+        ColumnSpec {
+            name: "valid_before",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
     ],
     foreign_keys: &[
         ForeignKey {
@@ -3374,6 +3380,110 @@ const ORGANIZATION_USER_CERTIFICATES: TableSpec = TableSpec {
             target_column: "device_id",
         },
     ],
+    indexes: &[IndexSpec {
+        name: "organization_user_certificates_expiry",
+        columns: &["organization_id", "authority_id", "valid_before"],
+    }],
+};
+
+const USER_CA_FOREIGN_KEYS: &[ForeignKey] = &[
+    ForeignKey {
+        source_column: "organization_id",
+        target_table: "organization_user_cas",
+        target_column: "organization_id",
+    },
+    ForeignKey {
+        source_column: "authority_id",
+        target_table: "organization_user_cas",
+        target_column: "id",
+    },
+];
+
+const ORGANIZATION_USER_CA_REVOCATIONS: TableSpec = TableSpec {
+    name: "organization_user_ca_revocations",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "authority_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "serial", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "valid_before",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: USER_CA_FOREIGN_KEYS,
+    indexes: &[IndexSpec {
+        name: "organization_user_ca_revocations_expiry",
+        columns: &["organization_id", "authority_id", "valid_before"],
+    }],
+};
+
+const ORGANIZATION_USER_CA_KRLS: TableSpec = TableSpec {
+    name: "organization_user_ca_krls",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "authority_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "version",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "generated_at",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "snapshot",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: USER_CA_FOREIGN_KEYS,
+    indexes: &[],
+};
+
+const ORGANIZATION_USER_CA_KRL_ACTIVATION: TableSpec = TableSpec {
+    name: "organization_user_ca_krl_activation",
+    columns: &[
+        ColumnSpec {
+            name: "singleton",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "activated",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[],
     indexes: &[],
 };
 
@@ -3383,6 +3493,9 @@ const TABLES: &[TableSpec] = &[
     ACCOUNT_BROWSER_REFRESH_TOKENS,
     ORGANIZATION_USER_CAS,
     ORGANIZATION_USER_CERTIFICATES,
+    ORGANIZATION_USER_CA_REVOCATIONS,
+    ORGANIZATION_USER_CA_KRLS,
+    ORGANIZATION_USER_CA_KRL_ACTIVATION,
     ORGANIZATION_INVENTORY_VAULTS,
     ORGANIZATION_INVENTORY_OBJECTS,
     ORGANIZATION_INVENTORY_REFERENCES,
@@ -3939,6 +4052,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261108000000_account_browser.sql");
     const POSTGRES_ACCOUNT_BROWSER: &str =
         include_str!("../migrations/postgres/20261108000000_account_browser.sql");
+    const SQLITE_USER_CA_KRL: &str =
+        include_str!("../migrations/sqlite/20261109000000_user_ca_krl.sql");
+    const POSTGRES_USER_CA_KRL: &str =
+        include_str!("../migrations/postgres/20261109000000_user_ca_krl.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -3995,6 +4112,7 @@ mod tests {
             SQLITE_ORGANIZATION_INVENTORY,
             SQLITE_ORGANIZATION_USER_CA,
             SQLITE_ACCOUNT_BROWSER,
+            SQLITE_USER_CA_KRL,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4031,6 +4149,7 @@ mod tests {
             POSTGRES_ORGANIZATION_INVENTORY,
             POSTGRES_ORGANIZATION_USER_CA,
             POSTGRES_ACCOUNT_BROWSER,
+            POSTGRES_USER_CA_KRL,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

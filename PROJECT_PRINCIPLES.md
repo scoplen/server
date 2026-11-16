@@ -161,7 +161,10 @@ self-hosted server, host agent, administration CLI, and web console.
   before any serial or issuance mutation; full address-constrained certificates remain open.
   Serial, certificate, original receipt and audit commit together; uncertain commits disclose
   no certificate, and exact confirmation rechecks authority without renewal. Public CA reads
-  grant no inventory or connection access. Host CA, rotation, KRL and remote-signing workflows
+  grant no inventory or connection access. Member withdrawal atomically persists CA-scoped serial
+  revocation and bounded OpenSSH KRL snapshots. Native current members can download them with
+  `ca:read`; Host installation and session termination remain separate responsibilities.
+  Host CA, rotation, automatic KRL delivery and remote-signing workflows
   remain open. Shared vaults remain open.
   Existing password Accounts have an independent same-origin browser authentication profile.
   Bound attempts share native password budgets, while opaque access/refresh families, cookies,

@@ -50,6 +50,10 @@ pub enum OrganizationStoreError {
     NotFound,
     #[error("organization creation conflicts with the original request")]
     Conflict,
+    #[error("the original certificate was revoked")]
+    CertificateRevoked,
+    #[error("the certificate authority has reached its unexpired issuance limit")]
+    CertificateQuotaExceeded,
     #[error("team invitation is unavailable")]
     InvitationDenied,
     #[error("organization storage is unavailable")]

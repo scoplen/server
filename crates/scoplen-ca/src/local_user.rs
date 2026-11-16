@@ -7,7 +7,11 @@ use scoplen_api::certificate::{CertificateIssuanceRequest, CertificateTargets};
 use scoplen_crypto::{
     SymmetricKey, XChaChaNonce, random_nonce, xchacha20poly1305_open, xchacha20poly1305_seal,
 };
-use ssh_key::{PrivateKey, PublicKey, certificate::Builder, private::Ed25519Keypair};
+use ssh_key::{
+    Algorithm, Certificate, PrivateKey, PublicKey,
+    certificate::{Builder, CertType},
+    private::Ed25519Keypair,
+};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -64,6 +68,42 @@ fn aad(organization: Uuid, authority: Uuid) -> Result<Vec<u8>, LocalUserCaError>
     bytes.extend_from_slice(organization.as_bytes());
     bytes.extend_from_slice(authority.as_bytes());
     Ok(bytes)
+}
+
+/// Verify an already stored certificate's exact CA and immutable issuance ownership.
+/// Returns its signed expiry, without checking current time or guessing its original TTL.
+/// This grants no current identity, membership or connection authority.
+/// # Errors
+/// Rejects a damaged signature or mismatched CA, serial, Resource or identity binding.
+pub fn verify_stored_user_certificate(
+    certificate: &str,
+    ca_public_key: &str,
+    organization: Uuid,
+    account: Uuid,
+    device: Uuid,
+    resource: Uuid,
+    serial: u64,
+) -> Result<u64, LocalUserCaError> {
+    for id in [organization, account, device, resource] {
+        scoplen_model::validate_uuid_v7(id).map_err(|_| LocalUserCaError::InvalidContext)?;
+    }
+    let certificate =
+        Certificate::from_openssh(certificate).map_err(|_| LocalUserCaError::Certificate)?;
+    let ca = PublicKey::from_openssh(ca_public_key).map_err(|_| LocalUserCaError::Certificate)?;
+    if ca.algorithm() != Algorithm::Ed25519
+        || ca.to_openssh().map_err(|_| LocalUserCaError::Certificate)? != ca_public_key
+        || serial == 0
+        || certificate.serial() != serial
+        || certificate.cert_type() != CertType::User
+        || certificate.signature_key() != ca.key_data()
+        || certificate.key_id() != format!("spl:{organization}:{account}:{device}:{resource}")
+        || certificate.extensions().get("org@scoplen.com") != Some(&organization.to_string())
+        || certificate.valid_before() <= certificate.valid_after()
+    {
+        return Err(LocalUserCaError::Certificate);
+    }
+    certificate.verify_signature().map_err(|_| LocalUserCaError::Certificate)?;
+    Ok(certificate.valid_before())
 }
 
 impl LocalUserCa {

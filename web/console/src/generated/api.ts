@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/33374ca27c0bb717d0c3a47faf4e46e37e1a3c52/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/a96b28a69d657e6b139597e9e051af41230919a7/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -7,6 +7,10 @@ export interface components {
     UserCaCreateRequest: UserCaCreateRequest;
     UserCaResource: UserCaResource;
     UserCaPage: UserCaPage;
+    UserCaKrl: UserCaKrl;
+    CertificateRevokedProblem: CertificateRevokedProblem;
+    CertificateQuotaExceededProblem: CertificateQuotaExceededProblem;
+    CertificateBodyTooLargeProblem: CertificateBodyTooLargeProblem;
     GroupSource: GroupSource;
     GroupFields: GroupFields;
     GroupCreateRequest: GroupCreateRequest;
@@ -703,6 +707,12 @@ export interface UserCaResource {
   [extension: string]: unknown;
 }
 export interface UserCaPage { items: UserCaResource[]; next_cursor: string | null; [extension: string]: unknown; }
+
+/** Complete raw binary KRL, not JSON; authenticated request and captured CA supply provenance. */
+export type UserCaKrl = Uint8Array;
+export interface CertificateRevokedProblem extends ProblemDetails { status: 409; code: "certificate.revoked"; changed: false; retryable: false; }
+export interface CertificateQuotaExceededProblem extends ProblemDetails { status: 413; code: "certificate.quota_exceeded"; changed: false; retryable: false; }
+export interface CertificateBodyTooLargeProblem extends ProblemDetails { status: 413; code: "certificate.invalid_request"; changed: false; retryable: false; }
 // END GENERATED UserCa
 // BEGIN GENERATED GroupPolicy
 export type GroupSource = "local" | "IdP";

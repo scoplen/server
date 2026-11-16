@@ -500,6 +500,64 @@ async fn postgres_team_creation_and_current_membership_http() {
     contract(Fixture::postgres().await).await;
 }
 
+async fn operator_logout_preserves_krl(mut f: Fixture) {
+    let actor = legacy_device_session(&mut f).await;
+    mount(&mut f, true).await;
+    let team = resource(
+        &create(&f, &actor, Uuid::now_v7(), "KRL logout isolation").await,
+        actor.receipt.account_id,
+        201,
+    );
+    let ca = scoplen_api::user_ca::UserCaCreateRequest { id: Uuid::now_v7() };
+    let created = request(
+        &f,
+        &actor,
+        "POST",
+        &format!("{COLLECTION}/{}/certificate-authorities", team.id),
+        &ca.to_json().unwrap(),
+        &[("Content-Type", "application/json"), ("Idempotency-Key", &Uuid::now_v7().to_string())],
+    )
+    .await;
+    assert_eq!(created.status, 201);
+    let path = format!("{COLLECTION}/{}/certificate-authorities/{}/krl", team.id, ca.id);
+    let before = request(&f, &actor, "GET", &path, &[], &[]).await;
+    assert_eq!(before.status, 200);
+    protected(&f, "GET", &path, &[], &actor.operator_token, &actor.operator_key).await.problem(
+        401,
+        "auth.authentication_required",
+        false,
+        false,
+    );
+    assert_eq!(
+        protected(
+            &f,
+            "POST",
+            "/api/v1/auth/operator/logout",
+            b"{}",
+            &actor.operator_token,
+            &actor.operator_key
+        )
+        .await
+        .status,
+        200
+    );
+    let after = request(&f, &actor, "GET", &path, &[], &[]).await;
+    assert_eq!(after.status, 200);
+    assert_eq!(after.body, before.body, "Operator logout preserves Device KRL state");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn sqlite_operator_logout_preserves_device_user_ca_krl() {
+    operator_logout_preserves_krl(Fixture::sqlite().await).await;
+}
+
+#[cfg(feature = "postgres-integration")]
+#[tokio::test]
+async fn postgres_operator_logout_preserves_device_user_ca_krl() {
+    operator_logout_preserves_krl(Fixture::postgres().await).await;
+}
+
 async fn receipt_retention(mut f: Fixture) {
     let a = legacy_device_session(&mut f).await;
     mount(&mut f, true).await;

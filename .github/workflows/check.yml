@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: 33374ca27c0bb717d0c3a47faf4e46e37e1a3c52
+          ref: a96b28a69d657e6b139597e9e051af41230919a7
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -132,6 +132,9 @@ jobs:
       SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.16.0
       - name: Show pinned toolchain
         run: rustup show active-toolchain
       - name: Compare PostgreSQL and SQLite schemas
@@ -166,6 +169,14 @@ jobs:
       - name: Check native Account entry, team lifecycle HTTP and startup on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2
+      - name: Export verified TLS KRL downloads from both stores
+        env:
+          SCOPLEN_KRL_ACCEPTANCE_DIRECTORY: ${{ runner.temp }}/krl-acceptance
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration user_ca_krl_download_over_verified_tls -- --test-threads=1
+      - name: Apply downloaded KRLs to owned real OpenSSH
+        run: |
+          node scripts/check-user-ca-krl.mjs "$RUNNER_TEMP/krl-acceptance/sqlite"
+          node scripts/check-user-ca-krl.mjs "$RUNNER_TEMP/krl-acceptance/postgres"
       - name: Check PostgreSQL operator setup, passkeys, and uncertain commits
         run: cargo test -p scoplen-store --test operator_setup --features postgres-integration postgres_
       - name: Check PostgreSQL Operator access-token keyring
@@ -218,6 +229,8 @@ jobs:
         env:
           SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen_organization_migrations_ci
         run: cargo test --locked -p scoplen-store --test organization_user_ca_migrations --features postgres-integration -- --test-threads=1
+      - name: Check signed historical user-CA KRL activation and retained revocations
+        run: cargo test --locked -p scoplen-store --test user_ca_krl_migrations --features postgres-integration -- --test-threads=1
       - name: Create isolated team HTTP database
         run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organizations_http_ci'
       - name: Check PostgreSQL team creation, discovery, receipts and uncertain commits

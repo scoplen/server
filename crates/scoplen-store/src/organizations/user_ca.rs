@@ -10,13 +10,16 @@ use crate::kms::KeyManagementService;
 use scoplen_api::{
     certificate::{CertificateIssuanceRequest, CertificateIssuanceResponse, CertificateTargets},
     inventory::InventoryType,
+    krl::MAX_USER_CA_KRL_SERIALS,
     organization::OrganizationListQuery,
     user_ca::{UserCaCreateRequest, UserCaPage, UserCaResource, user_ca_fingerprint},
 };
-use scoplen_ca::{LocalUserCa, UserCertificateContext};
+use scoplen_ca::{LocalUserCa, UserCertificateContext, verify_stored_user_certificate};
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Row, Sqlite, Transaction};
 use std::{collections::BTreeSet, fmt::Write as _, net::IpAddr};
+
+mod krl;
 
 fn digest(
     origin: &str,
@@ -81,6 +84,7 @@ macro_rules! user_ca {
                 let canonical=request.to_json().map_err(|_|Error::InvalidRequest)?;
                 let digest=digest(origin,expected,org,"certificate-authorities",&canonical);
                 let mut tx=self.pool.begin_with($begin).await?;
+                Self::activate_user_ca_krls(&mut tx).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,org,true).await?;
                 let now=now_ms()?;
                 Self::authorize_organization_action(&mut tx,&current,now,"manage_ca").await?;
@@ -102,6 +106,7 @@ macro_rules! user_ca {
                 let response=resource.to_json().map_err(|_|Error::StorageUnavailable)?;
                 sqlx::query("INSERT INTO organization_user_cas (organization_id,id,encrypted_seed,response_json,last_serial,created_at_ms) VALUES ($1,$2,$3,$4,$5,$6)")
                     .bind(org.as_bytes().as_slice()).bind(request.id.as_bytes().as_slice()).bind(encrypted).bind(&response).bind(0_u64.to_be_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
+                Self::insert_user_ca_krl(&mut tx,org,request.id,&resource.public_key,u64::try_from(now.div_euclid(1_000)).map_err(|_|Error::StorageUnavailable)?,&[]).await?;
                 let event=serde_json::to_vec(&serde_json::json!({"action":"organization.user_ca_created","organization_id":org,"authority_id":request.id,"account_id":Uuid::from_bytes(expected.account_id),"device_id":Uuid::from_bytes(expected.device_id)})).map_err(|_|Error::StorageUnavailable)?;
                 $audit(&mut tx,org.into_bytes(),&event,now).await.map_err(|_|Error::StorageUnavailable)?;
                 Self::append_user_ca_receipt(&mut tx,expected,org,key,now,&digest,&response).await?;
@@ -175,6 +180,7 @@ macro_rules! user_ca {
                 let canonical=request.to_json().map_err(|_|Error::InvalidRequest)?;
                 let digest=digest(origin,expected,org,"certificates",&canonical);
                 let mut tx=self.pool.begin_with($begin).await?;
+                Self::activate_user_ca_krls(&mut tx).await?;
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,org,true).await?;
                 let now=now_ms()?;
                 let mut graph=Self::inventory_graph(&mut tx,current,now).await?;
@@ -184,11 +190,37 @@ macro_rules! user_ca {
                 let authority=super::inventory::row_uuid(&row,"id")?;
                 let metadata=UserCaResource::from_json(&row.try_get::<Vec<u8>,_>("response_json")?).map_err(|_|Error::StorageUnavailable)?;
                 metadata.validate_for_id(authority).map_err(|_|Error::StorageUnavailable)?;
+                Self::stored_user_ca_krl(&mut tx,org,authority,&metadata.public_key).await?;
                 if let Some(response)=Self::user_ca_receipt(&mut tx,expected,key,now,&digest).await? {
                     let resource=CertificateIssuanceResponse::from_json(&response).map_err(|_|Error::StorageUnavailable)?;
                     resource.validate_request_subject(request).map_err(|_|Error::StorageUnavailable)?;
+                    let issued=sqlx::query("SELECT authority_id,account_id,device_id,serial,valid_before,response_json FROM organization_user_certificates WHERE organization_id=$1 AND id=$2")
+                        .bind(org.as_bytes().as_slice()).bind(resource.id.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or(Error::StorageUnavailable)?;
+                    if issued.try_get::<Vec<u8>,_>("authority_id")?.as_slice()!=authority.as_bytes()
+                        || issued.try_get::<Vec<u8>,_>("account_id")?.as_slice()!=expected.account_id
+                        || issued.try_get::<Vec<u8>,_>("device_id")?.as_slice()!=expected.device_id
+                        || issued.try_get::<Vec<u8>,_>("response_json")?!=response {return Err(Error::StorageUnavailable);}
+                    let serial:[u8;8]=issued.try_get::<Vec<u8>,_>("serial")?.try_into().map_err(|_|Error::StorageUnavailable)?;
+                    let expiry=verify_stored_user_certificate(&resource.certificate,&metadata.public_key,org,Uuid::from_bytes(expected.account_id),Uuid::from_bytes(expected.device_id),resource.id,u64::from_be_bytes(serial)).map_err(|_|Error::StorageUnavailable)?;
+                    if issued.try_get::<Option<Vec<u8>>,_>("valid_before")?.as_deref()!=Some(expiry.to_be_bytes().as_slice()) {return Err(Error::StorageUnavailable);}
+                    let revoked=sqlx::query_scalar::<_,Vec<u8>>("SELECT valid_before FROM organization_user_ca_revocations WHERE organization_id=$1 AND authority_id=$2 AND serial=$3")
+                        .bind(org.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).bind(serial.as_slice()).fetch_optional(&mut *tx).await?;
                     check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                    if let Some(revoked_expiry)=revoked {
+                        if revoked_expiry.as_slice()!=expiry.to_be_bytes() {return Err(Error::StorageUnavailable);}
+                        return Err(Error::CertificateRevoked);
+                    }
                     tx.commit().await?;return Ok(resource);
+                }
+                let unverified:i64=sqlx::query_scalar("SELECT COUNT(*) FROM organization_user_certificates WHERE organization_id=$1 AND authority_id=$2 AND valid_before IS NULL")
+                    .bind(org.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+                if unverified!=0 {return Err(Error::StorageUnavailable);}
+                let now_seconds=u64::try_from(now.div_euclid(1_000)).map_err(|_|Error::StorageUnavailable)?;
+                let outstanding:i64=sqlx::query_scalar("SELECT COUNT(*) FROM (SELECT serial FROM organization_user_certificates WHERE organization_id=$1 AND authority_id=$2 AND valid_before>$3 UNION SELECT serial FROM organization_user_ca_revocations WHERE organization_id=$1 AND authority_id=$2 AND valid_before>$3) AS outstanding")
+                    .bind(org.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).bind(now_seconds.to_be_bytes().as_slice()).fetch_one(&mut *tx).await?;
+                if outstanding>=i64::try_from(MAX_USER_CA_KRL_SERIALS).map_err(|_|Error::StorageUnavailable)? {
+                    check_identity($principal(&mut tx,expected.device_id).await?,expected,expires_at)?;
+                    return Err(Error::CertificateQuotaExceeded);
                 }
                 let last_serial:[u8;8]=row.try_get::<Vec<u8>,_>("last_serial")?.try_into().map_err(|_|Error::StorageUnavailable)?;
                 let serial=u64::from_be_bytes(last_serial).checked_add(1).ok_or(Error::StorageUnavailable)?;
@@ -196,14 +228,15 @@ macro_rules! user_ca {
                 if signer.public_key().map_err(|_|Error::StorageUnavailable)?!=metadata.public_key {return Err(Error::StorageUnavailable);}
                 let id=Uuid::now_v7();
                 let certificate=signer.issue(request,&UserCertificateContext{organization:org,account:Uuid::from_bytes(expected.account_id),device:Uuid::from_bytes(expected.device_id),certificate:id,serial,now_seconds:u64::try_from(now.div_euclid(1000)).map_err(|_|Error::StorageUnavailable)?}).map_err(|_|Error::StorageUnavailable)?;
+                let expiry=verify_stored_user_certificate(&certificate,&metadata.public_key,org,Uuid::from_bytes(expected.account_id),Uuid::from_bytes(expected.device_id),id,serial).map_err(|_|Error::StorageUnavailable)?;
                 let mut resource=CertificateIssuanceResponse::new(id,"\"pending\"",timestamp(now)?,timestamp(now)?,certificate).map_err(|_|Error::StorageUnavailable)?;
                 resource.validate_request_subject(request).map_err(|_|Error::StorageUnavailable)?;
                 resource.etag=etag(&resource.to_json().map_err(|_|Error::StorageUnavailable)?);
                 let response=resource.to_json().map_err(|_|Error::StorageUnavailable)?;
                 sqlx::query("UPDATE organization_user_cas SET last_serial=$3 WHERE organization_id=$1 AND id=$2")
                     .bind(org.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).bind(serial.to_be_bytes().as_slice()).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO organization_user_certificates (organization_id,id,authority_id,account_id,device_id,serial,response_json,created_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-                    .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).bind(expected.account_id.as_slice()).bind(expected.device_id.as_slice()).bind(serial.to_be_bytes().as_slice()).bind(&response).bind(now).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO organization_user_certificates (organization_id,id,authority_id,account_id,device_id,serial,response_json,created_at_ms,valid_before) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+                    .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(authority.as_bytes().as_slice()).bind(expected.account_id.as_slice()).bind(expected.device_id.as_slice()).bind(serial.to_be_bytes().as_slice()).bind(&response).bind(now).bind(expiry.to_be_bytes().as_slice()).execute(&mut *tx).await?;
                 let event=serde_json::to_vec(&serde_json::json!({"action":"organization.certificate_issued","organization_id":org,"authority_id":authority,"certificate_id":id,"account_id":Uuid::from_bytes(expected.account_id),"device_id":Uuid::from_bytes(expected.device_id),"serial":serial})).map_err(|_|Error::StorageUnavailable)?;
                 $audit(&mut tx,org.into_bytes(),&event,now).await.map_err(|_|Error::StorageUnavailable)?;
                 Self::append_user_ca_receipt(&mut tx,expected,org,key,now,&digest,&response).await?;
