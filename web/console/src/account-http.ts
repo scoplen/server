@@ -178,6 +178,7 @@ export async function accountFetch({
       value = await jsonResponse(
         response,
         response.status === success ? (options.maximum ?? 8_192) : 4_096,
+        response.status === success ? options.decode : undefined,
       );
     }
   } catch {

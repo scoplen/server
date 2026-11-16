@@ -77,11 +77,26 @@ function positive(value: unknown): number {
 }
 
 /** Check duplicate names before JSON.parse can discard them, including ignored extensions. */
-export function strictJson(source: string): unknown {
-  const tokens =
-    source.match(/"(?:\\.|[^"\\])*"|[{}[\]:,]|[^\s{}[\]:,]+/g) ?? [];
+export function strictJson(
+  source: string,
+  inspect?: (
+    path: readonly (string | number)[],
+    start: number,
+    end: number,
+  ) => void,
+): unknown {
+  const matches = Array.from(
+    source.matchAll(/"(?:\\.|[^"\\])*"|[{}[\]:,]|[^\s{}[\]:,]+/g),
+  );
+  const tokens = matches.map((match) => match[0]);
   let index = 0;
-  function value(depth: number): void {
+  function value(depth: number, path: (string | number)[]): void {
+    const start = matches[index]?.index ?? source.length;
+    consume(depth, path);
+    const last = matches[index - 1];
+    inspect?.(path, start, last.index + last[0].length);
+  }
+  function consume(depth: number, path: (string | number)[]): void {
     if (depth > 64) throw new Error("Response nesting is too deep.");
     const token = tokens[index++];
     if (token === "{") {
@@ -99,7 +114,7 @@ export function strictJson(source: string): unknown {
         )
           throw new Error("Ambiguous response object.");
         names.add(name);
-        value(depth + 1);
+        value(depth + 1, [...path, name]);
         const separator = tokens[index++];
         if (separator === "}") return;
         if (separator !== ",") throw new Error("Invalid response object.");
@@ -110,8 +125,8 @@ export function strictJson(source: string): unknown {
         index++;
         return;
       }
-      for (;;) {
-        value(depth + 1);
+      for (let item = 0; ; item++) {
+        value(depth + 1, [...path, item]);
         const separator = tokens[index++];
         if (separator === "]") return;
         if (separator !== ",") throw new Error("Invalid response array.");
@@ -119,7 +134,7 @@ export function strictJson(source: string): unknown {
     }
     JSON.parse(token ?? "");
   }
-  value(0);
+  value(0, []);
   if (index !== tokens.length) throw new Error("Invalid response JSON.");
   return JSON.parse(source) as unknown;
 }
@@ -127,6 +142,7 @@ export function strictJson(source: string): unknown {
 export async function jsonResponse(
   response: Response,
   maximum: number,
+  decode: (source: string) => unknown = strictJson,
 ): Promise<unknown> {
   if (!response.body) throw new Error("The server returned an empty response.");
   const reader = response.body.getReader();
@@ -143,7 +159,7 @@ export async function jsonResponse(
       source += decoder.decode(part.value, { stream: true });
     }
     source += decoder.decode();
-    return strictJson(source);
+    return decode(source);
   } finally {
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
