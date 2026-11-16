@@ -622,6 +622,110 @@ fieldset {
 .policy-source {
   font-size: 12px;
 }
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 20px;
+}
+.audit-outcomes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-width: 0;
+}
+.audit-outcomes legend {
+  font-size: 13px;
+  font-weight: 550;
+  margin-bottom: 7px;
+}
+.audit-outcomes label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  font-size: 13px;
+}
+.audit-outcomes input {
+  width: auto;
+}
+.audit-events {
+  list-style: none;
+  margin: 28px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+}
+.audit-events > li {
+  border-bottom: 1px solid var(--border);
+}
+.audit-events summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 20px;
+  padding: 18px 0;
+  cursor: pointer;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.audit-event-title {
+  flex: 1 1 100%;
+  color: var(--primary);
+  font-size: 14px;
+}
+.audit-events summary time {
+  color: var(--muted-foreground);
+}
+.audit-events summary:hover .audit-event-title {
+  text-decoration: underline;
+}
+.audit-events summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+}
+.audit-outcome-failure {
+  color: var(--attention);
+}
+.audit-outcome-unknown {
+  color: var(--muted-foreground);
+}
+.audit-details {
+  display: grid;
+  gap: 14px;
+  font-size: 12px;
+  padding: 0 0 20px;
+}
+.audit-details dt {
+  color: var(--muted-foreground);
+}
+.audit-details dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.audit-verification {
+  border-top: 1px solid var(--border);
+  margin-top: 40px;
+  padding-top: 24px;
+}
+.audit-verification > h2 {
+  margin-bottom: 12px;
+}
+.audit-result {
+  margin-top: 24px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.audit-result p,
+.audit-result details {
+  margin-top: 12px;
+}
+.audit-result summary {
+  color: var(--primary);
+  cursor: pointer;
+}
+.audit-result .audit-details {
+  margin-top: 16px;
+}
 .load-more {
   margin-top: 24px;
 }
