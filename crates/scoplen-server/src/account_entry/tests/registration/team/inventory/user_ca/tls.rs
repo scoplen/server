@@ -9,6 +9,12 @@ use rustls::{
     pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName},
 };
 use scoplen_api::krl::UserCaKrl;
+use scoplen_api::sync::{
+    SyncAckRequest, SyncAckResponse, SyncChangesResponse, SyncVaultKeysResponse, SyncWrite,
+    SyncWriteBatch, SyncWriteBatchResponse, VaultKind,
+};
+use scoplen_crypto::{ObjectEnvelope, PersonalVaultKeyWrap};
+use scoplen_model::{FieldEntry, FieldPath, Hlc, cbor};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 struct TlsFixture {
@@ -70,6 +76,10 @@ impl TlsFixture {
     }
 
     async fn get(&self, actor: &Actor, path: &str) -> Reply {
+        self.request(actor, "GET", path, &[]).await
+    }
+
+    async fn request(&self, actor: &Actor, method: &str, path: &str, body: &[u8]) -> Reply {
         let mut config = ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
@@ -93,20 +103,23 @@ impl TlsFixture {
         let proof = DpopProof::sign(
             &actor.registration.device,
             &actor.registration.device.public_key_sec1(),
-            &DpopTarget::new("GET", ORIGIN, path).unwrap(),
+            &DpopTarget::new(method, ORIGIN, path.split('?').next().unwrap()).unwrap(),
             DpopToken::Protected(&actor.token.access_token),
             u64::try_from(time::OffsetDateTime::now_utc().unix_timestamp()).unwrap(),
             None,
         )
         .unwrap();
-        let request = Request::builder()
+        let mut request = Request::builder()
+            .method(method)
             .uri(path)
             .header("Host", "example.com")
             .header("Origin", ORIGIN)
             .header("Authorization", format!("DPoP {}", actor.token.access_token))
-            .header("DPoP", proof.as_str())
-            .body(Body::empty())
-            .unwrap();
+            .header("DPoP", proof.as_str());
+        if path.starts_with("/sync/") {
+            request = request.header("Content-Type", "application/cbor");
+        }
+        let request = request.body(Body::from(body.to_vec())).unwrap();
         let response = sender.send_request(request).await.unwrap();
         let status = response.status().as_u16();
         let mut headers = String::new();
@@ -118,6 +131,90 @@ impl TlsFixture {
         task.abort();
         Reply { status, headers, body }
     }
+}
+
+async fn personal_sync_after_revocation(tls: &TlsFixture, member: &Actor, owner: &Actor) {
+    let device = member.registration.payload.device_id;
+    let vault = member.registration.payload.personal_vault_id;
+    let body =
+        SyncSessionRequest { client_version: "0.1.0".into(), model_version: 1, device_id: device }
+            .to_cbor()
+            .unwrap();
+    let reply = tls.request(member, "POST", "/sync/v1/session", &body).await;
+    assert_eq!(reply.status, 200);
+    reply.private();
+    let session = SyncSessionResponse::from_cbor(&reply.body).unwrap();
+    assert_eq!(session.vaults.len(), 1);
+    assert_eq!(session.vaults[0].id, vault);
+    assert_eq!(session.vaults[0].kind, VaultKind::Personal);
+    assert_eq!(session.vaults[0].organization, None);
+    let reply = tls.get(member, &format!("/sync/v1/vaults/{vault}/keys")).await;
+    assert_eq!(reply.status, 200);
+    reply.private();
+    let keys = SyncVaultKeysResponse::from_cbor(&reply.body).unwrap();
+    assert_eq!(keys.keys.len(), 1);
+    assert_eq!(keys.keys[0].epoch, 1);
+    let key = PersonalVaultKeyWrap::decode(&keys.keys[0].wrapped_vault_key)
+        .unwrap()
+        .open(member.registration.payload.account_id, vault, 1, &SecretBytes::new([11; 32]))
+        .unwrap();
+    let mut object = Object::new(Uuid::now_v7(), ObjectType::HOST, 1).unwrap();
+    for (field, value) in [(1, "Personal after team revocation"), (2, "personal.example.test")] {
+        object
+            .insert(
+                FieldPath::field(field).unwrap(),
+                FieldEntry::new(cbor::Value::Text(value.into()), Hlc::at(1).unwrap(), device)
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    let payload =
+        ObjectEnvelope::encrypt(vault, 1, &object, &key, device, &member.registration.device)
+            .and_then(|envelope| envelope.encode())
+            .unwrap();
+    let body = SyncWriteBatch {
+        writes: vec![SyncWrite {
+            object_id: object.id,
+            base_seq: None,
+            payload: payload.clone(),
+            tombstone: false,
+        }],
+    }
+    .to_cbor()
+    .unwrap();
+    let reply =
+        tls.request(member, "POST", &format!("/sync/v1/vaults/{vault}/objects"), &body).await;
+    assert_eq!(reply.status, 200);
+    reply.private();
+    let written = SyncWriteBatchResponse::from_cbor(&reply.body).unwrap();
+    assert_eq!(written.assignments.len(), 1);
+    assert_eq!(written.assignments[0].object_id, object.id);
+    assert_eq!(written.assignments[0].seq, 1);
+    let path = format!("/sync/v1/vaults/{vault}/changes?after=0&limit=10");
+    sync_problem(&tls.get(owner, &path).await, 404, "sync.object_not_found");
+    let reply = tls.get(member, &path).await;
+    assert_eq!(reply.status, 200);
+    reply.private();
+    let changes = SyncChangesResponse::from_cbor(&reply.body).unwrap();
+    assert_eq!(changes.changes.len(), 1);
+    assert_eq!(changes.next_cursor, 1);
+    assert!(!changes.more);
+    let retained = &changes.changes[0];
+    assert_eq!(retained.object_id, object.id);
+    assert_eq!(retained.signer_device_id, Some(device));
+    assert_eq!(retained.seq, 1);
+    assert_eq!(retained.payload, payload);
+    let opened = ObjectEnvelope::decode(&retained.payload)
+        .and_then(|envelope| {
+            envelope.decrypt(vault, object.id, &key, &member.registration.device.public_key_sec1())
+        })
+        .unwrap();
+    assert_eq!(opened, object);
+    let body = SyncAckRequest { cursor: changes.next_cursor }.to_cbor().unwrap();
+    let reply = tls.request(member, "POST", &format!("/sync/v1/vaults/{vault}/ack"), &body).await;
+    assert_eq!(reply.status, 200);
+    reply.private();
+    assert_eq!(SyncAckResponse::from_cbor(&reply.body).unwrap().cursor, 1);
 }
 
 fn downloaded(reply: &Reply, trust: &UserCaResource) -> UserCaKrl {
@@ -257,6 +354,10 @@ async fn tls_contract(f: &Fixture, label: &str) {
     );
     let tls = TlsFixture::start(f).await;
     let path = format!("/api/v1/orgs/{org}/certificate-authorities/{}/krl", trust.id);
+    let other_path =
+        format!("/api/v1/orgs/{other_org}/certificate-authorities/{}/krl", other_trust.id);
+    let other_snapshot = tls.get(&owner, &other_path).await;
+    assert_eq!(downloaded(&other_snapshot, &other_trust).revoked_serials(), &[] as &[u64]);
     let empty = tls.get(&owner, &path).await;
     assert_eq!(downloaded(&empty, &trust).revoked_serials(), &[] as &[u64]);
     status(f, &owner, org, membership, TeamMemberStatus::Suspended).await;
@@ -307,6 +408,10 @@ async fn tls_contract(f: &Fixture, label: &str) {
         problem(&racing, 404, "organization.not_found");
         assert_eq!(snapshot.revoked_serials(), [1, 3]);
     }
+    personal_sync_after_revocation(&tls, &member, &owner).await;
+    assert_eq!(tls.get(&owner, &path).await.body, complete.body);
+    assert_eq!(tls.get(&owner, &other_path).await.body, other_snapshot.body);
+    problem(&tls.get(&member, &other_path).await, 404, "organization.not_found");
 }
 
 #[tokio::test]
