@@ -861,7 +861,9 @@ Keep the matching pre-upgrade database, deployment keys and object backup for of
 For disposable OpenSSH acceptance, set `SCOPLEN_KRL_ACCEPTANCE_DIRECTORY` to a new directory,
 run `cargo test --locked -p scoplen-server --lib user_ca_krl_download_over_verified_tls`, then
 run `node scripts/check-user-ca-krl.mjs <directory>/sqlite`. The test exports synthetic keys,
-real issued certificates and KRL bytes downloaded through verified HTTPS. The script creates
+real issued certificates and KRL bytes downloaded through verified HTTPS. After team suspension,
+it also uploads, reads, verifies and acknowledges a signed encrypted Personal Host, preserving
+the other team's KRL and denying foreign Personal reads. The script creates
 an isolated Docker fixture, installs the downloaded file as `RevokedKeys`, validates sshd
 configuration, and checks fresh revoked/fresh same-key/other-member/other-CA/Personal handshakes.
 It removes only its labeled container/image. PostgreSQL uses the same test with
