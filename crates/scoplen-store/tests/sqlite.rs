@@ -20,6 +20,11 @@ async fn migration_is_idempotent_and_sqlite_uses_wal() {
     let database = directory.join("nested").join("scoplen.sqlite");
     let store = SqliteStore::open(&database).await.expect("open and migrate database");
     store.ping().await.expect("database is ready");
+    let version: String = sqlx::query_scalar("SELECT sqlite_version()")
+        .fetch_one(store.pool())
+        .await
+        .expect("read the actual SQLite runtime version");
+    assert_eq!(version, "3.54.1", "bundled SQLite must contain the reviewed WAL memory fix");
 
     let mut connection = store.pool().acquire().await.expect("acquire database connection");
     let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")

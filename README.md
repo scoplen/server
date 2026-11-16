@@ -484,6 +484,12 @@ on macOS, or the usual C compiler, Make and Perl packages on Linux. Put `perl` o
 Strawberry default is `C:\Strawberry\perl\bin`). NASM is optional on Windows; the vendored build
 automatically disables assembly when NASM is unavailable.
 
+The SQLx 0.8.6 SQLite driver is vendored with only its native dependency pinned to
+`libsqlite3-sys =0.39.1`, which bundles SQLite 3.54.1 and fixes RUSTSEC-2026-0459. Its Rust
+sources are unchanged. [The patch record](vendor/PATCHES.md) lists verified upstream sources,
+licenses and removal criteria. Cargo and the production container use the same path patch;
+do not replace the bundled engine with an older system SQLite.
+
 Windows startup also requires the OS Windows PowerShell 5.1 executable and .NET filesystem
 access-control APIs for permission admission. A missing or restricted runtime stops startup
 with an actionable error; existing ACLs are never silently repaired.

@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Update bundled SQLite to 3.54.1 through a minimal SQLx 0.8.6 driver dependency patch, fixing
+  RUSTSEC-2026-0459 without changing driver Rust sources or migration bytes. Include the reviewed
+  vendor source and licenses in production-container builds.
+
 - Persist local-user-CA serial revocations and complete bounded KRL snapshots atomically with
   member suspension/removal, self-leave and dissolution on SQLite and PostgreSQL. Add authenticated
   native KRL download, exact revoked-receipt and issuance-cap outcomes, and forward-only verified

@@ -5,6 +5,9 @@
 !rust-toolchain.toml
 !crates/
 !crates/**
+!vendor/
+!vendor/sqlx-sqlite-0.8.6/
+!vendor/sqlx-sqlite-0.8.6/**
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !web/

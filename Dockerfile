@@ -46,12 +46,13 @@ COPY rust-toolchain.toml ./
 RUN rustup show active-toolchain
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
+COPY vendor/sqlx-sqlite-0.8.6/ ./vendor/sqlx-sqlite-0.8.6/
 ARG TARGETARCH
 RUN --mount=type=cache,id=scoplen-server-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=scoplen-server-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=scoplen-server-target-linux-${TARGETARCH},target=/src/target,sharing=locked \
     touch Cargo.toml Cargo.lock rust-toolchain.toml \
-    && find crates -type f -exec touch {} + \
+    && find crates vendor -type f -exec touch {} + \
     && cargo build --locked --release \
        -p scoplen-server --bin spl-server -p scoplen-ctl --bin splctl \
     && install -d -m 0700 -o 65532 -g 65532 /container-data/spl \
@@ -67,6 +68,7 @@ COPY --from=console-build /src/web/console/dist/ /app/console/
 COPY --from=server-build --chown=65532:65532 --chmod=0700 /container-data/ /var/lib/
 COPY deploy/personal.toml /etc/scoplen/personal.toml
 COPY LICENSE /app/LICENSE
+COPY --from=server-build /src/vendor/sqlx-sqlite-0.8.6/LICENSE-APACHE /src/vendor/sqlx-sqlite-0.8.6/LICENSE-MIT /app/licenses/sqlx-sqlite/
 ENV SPL_CONFIG=/etc/scoplen/personal.toml
 WORKDIR /app
 USER 65532:65532
