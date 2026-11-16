@@ -52,6 +52,13 @@ const OPTIONS: &str = "/api/v1/auth/accounts/password/options";
 const LOGIN: &str = "/api/v1/auth/accounts/password/login";
 const ADMIT: &str = "/api/v1/auth/accounts/device-admissions";
 
+#[path = "audit.rs"]
+mod audit;
+
+pub(super) async fn verify_audit(https: &Https) -> Result<()> {
+    audit::verify(https).await
+}
+
 struct Device {
     id: Uuid,
     keys: DeviceKeys,
