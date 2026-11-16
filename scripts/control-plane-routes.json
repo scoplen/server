@@ -7,6 +7,8 @@
   {"method": "GET", "path": "/orgs"},
   {"method": "GET", "path": "/orgs/{org}"},
   {"method": "PATCH", "path": "/orgs/{org}"},
+  {"method": "GET", "path": "/orgs/{org}/audit-events"},
+  {"method": "GET", "path": "/orgs/{org}/audit-events/verify"},
   {"method": "POST", "path": "/orgs/{org}/invitations"},
   {"method": "GET", "path": "/orgs/{org}/invitations"},
   {"method": "GET", "path": "/orgs/{org}/invitations/{invitation}"},

@@ -50,6 +50,7 @@ async fn serve_api(backend: AuthBackend, directory: &Path) -> (SocketAddr, JoinH
         NotificationHub::default(),
         settings(true),
         crate::OrganizationSettings::default(),
+        crate::runtime::test_audit_verification_key(),
     ))
     .await
 }

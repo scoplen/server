@@ -27,6 +27,7 @@ use actor::actor_audit;
 pub use actor::{OrganizationActor, OrganizationActorRef, OrganizationPrincipal};
 pub(crate) use actor::{postgres_actor, sqlite_actor};
 
+mod audit;
 pub mod group_policy;
 pub mod inventory;
 mod name;
@@ -38,6 +39,8 @@ pub mod user_ca;
 pub enum OrganizationStoreError {
     #[error("invalid organization request")]
     InvalidRequest,
+    #[error("organization audit range exceeds its bound")]
+    AuditTooLarge,
     #[error("current account authentication is required")]
     AuthenticationRequired,
     #[error("organization creation is disabled")]

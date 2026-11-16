@@ -94,6 +94,7 @@ impl Listener {
             hub.clone(),
             crate::AccountSettings::default(),
             crate::OrganizationSettings::default(),
+            crate::runtime::test_audit_verification_key(),
         );
         let plain = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");
         f.address = plain.local_addr().expect("HTTP address");
@@ -619,7 +620,12 @@ async fn supervised_shutdown_fences_ready_h2_connect_before_listener_exit() {
             database,
             Arc::new(object_storage),
             Arc::new(kms),
-            crate::runtime::ListenerLifecycle { lease, notifications: listener_hub, shutdown },
+            crate::runtime::ListenerLifecycle {
+                lease,
+                notifications: listener_hub,
+                shutdown,
+                audit_verification_key: crate::runtime::test_audit_verification_key(),
+            },
         )
         .await
         .expect("supervised TLS listener");
