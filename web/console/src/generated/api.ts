@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/15566c7d26ca178edd3631cf61996e7ec94884bd/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -192,7 +192,11 @@ export interface components {
     HostAgent: Resource;
     Session: Resource;
     Recording: Resource;
-    AuditEvent: Resource;
+    AuditEvent: AuditEvent;
+    AuditResource: AuditResource;
+    AuditPage: AuditPage;
+    AuditCheckpoint: AuditCheckpoint;
+    AuditVerification: AuditVerification;
     AuditExport: Resource;
     Integration: Resource;
   };
@@ -206,6 +210,21 @@ export interface Resource {
   data: Record<string, unknown>;
 }
 export interface ResourcePage { items: Resource[]; next_cursor: string | null; }
+// BEGIN GENERATED Audit
+export type AuditResourceKind = "organization" | "invitation" | "membership" | "host" | "host_group" | "access_profile" | "route" | "trust_record" | "snippet" | "gateway_network" | "group" | "policy" | "certificate_authority" | "certificate";
+export type AuditCategory = "authentication" | "authorization" | "account_change" | "scoplen" | "unknown";
+export type AuditOutcome = "success" | "failure" | "unknown";
+export interface AuditResource { kind: AuditResourceKind; id: string; [extension: string]: unknown; }
+/** Sequence values are exact decimal strings. This safe projection supplies no cryptographic proof. */
+export interface AuditEvent { organization_id: string; sequence: string; occurred_at: string; category: AuditCategory; event_class: string | null; outcome: AuditOutcome; actor_account_id: string | null; actor_device_id: string | null; actor_browser_family_id: string | null; resource: AuditResource | null; previous_hash: string; event_hash: string; [extension: string]: unknown; }
+export interface AuditPage { items: AuditEvent[]; next_cursor: string | null; [extension: string]: unknown; }
+export interface AuditListQuery { limit?: number; cursor?: string; sort?: "-sequence"; filter?: string; }
+export interface AuditRangeQuery { from_sequence: string; to_sequence: string; }
+/** Uses the deployment's existing audit key; signed_at preserves the exact integer signed milliseconds. */
+export interface AuditCheckpoint { sequence: string; head_hash: string; signed_at: string; signature: string; [extension: string]: unknown; }
+/** Coverage refers only to checkpoints included in the checked interval. */
+export interface AuditVerification { organization_id: string; from_sequence: string; to_sequence: string; checked_events: string; valid: boolean; failure_sequence: string | null; previous_hash: string | null; head_hash: string | null; checkpoint: AuditCheckpoint | null; uncheckpointed_from_sequence: string | null; [extension: string]: unknown; }
+// END GENERATED Audit
 // BEGIN GENERATED AccountProfile
 export interface AccountProfile {
   id: string;
@@ -806,13 +825,29 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "account:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "account:read audit:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
     "path": "/api/v1/accounts/me",
     "scopes": [
       "account:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/audit-events",
+    "scopes": [
+      "audit:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/audit-events/verify",
+    "scopes": [
+      "audit:read"
     ],
     "writerReceipt": false
   },

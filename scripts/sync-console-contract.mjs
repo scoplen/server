@@ -2,7 +2,7 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const revision = "15566c7d26ca178edd3631cf61996e7ec94884bd";
+export const revision = "c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a";
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
