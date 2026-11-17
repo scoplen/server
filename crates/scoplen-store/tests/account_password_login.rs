@@ -666,7 +666,7 @@ macro_rules! capability_race {
                 let mut insert=sqlx::QueryBuilder::<$db>::new("INSERT INTO account_admission_capabilities (token_digest,account_id,credential_generation,snapshot_digest,issued_at_ms,expires_at_ms) ");
                 insert.push_values(0..4,|mut row,index| {
                     let mut digest=vec![0;32]; digest[..16].copy_from_slice(account.as_bytes()); digest[16]=index;
-                    row.push_bind(digest).push_bind(account.as_bytes().to_vec()).push_bind(1_i64)
+                    row.push_bind(digest).push_bind(account.as_bytes().to_vec()).push_bind(1_u64.to_be_bytes().to_vec())
                         .push_bind(vec![3_u8;32]).push_bind(FUTURE).push_bind(FUTURE+300_000);
                 });
                 insert.build().execute(&mut *tx).await.expect("four retained rows per Account");

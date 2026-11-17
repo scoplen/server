@@ -40,6 +40,7 @@ use zeroize::Zeroizing;
 mod admission;
 mod browser;
 mod password;
+mod password_change;
 
 use crate::{
     AccountSettings, ServerError,
@@ -115,6 +116,7 @@ fn routes() -> Router<Arc<EntryState>> {
             post(register).fallback(registration_method_denied),
         )
         .merge(admission::routes())
+        .merge(password_change::routes())
         .merge(password::routes())
         .merge(browser::routes())
 }

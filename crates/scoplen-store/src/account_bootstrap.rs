@@ -148,8 +148,8 @@ macro_rules! bootstrap {
                 .bind(account).bind(device).bind(&update.device_wraps[0].wrapped_ark).execute(&mut **tx).await?.rows_affected())?;
             inserted(sqlx::query(&sql("INSERT INTO sync_account_key_certificates (account_id,certificate) VALUES (?,?)"))
                 .bind(account).bind(&payload.device_certificate).execute(&mut **tx).await?.rows_affected())?;
-            inserted(sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,1,1,?,?,?,?,?,?)"))
-                .bind(account).bind(&payload.origin).bind(&payload.username)
+            inserted(sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,?,1,?,?,?,?,?,?)"))
+                .bind(account).bind(&payload.origin).bind(&payload.username).bind(1_u64.to_be_bytes().as_slice())
                 .bind(payload.password_salt.as_slice()).bind(payload.verifier.as_slice())
                 .bind(payload.password_ark.as_slice()).bind(vault)
                 .bind(payload.account_signing_public_key.as_slice()).bind(payload.account_kem_public_key.as_slice())
@@ -158,11 +158,11 @@ macro_rules! bootstrap {
             $read(tx, trusted_origin, payload.account_id).await
         }
 
-        /// Read and verify the complete current initial password bootstrap in one transaction.
+        /// Read and verify the complete current password bootstrap in one transaction.
         ///
         /// This grants no authority, verifies no password, and returns no session/capability.
         /// Call only inside an authorized protocol transaction; disclose after its confirmed commit.
-        /// Initial generation/Personal epoch one are the only supported lifecycle. No historical
+        /// Positive credential generations and Personal epoch one are supported. No historical
         /// Personal keys are fabricated from the current-key projection.
         /// # Errors
         /// Rejects missing, corrupt, incomplete, oversized, stale-snapshot or unsupported state.
@@ -193,7 +193,8 @@ macro_rules! bootstrap {
             if origin != trusted_origin || !row.try_get::<bool,_>("verifier_valid").map_err(|_| AccountBootstrapError::Integrity)? {
                 return Err(AccountBootstrapError::Integrity);
             }
-            if row.try_get::<i64,_>("credential_generation")? != 1 || row.try_get::<i64,_>("password_profile")? != 1 {
+            let generation = crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountBootstrapError::Integrity)?;
+            if row.try_get::<i64,_>("password_profile")? != 1 {
                 return Err(AccountBootstrapError::UnsupportedState);
             }
             let fixed = |name: &str| row.try_get::<Vec<u8>,_>(name).map_err(|_| AccountBootstrapError::Integrity);
@@ -221,7 +222,7 @@ macro_rules! bootstrap {
             let snapshot = AccountBootstrapSnapshot {
                 origin, username: row.try_get("username").map_err(|_| AccountBootstrapError::Integrity)?,
                 account_id, personal_vault_id: Uuid::from_bytes(vault), account_signing_public_key: signing,
-                account_kem_public_key: kem, credential_generation: 1,
+                account_kem_public_key: kem, credential_generation: generation,
                 password_salt: fixed("password_salt")?.try_into().map_err(|_| AccountBootstrapError::Integrity)?,
                 password_ark: fixed("password_ark")?.try_into().map_err(|_| AccountBootstrapError::Integrity)?,
                 key_bundle, certificates, revocations,
