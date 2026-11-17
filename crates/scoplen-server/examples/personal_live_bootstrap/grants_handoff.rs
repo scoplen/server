@@ -256,6 +256,15 @@ struct Prepared {
 }
 
 async fn prepare_target(https: &Https, openssh_descriptor: &Path) -> Result<Prepared> {
+    prepare_target_inner(https, openssh_descriptor, false).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn prepare_target_inner(
+    https: &Https,
+    openssh_descriptor: &Path,
+    import_inventory: bool,
+) -> Result<Prepared> {
     let ssh = OwnedOpenSsh::load(openssh_descriptor)?;
     ssh.verify().await?;
     let owner = Registration::new(&https.origin)?;
@@ -269,54 +278,61 @@ async fn prepare_target(https: &Https, openssh_descriptor: &Path) -> Result<Prep
         invite(https, owner_browser.actor(), member_browser.actor(), &member, org).await?;
     let owner_token = owner.device.authenticate(https).await?;
     ca(https, native(&owner, &owner_token), org).await?;
-    let host_fields = json!({
-        "name":"Owned Grant SSH target", "address":"127.0.0.1", "port":ssh.port,
-    });
-    let initial =
-        asset(https, owner_browser.actor(), org, InventoryType::Host, host_fields.clone()).await?;
-    let profile = asset(
-        https,
-        owner_browser.actor(),
-        org,
-        InventoryType::AccessProfile,
-        json!({"host":initial.id,"username":SSH_USER,"route":0}),
-    )
-    .await?;
-    let profile_fields = InventoryFields::from_json(
-        InventoryType::AccessProfile,
-        &serde_json::to_vec(&json!({"host":initial.id,"username":SSH_USER,"route":0}))
-            .map_err(|_| "Grant Login fields encoding failed")?,
-    )
-    .map_err(|_| "Grant Login fields invalid")?;
-    if profile.fields != profile_fields {
-        return Err("Grant Login Host, user or direct route differs");
-    }
-    let mut host_fields = host_fields;
-    host_fields["default_profile"] = json!(profile.id);
-    let request = InventoryReplaceRequest {
-        fields: InventoryFields::from_json(
-            InventoryType::Host,
-            &serde_json::to_vec(&host_fields).map_err(|_| "Grant Host fields encoding failed")?,
-        )
-        .map_err(|_| "Grant Host replacement fields invalid")?,
-    };
-    let host = inventory(
-        &exchange(
+    let (host, profile) = if import_inventory {
+        super::inventory_import::target(https, owner_browser.actor(), org, ssh.port).await?
+    } else {
+        let host_fields = json!({
+            "name":"Owned Grant SSH target", "address":"127.0.0.1", "port":ssh.port,
+        });
+        let initial =
+            asset(https, owner_browser.actor(), org, InventoryType::Host, host_fields.clone())
+                .await?;
+        let profile = asset(
             https,
             owner_browser.actor(),
-            "PUT",
-            &format!("/api/v1/orgs/{org}/hosts/{}", initial.id),
-            &request.to_json().map_err(|_| "Grant Host replacement request invalid")?,
-            &[("If-Match", &initial.etag)],
-            200,
+            org,
+            InventoryType::AccessProfile,
+            json!({"host":initial.id,"username":SSH_USER,"route":0}),
         )
-        .await?,
-        InventoryType::Host,
-        initial.id,
-    )?;
-    if host.fields != request.fields {
-        return Err("Grant Host default Login differs");
-    }
+        .await?;
+        let profile_fields = InventoryFields::from_json(
+            InventoryType::AccessProfile,
+            &serde_json::to_vec(&json!({"host":initial.id,"username":SSH_USER,"route":0}))
+                .map_err(|_| "Grant Login fields encoding failed")?,
+        )
+        .map_err(|_| "Grant Login fields invalid")?;
+        if profile.fields != profile_fields {
+            return Err("Grant Login Host, user or direct route differs");
+        }
+        let mut host_fields = host_fields;
+        host_fields["default_profile"] = json!(profile.id);
+        let request = InventoryReplaceRequest {
+            fields: InventoryFields::from_json(
+                InventoryType::Host,
+                &serde_json::to_vec(&host_fields)
+                    .map_err(|_| "Grant Host fields encoding failed")?,
+            )
+            .map_err(|_| "Grant Host replacement fields invalid")?,
+        };
+        let host = inventory(
+            &exchange(
+                https,
+                owner_browser.actor(),
+                "PUT",
+                &format!("/api/v1/orgs/{org}/hosts/{}", initial.id),
+                &request.to_json().map_err(|_| "Grant Host replacement request invalid")?,
+                &[("If-Match", &initial.etag)],
+                200,
+            )
+            .await?,
+            InventoryType::Host,
+            initial.id,
+        )?;
+        if host.fields != request.fields {
+            return Err("Grant Host default Login differs");
+        }
+        (host, profile)
+    };
     rule(
         https,
         owner_browser.actor(),
@@ -357,6 +373,7 @@ pub(super) async fn prepare(
     https: &Https,
     directory: &Path,
     openssh_descriptor: &Path,
+    import_inventory: bool,
 ) -> Result<()> {
     for name in PHASES {
         for suffix in ["json", "ready", "complete"] {
@@ -364,7 +381,7 @@ pub(super) async fn prepare(
         }
     }
     let Prepared { owner, member, mut owner_browser, org, membership, host, profile } =
-        prepare_target(https, openssh_descriptor).await?;
+        prepare_target_inner(https, openssh_descriptor, import_inventory).await?;
     let owner_password_file = directory.join("grant-client-owner-password.txt");
     let member_password_file = directory.join("grant-client-member-password.txt");
     super::super::write_browser_password(&owner_password_file, &owner.password)?;

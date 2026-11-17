@@ -195,6 +195,8 @@ fn response_limit(path: &str, method: &str, status: u16) -> usize {
         scoplen_api::access_request::MAX_ACCESS_REQUEST_PAGE_BYTES
     } else if path.ends_with("/certificates") {
         scoplen_api::certificate::MAX_CERTIFICATE_ISSUANCE_RESPONSE_BYTES
+    } else if path.ends_with("/inventory/imports") {
+        scoplen_api::inventory_import::MAX_INVENTORY_IMPORT_RESULT_BYTES
     } else {
         8_192
     }

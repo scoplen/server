@@ -351,6 +351,51 @@ the fixture; never replay it or overwrite its files. No credential, identifier o
 is printed, and completion does not claim rendered/native acceptance or completion of the
 integration gate. The caller owns all services, private diagnostics and exact resource cleanup.
 
+## CSV inventory import acceptance
+
+Build the server and example from the same checkout. Prepare a fresh private HTTPS fixture,
+enable Account registration and team creation, and complete `bootstrap`. Run independently
+with SQLite and a new owned PostgreSQL database:
+
+```text
+personal_live_bootstrap verify-inventory-import <fixture-directory>
+```
+
+The command uses public registration, genuine Device authentication and independently keyed
+Account-browser login. The published Rust CSV parser prepares two rows with the same name
+and endpoint, an omitted Login name and the default port. Both credential profiles submit
+typed batches and read every final Host/default-Login pair without repairing it. Complete
+Organization views must contain the exact K-1 fields, real writer origins and contiguous
+Host-then-Login sequences. Every batch adds exactly one view revision and one attributable
+`organization.inventory_created` audit event per object. The final view is acknowledged.
+
+Original Device confirmation and same-family browser confirmation after real refresh preserve
+the exact original response without another sequence, object, revision or audit. Changed
+payloads, used ids under a different key, another writer or browser family, malformed later
+rows and foreign-team access must preserve the captured public state. The command waits one
+real admission window between Device and browser phases; it neither alters admission state
+nor retries rejected writes automatically. Each HTTPS request has a fifteen-second deadline
+and the whole check has a five-minute deadline. Its exclusive `inventory-import-check.started`
+marker prevents repeating a possibly committed attempt. Only full success creates
+`inventory-import-acceptance.json`; no credential or identifier is printed or exported.
+
+For independent SSH and binary SFTP, use another fresh fixture and the existing owned
+OpenSSH descriptor and three-phase Grant consumer procedure above, selecting:
+
+```text
+personal_live_bootstrap prepare-inventory-import-client <fixture-directory> --openssh-descriptor <private-owned-target.json>
+```
+
+This variant imports the target and its default Login in one public POST instead of creating
+and repairing the pair with separate writes. It verifies both current Resources before
+granting the member independent view authority. The descriptors, ready/completion markers,
+finite Grant and withdrawal phases are exactly the existing Grant handoff. The independent
+consumer owns its login, Device admission, Organization pull/ACK, automatic certificate
+issuance, Host-key review, SSH command and binary SFTP. The producer does not claim those
+checks succeeded until the consumer supplies its exact completion signals. Storage fault
+injection, lost PostgreSQL COMMIT acknowledgement and rendered interaction retain their
+separate acceptance boundaries.
+
 ## Access-request HTTPS failure acceptance
 
 Build the server and example from the same checkout. Prepare a new private fixture with only

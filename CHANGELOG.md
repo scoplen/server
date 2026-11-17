@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add atomic CSV-prepared team inventory imports on SQLite and PostgreSQL. Create new Direct
+  Hosts with usable default Logins, preserving reviewed order and permitted duplicate names
+  and endpoints. Reuse current inventory permissions, quota, audit and original-writer
+  confirmation without import jobs or partial publication. Add an independent public HTTPS
+  check and an imported-target handoff for existing certificate SSH and binary SFTP consumers.
+  Add Account Console CSV preview, explicit import and original-operation confirmation through
+  the shared parser, with current-team/session fencing and ordinary Hosts refresh.
+
 - Update protocol consumers and generated Console bindings to the published atomic CSV import
   contracts, including the archived-source shared browser parser.
 
