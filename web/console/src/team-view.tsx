@@ -26,6 +26,11 @@ import { requestFeedback } from "./feedback.ts";
 import { AuditPanel } from "./audit-view.tsx";
 import { GrantPanel } from "./grants-view.tsx";
 import { AccessRequestPanel } from "./access-requests-view.tsx";
+import {
+  InventoryImportPanel,
+  type InventoryImportHandle,
+} from "./inventory-import-view.tsx";
+import type { InventoryCsvParser } from "./inventory-import.ts";
 
 type Section =
   | CollectionKind
@@ -79,7 +84,11 @@ export function TeamWorkspace({
 }: {
   api: TeamApi;
   username: string;
-  shared: { invitations: InvitationCrypto; rules: RuleGenerator };
+  shared: {
+    invitations: InvitationCrypto;
+    rules: RuleGenerator;
+    csv: InventoryCsvParser;
+  };
   initialTarget?: JoinTarget;
   session: {
     busy: boolean;
@@ -119,17 +128,21 @@ export function TeamWorkspace({
   );
   const [createTeam, setCreateTeam] = useState(false);
   const [inviteForm, setInviteForm] = useState(false);
+  const [csvImport, setCsvImport] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importReviewRequired, setImportReviewRequired] = useState(false);
   const [pendingVersion, setPendingVersion] = useState(0);
   const [dependencyWarning, setDependencyWarning] = useState(false);
   const [dependencyNext, setDependencyNext] = useState<
     Partial<Record<CollectionKind | "members", string>>
   >({});
   const invitationHandle = useRef<InvitationHandle | null>(null);
+  const importHandle = useRef<InventoryImportHandle | null>(null);
   const pending = useRef<PendingReceipt | undefined>(undefined);
   const mounted = useRef(true);
   const running = useRef(false);
   const heading = useRef<HTMLHeadingElement>(null);
-  const disabled = busy || session.busy || session.blocked;
+  const disabled = busy || importBusy || session.busy || session.blocked;
   const labels: Record<Section, string> = {
     hosts: t("Hosts", "主机"),
     "host-groups": t("Host groups", "主机分组"),
@@ -191,11 +204,12 @@ export function TeamWorkspace({
     return () => {
       mounted.current = false;
       invitationHandle.current?.dispose();
+      importHandle.current?.dispose();
     };
   }, [api]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (pending.current) {
+      if (pending.current || importHandle.current?.hasPending()) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -224,6 +238,19 @@ export function TeamWorkspace({
     }
   }
   async function guardLeave(): Promise<boolean> {
+    if (
+      importHandle.current?.hasPending() &&
+      !(await confirm(
+        t(
+          "Leaving clears the original import held in this tab. The import may have completed and cannot be confirmed after dismissal. Review current inventory before another import; absence or similar fields cannot establish the earlier outcome. Continue?",
+          "离开将清除此标签页保留的原导入操作。导入可能已经完成，丢弃后无法确认。再次导入前请检查当前资产；资产不存在或字段相似都不能证明此前的结果。要继续吗？",
+        ),
+      ))
+    )
+      return false;
+    if (importHandle.current?.hasPending()) setImportReviewRequired(true);
+    importHandle.current?.dispose();
+    setCsvImport(false);
     if (!invitationHandle.current?.hasSecret()) return true;
     if (
       !(await confirm(
@@ -294,6 +321,7 @@ export function TeamWorkspace({
       if (!append) setCatalog((items) => ({ ...items, [target]: [] }));
       const page = await api.list(selected.id, target, cursor);
       if (mounted.current) {
+        if (target === "hosts" && !append) setImportReviewRequired(false);
         setCatalog((items) => ({
           ...items,
           [target]: append ? [...items[target], ...page.items] : page.items,
@@ -532,7 +560,7 @@ export function TeamWorkspace({
           <button
             className="secondary"
             onClick={() => void sessionAction(onSignOut)}
-            disabled={busy || session.busy || session.expired}
+            disabled={busy || importBusy || session.busy || session.expired}
           >
             {session.blocked
               ? t("Retry sign out", "重试退出登录")
@@ -643,7 +671,7 @@ export function TeamWorkspace({
           id="team-main"
           className="team-main"
           tabIndex={-1}
-          aria-busy={busy}
+          aria-busy={busy || importBusy}
         >
           <div className="page-heading">
             <div>
@@ -661,6 +689,7 @@ export function TeamWorkspace({
                 section !== "grants" &&
                 section !== "requests" &&
                 !editor &&
+                !csvImport &&
                 !createTeam && (
                   <button
                     className="secondary"
@@ -673,6 +702,7 @@ export function TeamWorkspace({
               {team &&
                 kinds.includes(section as CollectionKind) &&
                 !editor &&
+                !csvImport &&
                 !createTeam && (
                   <button
                     className="primary-button"
@@ -696,6 +726,29 @@ export function TeamWorkspace({
                 </button>
               )}
               {team &&
+                profile &&
+                section === "hosts" &&
+                !editor &&
+                !csvImport &&
+                !createTeam && (
+                  <button
+                    className="secondary"
+                    disabled={
+                      disabled ||
+                      Boolean(pending.current) ||
+                      importReviewRequired ||
+                      failure !== undefined
+                    }
+                    onClick={() => {
+                      setFailure(undefined);
+                      setNotice("");
+                      setCsvImport(true);
+                    }}
+                  >
+                    {t("Import CSV", "导入 CSV")}
+                  </button>
+                )}
+              {team &&
                 section === "invitations" &&
                 !inviteForm &&
                 !createTeam && (
@@ -717,6 +770,14 @@ export function TeamWorkspace({
           {failure !== undefined && (
             <p className="notice error" role="alert">
               {requestFeedback(failure, t)}
+            </p>
+          )}
+          {importReviewRequired && !csvImport && (
+            <p className="notice" role="status">
+              {t(
+                "An earlier import remains unresolved. Refresh and review Hosts before another import. Current state cannot establish that earlier outcome.",
+                "此前的导入结果仍未确认。再次导入前，请刷新并检查主机。当前状态不能证明此前的结果。",
+              )}
             </p>
           )}
           {pending.current && (
@@ -911,6 +972,32 @@ export function TeamWorkspace({
                 transport={api.transport}
                 organization={team.id}
                 disabled={busy || session.busy}
+              />
+            )
+          ) : csvImport && section === "hosts" && profile ? (
+            session.busy || session.blocked || session.expired ? (
+              <p className="notice" role="status">
+                {t(
+                  "Import is unavailable while this session is ending or expired. Sign in again and review current inventory.",
+                  "会话正在结束或已过期，导入已隐藏。请重新登录并检查当前资产。",
+                )}
+              </p>
+            ) : (
+              <InventoryImportPanel
+                key={`${team.id}:${profile.id}`}
+                teamApi={api}
+                organization={team.id}
+                account={profile.id}
+                parser={shared.csv}
+                disabled={busy || session.busy}
+                handle={importHandle}
+                onBusy={setImportBusy}
+                onImported={() => load("hosts")}
+                onClose={() =>
+                  void (async () => {
+                    if (await guardLeave()) await run(() => load("hosts"));
+                  })()
+                }
               />
             )
           ) : editor ? (

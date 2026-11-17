@@ -3,10 +3,16 @@ import init, {
   generateSimpleRule,
   generateTeamInvitation,
   parseTeamInvitationPassword,
+  parseInventoryCsv,
 } from "@scoplen/browser";
 import wasmUrl from "@scoplen/browser/scoplen_browser_bg.wasm?url";
 import type { InvitationCrypto } from "./invitation.ts";
 import type { RuleGenerator } from "./rule-editor.tsx";
+import {
+  csvFailure,
+  parsedInventoryCsv,
+  type InventoryCsvParser,
+} from "./inventory-import.ts";
 
 let initialization: Promise<void> | undefined;
 const ready = () =>
@@ -15,7 +21,18 @@ const ready = () =>
 export const sharedBrowser: {
   invitations: InvitationCrypto;
   rules: RuleGenerator;
+  csv: InventoryCsvParser;
 } = {
+  csv: {
+    async parse(input) {
+      await ready();
+      try {
+        return parsedInventoryCsv(parseInventoryCsv(input));
+      } catch (error) {
+        throw csvFailure(error);
+      }
+    },
+  },
   invitations: {
     async generate(origin, organization, invitation, password, verifier) {
       await ready();

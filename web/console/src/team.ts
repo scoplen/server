@@ -42,6 +42,7 @@ export interface ApiResponse {
 }
 export interface AccountTransport {
   readonly origin: string;
+  readonly sessionGeneration?: number;
   request(
     method: Method,
     path: string,

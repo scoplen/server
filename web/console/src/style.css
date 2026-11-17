@@ -889,6 +889,37 @@ fieldset {
   padding-block: 20px;
   border-block: 1px solid var(--border);
 }
+.import-header {
+  overflow-wrap: anywhere;
+}
+.import-rows {
+  list-style: none;
+  padding: 0;
+  margin-block: 24px;
+}
+.import-rows > li {
+  padding-block: 16px;
+  border-top: 1px solid var(--border);
+}
+.import-row-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 24px;
+  font-size: 12px;
+}
+.import-row-fields dt {
+  color: var(--muted-foreground);
+}
+.import-row-fields dd {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 390px) {
+  .import-row-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .request-toolbar [aria-pressed="true"] {
   color: var(--primary);
   border-color: var(--primary);
