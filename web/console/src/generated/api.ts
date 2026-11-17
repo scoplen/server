@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/75907c42de02185af0a1eb22f0bc9586b3073a0d/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/e868b230ef01879ab9ac35c0afa4d227607fb06b/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 

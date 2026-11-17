@@ -892,6 +892,16 @@ fieldset {
 .import-header {
   overflow-wrap: anywhere;
 }
+.import-source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.import-source [aria-pressed="true"],
+.import-rows [aria-pressed="true"] {
+  color: var(--primary);
+  border-color: var(--primary);
+}
 .import-rows {
   list-style: none;
   padding: 0;

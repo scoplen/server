@@ -4,6 +4,7 @@ import init, {
   generateTeamInvitation,
   parseTeamInvitationPassword,
   parseInventoryCsv,
+  parseInventoryOpenSsh,
 } from "@scoplen/browser";
 import wasmUrl from "@scoplen/browser/scoplen_browser_bg.wasm?url";
 import type { InvitationCrypto } from "./invitation.ts";
@@ -13,6 +14,11 @@ import {
   parsedInventoryCsv,
   type InventoryCsvParser,
 } from "./inventory-import.ts";
+import {
+  openSshFailure,
+  parsedInventoryOpenSsh,
+  type InventoryOpenSshParser,
+} from "./inventory-openssh.ts";
 
 let initialization: Promise<void> | undefined;
 const ready = () =>
@@ -22,7 +28,18 @@ export const sharedBrowser: {
   invitations: InvitationCrypto;
   rules: RuleGenerator;
   csv: InventoryCsvParser;
+  openssh: InventoryOpenSshParser;
 } = {
+  openssh: {
+    async parse(input) {
+      await ready();
+      try {
+        return parsedInventoryOpenSsh(parseInventoryOpenSsh(input));
+      } catch (error) {
+        throw openSshFailure(error);
+      }
+    },
+  },
   csv: {
     async parse(input) {
       await ready();

@@ -7,7 +7,7 @@ import { createServer } from "vite";
 import * as React from "react";
 import { renderToStaticMarkup as render } from "react-dom/server";
 
-let server, views, model, team;
+let server, views, model, team, openssh;
 before(async () => {
   server = await createServer({
     root: fileURLToPath(new URL("..", import.meta.url)),
@@ -17,6 +17,7 @@ before(async () => {
   views = await server.ssrLoadModule("/src/inventory-import-view.tsx");
   model = await server.ssrLoadModule("/src/inventory-import.ts");
   team = await server.ssrLoadModule("/src/team.ts");
+  openssh = await server.ssrLoadModule("/src/inventory-openssh.ts");
 });
 after(async () => {
   await server?.close();
@@ -44,6 +45,8 @@ function content(state, extra = {}) {
       onSubmit() {
         throw new Error("import must be explicit");
       },
+      onSource() {},
+      onSelect() {},
       onConfirm() {
         throw new Error("confirmation must be explicit");
       },
@@ -113,7 +116,7 @@ test("preview includes every actual row and all five fields with preserved white
 test("loading, fixed parse errors and authority failure remain distinct", () => {
   const parsing = content({ phase: "parsing", imported: 0 });
   assert.match(parsing, /aria-busy="true"/);
-  assert.match(parsing, /Preparing CSV preview/);
+  assert.match(parsing, /Preparing import preview/);
   assert.doesNotMatch(parsing, /type="file"|Import outcome unknown/);
   const error = content({
     phase: "empty",
@@ -230,4 +233,98 @@ test("a fresh session clears the old import preview before the component can exp
   );
   assert.equal(workflow.state.pending, undefined);
   assert.equal(workflow.state.preview, undefined);
+});
+
+test("OpenSSH entry has custom source and file controls and explains its Direct-only limits", () => {
+  const html = content({ phase: "empty", source: "openssh", imported: 0 });
+  for (const text of [
+    "Import source",
+    "OpenSSH configuration",
+    "Choose OpenSSH file",
+    "100 literal Host candidates",
+    "User is required",
+    "not transferred",
+  ])
+    assert.ok(html.includes(text), text);
+  assert.match(
+    html,
+    /<button[^>]*aria-pressed="true"[^>]*>OpenSSH configuration<\/button>/,
+  );
+  assert.match(html, /type="file"[^>]*hidden=""/);
+  assert.doesNotMatch(
+    html,
+    /<select|name,address,port,username,login_name|>Import \d+ hosts</,
+  );
+});
+
+test("every ordered Ready and Blocked outcome is shown and only Ready rows have explicit selection buttons", () => {
+  const candidates = Array.from({ length: 100 }, (_, index) =>
+    index % 2 === 0
+      ? { status: "ready", candidate: index + 1, fields: row(index + 1) }
+      : {
+          status: "blocked",
+          diagnostic: {
+            kind: "missing_username",
+            candidate: index + 1,
+            line: index + 2,
+            field: "username",
+            source: "synthetic-rejected-option",
+          },
+        },
+  );
+  const state = {
+    phase: "preview",
+    source: "openssh",
+    candidates,
+    selected: [],
+    imported: 0,
+  };
+  const html = content(state);
+  assert.equal((html.match(/<li>/g) ?? []).length, 100);
+  assert.equal(
+    (html.match(/>Select candidate \d+<\/button>/g) ?? []).length,
+    50,
+  );
+  assert.ok(html.indexOf("Candidate 1") < html.indexOf("Candidate 100"));
+  assert.match(html, /Candidate 100 · Blocked/);
+  assert.match(html, /explicit User/);
+  assert.match(html, /Line 101/);
+  assert.match(html, / Host &lt;&amp;&gt; 99 /);
+  assert.match(html, /disabled="">Import 0 hosts<\/button>/);
+  assert.doesNotMatch(
+    html,
+    /Select candidate 2<|synthetic-rejected-option|<select|<script>/,
+  );
+  const selected = content({ ...state, selected: [3] });
+  assert.match(
+    selected,
+    /aria-pressed="true"[^>]*>Deselect candidate 3<\/button>/,
+  );
+  assert.match(selected, />Import 1 hosts<\/button>/);
+});
+
+test("OpenSSH file errors expose only fixed diagnostic metadata and cannot offer import", () => {
+  for (const kind of [
+    "raw_too_large",
+    "invalid_utf8",
+    "invalid_syntax",
+    "unsupported_scope",
+    "no_candidates",
+    "too_many_candidates",
+    "unavailable",
+  ]) {
+    const html = content({
+      phase: "empty",
+      source: "openssh",
+      imported: 0,
+      failure: new openssh.InventoryOpenSshFailure(kind, 4),
+    });
+    assert.match(html, /role="alert"/);
+    assert.match(html, /Line 4/);
+    assert.match(html, /No import request was sent/);
+    assert.doesNotMatch(
+      html,
+      /Import candidates|>Import \d+ hosts<|Confirm original import/,
+    );
+  }
 });

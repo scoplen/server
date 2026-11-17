@@ -132,3 +132,128 @@ test("100 actual rows flow from published parser to complete preview and one exp
   assert.equal(workflow.state.phase, "complete");
   assert.equal(workflow.state.imported, 100);
 });
+
+test("the production published WASM OpenSSH adapter retains complete mixed outcomes before an explicit ordered subset import", async () => {
+  const source =
+    'Host Mixed\n HostName prefix-%h\n User "part"word\n Port=2203\nHost Blocked\n ProxyJump none\nHost Last\n User Ops';
+  const candidates = await shared.openssh.parse(bytes(source));
+  assert.deepEqual(candidates, [
+    {
+      status: "ready",
+      candidate: 1,
+      fields: {
+        name: "Mixed",
+        address: "prefix-mixed",
+        port: 2203,
+        username: "partword",
+      },
+    },
+    {
+      status: "blocked",
+      diagnostic: { kind: "unsupported_option", line: 6, candidate: 2 },
+    },
+    {
+      status: "ready",
+      candidate: 3,
+      fields: { name: "Last", address: "last", port: 22, username: "Ops" },
+    },
+  ]);
+  const posts = [];
+  const api = new team.TeamApi({
+    origin: "https://console.example",
+    async request(method, path, options) {
+      posts.push({ method, path, options });
+      return {
+        value: {
+          items: options.body.rows.map(({ host_id, access_profile_id }) => ({
+            host_id,
+            access_profile_id,
+          })),
+        },
+        etag: null,
+      };
+    },
+  });
+  api.accountId = "019a0000-0000-7000-8000-000000000002";
+  const workflow = new model.InventoryImportWorkflow(
+    new model.InventoryImportApi(
+      api,
+      "019a0000-0000-7000-8000-000000000001",
+      api.accountId,
+    ),
+    shared.csv,
+    shared.openssh,
+  );
+  workflow.setSource("openssh");
+  await workflow.prepare(new File([source], "synthetic-source-name"));
+  assert.deepEqual(workflow.state.selected, []);
+  const html = render(
+    React.createElement(views.InventoryOpenSshPreview, {
+      state: workflow.state,
+      disabled: false,
+      onSelect() {},
+    }),
+  );
+  assert.equal((html.match(/<li>/g) ?? []).length, 3);
+  assert.match(html, /prefix-mixed/);
+  assert.match(html, /Blocked/);
+  assert.doesNotMatch(html, /ProxyJump|synthetic-source-name/);
+  await workflow.submit();
+  assert.equal(posts.length, 0);
+  workflow.select(3);
+  workflow.select(1);
+  await workflow.submit();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].method, "POST");
+  assert.match(posts[0].path, /\/inventory\/imports$/);
+  assert.deepEqual(
+    posts[0].options.body.rows.map((row) => row.name),
+    ["Mixed", "Last"],
+  );
+  for (const row of posts[0].options.body.rows)
+    assert.deepEqual(Object.keys(row).sort(), [
+      "access_profile_id",
+      "address",
+      "host_id",
+      "name",
+      "port",
+      "username",
+    ]);
+  assert.equal(workflow.state.phase, "complete");
+});
+
+test("actual WASM OpenSSH file failures remain fixed and do not expose source values", async () => {
+  const openssh = await server.ssrLoadModule("/src/inventory-openssh.ts");
+  for (const [input, kind, line] of [
+    [
+      bytes("Host synthetic-private-alias\nInclude /synthetic/private/path"),
+      "unsupported_scope",
+      2,
+    ],
+    [
+      bytes('Host synthetic-private-alias\nUser "unclosed'),
+      "invalid_syntax",
+      2,
+    ],
+    [new Uint8Array([0xc3, 0x28]), "invalid_utf8"],
+    [new Uint8Array(1_048_577), "raw_too_large"],
+    [bytes("Host *\nUser ops"), "no_candidates"],
+  ])
+    await assert.rejects(shared.openssh.parse(input), (failure) => {
+      assert.ok(failure instanceof openssh.InventoryOpenSshFailure);
+      assert.equal(failure.kind, kind);
+      assert.equal(failure.line, line);
+      assert.doesNotMatch(
+        JSON.stringify(failure),
+        /synthetic-private|\/synthetic|unclosed/,
+      );
+      return true;
+    });
+  const rows = await shared.openssh.parse(
+    bytes(
+      `Host ${Array.from({ length: 100 }, (_, index) => `Host${index}`).join(" ")}\nUser ops`,
+    ),
+  );
+  assert.equal(rows.length, 100);
+  assert.equal(rows[99].candidate, 100);
+});

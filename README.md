@@ -294,9 +294,11 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@75907c4`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@e868b23`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 D-151 supplies shared CSV preparation, typed atomic import messages and the thin browser export.
+D-153 adds the shared Direct OpenSSH preparer and its browser export; both source choices use
+the same typed atomic import operation.
 D-150 adds the six shared single-Host access-request operations, exact Device/browser scopes,
 bounded codecs and request-access rule generation. The API mounts the complete request workflow
 on SQLite and PostgreSQL, including atomic finite-Grant approval and independent worker expiry.
@@ -1044,10 +1046,20 @@ sequences and per-object audit commit together with one view revision. Success r
 the original ordered id pairs; ordinary GET supplies current Resources. Preserve the exact
 request and key after an unknown commit and explicitly confirm with a fresh proof. Confirmation
 requires the same writer, including the original browser family across refresh, and adds no
-objects, sequences, revision, audit or notification. OpenSSH and cloud import remain separate work.
+objects, sequences, revision, audit or notification. Cloud imports remain separate work.
 
-In the Account Console, open a team and choose **Hosts > Import CSV**. Review every row before
-selecting **Import N hosts**. Successful imports refresh the ordinary Hosts list. If the outcome
+In the Account Console, open a team and choose **Hosts > Import Hosts**, then choose CSV or
+OpenSSH configuration. CSV preserves the exact header and field rules above. OpenSSH reads one
+explicitly selected UTF-8 file of at most 1 MiB with at most 100 literal Host candidates. It
+prepares only Host, HostName, User and Port; User must be supplied in the file. Include/Match
+or malformed syntax reject the file. Applicable unsupported options block their candidate;
+identity, proxy, command and trust settings are never transferred. Every Ready or Blocked
+outcome is shown. No Host is selected by default: review all outcomes and explicitly select
+Ready Hosts before **Import N hosts**. The selected subset retains source order and receives
+one frozen set of ids and an original operation key. Neither preparation performs a network
+lookup, runs OpenSSH or connects to a Host; only typed rows reach the server.
+
+Successful imports refresh the ordinary Hosts list. If the outcome
 is unknown, this tab retains the original rows and operation for explicit confirmation within
 24 hours. Changing teams, locking, signing out or reloading discards that local intent; review
 current inventory before preparing another import. Confirmation does not prove current asset

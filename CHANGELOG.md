@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add an OpenSSH configuration source to the Account Console's Host import. Review every
+  Ready or Blocked candidate and explicitly select Direct Hosts before importing the ordered
+  subset through the existing atomic operation and original confirmation. Preserve CSV behavior,
+  current-team/session fencing and fixed source-free diagnostics. Consume the published shared
+  preparer and archived-source browser package; do not transfer identity, proxy, command or trust
+  settings.
+
 - Restore SQLite browser token lookup and retirement indexes through a forward migration,
   preserving published migrations and existing credentials. Follow rebuilt tables and final
   column types in schema checks, and keep the recovery probe on the latest migration.

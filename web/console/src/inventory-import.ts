@@ -6,6 +6,13 @@ import type {
 } from "./generated/api.ts";
 import { RequestFailure, TeamApi, operationId } from "./team.ts";
 import { object, strictJson, uuid } from "./wire.ts";
+import {
+  InventoryOpenSshFailure,
+  type InventoryOpenSshCandidate,
+  type InventoryOpenSshParser,
+} from "./inventory-openssh.ts";
+
+export type InventoryImportSource = "csv" | "openssh";
 
 export interface InventoryCsvParser {
   parse(input: Uint8Array): Promise<InventoryImportFields[]>;
@@ -200,6 +207,9 @@ export type InventoryImportPhase =
   | "complete";
 export interface InventoryImportState {
   phase: InventoryImportPhase;
+  source?: InventoryImportSource;
+  candidates?: readonly InventoryOpenSshCandidate[];
+  selected?: readonly number[];
   preview?: InventoryImportRequest;
   pending?: InventoryImportIntent;
   failure?: unknown;
@@ -210,12 +220,18 @@ export interface InventoryImportState {
 export class InventoryImportWorkflow {
   readonly api: InventoryImportApi;
   readonly parser: InventoryCsvParser;
+  readonly openssh?: InventoryOpenSshParser;
   state: InventoryImportState = { phase: "empty", imported: 0 };
   #active = true;
   #running = false;
-  constructor(api: InventoryImportApi, parser: InventoryCsvParser) {
+  constructor(
+    api: InventoryImportApi,
+    parser: InventoryCsvParser,
+    openssh?: InventoryOpenSshParser,
+  ) {
     this.api = api;
     this.parser = parser;
+    this.openssh = openssh;
   }
   dispose(): void {
     this.#active = false;
@@ -230,11 +246,73 @@ export class InventoryImportWorkflow {
       throw error;
     }
   }
+  setSource(source: InventoryImportSource): void {
+    this.current();
+    if (
+      this.#running ||
+      this.state.pending ||
+      source === (this.state.source ?? "csv")
+    )
+      return;
+    this.state = { phase: "empty", source, imported: 0 };
+  }
+  select(candidate: number): void {
+    this.current();
+    if (
+      this.#running ||
+      this.state.pending ||
+      this.state.preview ||
+      this.state.phase !== "preview" ||
+      !this.state.candidates?.some(
+        (item) => item.status === "ready" && item.candidate === candidate,
+      )
+    )
+      return;
+    const selected = new Set(this.state.selected);
+    if (selected.has(candidate)) selected.delete(candidate);
+    else selected.add(candidate);
+    this.state = {
+      ...this.state,
+      selected: Object.freeze([...selected].sort((a, b) => a - b)),
+      failure: undefined,
+    };
+  }
+  private prepareRows(
+    fields: readonly InventoryImportFields[],
+  ): InventoryImportRequest {
+    const body: InventoryImportRequest = {
+      rows: fields.map((row) =>
+        Object.freeze({
+          host_id: operationId(),
+          access_profile_id: operationId(),
+          name: row.name,
+          address: row.address,
+          port: row.port,
+          username: row.username,
+          ...(row.login_name === undefined
+            ? {}
+            : { login_name: row.login_name }),
+        }),
+      ),
+    };
+    Object.freeze(body.rows);
+    Object.freeze(body);
+    const ids = body.rows.flatMap((row) => [
+      row.host_id,
+      row.access_profile_id,
+    ]);
+    if (new Set(ids).size !== ids.length)
+      throw new InventoryCsvFailure("unavailable");
+    if (new TextEncoder().encode(JSON.stringify(body)).length > 2_097_152)
+      throw new InventoryCsvFailure("request_too_large");
+    return body;
+  }
   async prepare(file: Pick<File, "size" | "arrayBuffer">): Promise<void> {
     this.current();
     if (this.#running || this.state.pending) return;
     this.#running = true;
-    this.state = { phase: "parsing", imported: 0 };
+    const source = this.state.source ?? "csv";
+    this.state = { phase: "parsing", source, imported: 0 };
     let input: Uint8Array | undefined;
     try {
       if (file.size > 1_048_576) throw new InventoryCsvFailure("too_large");
@@ -246,40 +324,43 @@ export class InventoryImportWorkflow {
       this.current();
       if (input.byteLength > 1_048_576)
         throw new InventoryCsvFailure("too_large");
+      if (source === "openssh") {
+        if (!this.openssh) throw new InventoryOpenSshFailure("unavailable");
+        const candidates = await this.openssh.parse(input);
+        this.current();
+        this.state = {
+          phase: "preview",
+          source,
+          imported: 0,
+          candidates: Object.freeze(
+            candidates.map((candidate) =>
+              candidate.status === "ready"
+                ? Object.freeze({
+                    ...candidate,
+                    fields: Object.freeze({ ...candidate.fields }),
+                  })
+                : Object.freeze({
+                    ...candidate,
+                    diagnostic: Object.freeze({ ...candidate.diagnostic }),
+                  }),
+            ),
+          ),
+          selected: Object.freeze([]),
+        };
+        return;
+      }
       const fields = await this.parser.parse(input);
       this.current();
-      const body: InventoryImportRequest = {
-        rows: fields.map((row) =>
-          Object.freeze({
-            host_id: operationId(),
-            access_profile_id: operationId(),
-            name: row.name,
-            address: row.address,
-            port: row.port,
-            username: row.username,
-            ...(row.login_name === undefined
-              ? {}
-              : { login_name: row.login_name }),
-          }),
-        ),
-      };
-      Object.freeze(body.rows);
-      Object.freeze(body);
-      const ids = body.rows.flatMap((row) => [
-        row.host_id,
-        row.access_profile_id,
-      ]);
-      if (new Set(ids).size !== ids.length)
-        throw new InventoryCsvFailure("unavailable");
-      if (new TextEncoder().encode(JSON.stringify(body)).length > 2_097_152)
-        throw new InventoryCsvFailure("request_too_large");
+      const body = this.prepareRows(fields);
       this.state = { phase: "preview", preview: body, imported: 0 };
     } catch (error) {
       this.current();
       this.state = {
         phase: "empty",
+        source,
         failure:
-          error instanceof InventoryCsvFailure
+          error instanceof InventoryCsvFailure ||
+          error instanceof InventoryOpenSshFailure
             ? error
             : new InventoryCsvFailure("unavailable"),
         imported: 0,
@@ -291,7 +372,36 @@ export class InventoryImportWorkflow {
   }
   async submit(): Promise<void> {
     this.current();
-    if (this.#running || this.state.pending || !this.state.preview) return;
+    if (this.#running || this.state.pending) return;
+    if (!this.state.preview && this.state.candidates) {
+      const selected = new Set(this.state.selected);
+      const fields = this.state.candidates.flatMap((candidate) =>
+        candidate.status === "ready" && selected.has(candidate.candidate)
+          ? [candidate.fields]
+          : [],
+      );
+      if (!fields.length) return;
+      try {
+        const preview = this.prepareRows(fields);
+        this.state = {
+          ...this.state,
+          preview,
+          candidates: undefined,
+          selected: undefined,
+          failure: undefined,
+        };
+      } catch (error) {
+        this.state = {
+          ...this.state,
+          failure:
+            error instanceof InventoryCsvFailure
+              ? error
+              : new InventoryCsvFailure("unavailable"),
+        };
+        return;
+      }
+    }
+    if (!this.state.preview) return;
     let key: string;
     try {
       key = operationId();
