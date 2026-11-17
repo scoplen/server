@@ -169,6 +169,10 @@ jobs:
         run: cargo test --locked -p scoplen-store --test account_password_login --features postgres-integration -- --test-threads=1
       - name: Check independent Device admission and exact historical confirmation
         run: cargo test --locked -p scoplen-store --test account_device_admission --features postgres-integration -- --test-threads=1
+      - name: Check known-password changes and populated credential migrations
+        run: >-
+          cargo test --locked -p scoplen-store --features postgres-integration
+          --test account_password_change --test account_password_change_migrations -- --test-threads=1
       - name: Check native Account entry, team lifecycle HTTP and startup on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2
