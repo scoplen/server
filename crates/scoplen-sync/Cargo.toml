@@ -9,8 +9,8 @@ description = "Scoplen encrypted synchronization service."
 [dependencies]
 async-trait = "0.1.92"
 axum.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "2ccaaa73ae542343a9d2ed514e15121142b78bf8" }
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "2ccaaa73ae542343a9d2ed514e15121142b78bf8" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "18422e700c8a4a454248fae4323ace9e3c3b06d5" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "18422e700c8a4a454248fae4323ace9e3c3b06d5" }
 scoplen-store = { path = "../scoplen-store" }
 semver.workspace = true
 tokio.workspace = true

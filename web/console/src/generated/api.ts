@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/2ccaaa73ae542343a9d2ed514e15121142b78bf8/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/18422e700c8a4a454248fae4323ace9e3c3b06d5/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -140,7 +140,6 @@ export interface components {
     GatewayTicketResponse: GatewayTicketResponse;
     ListQuery: ListQuery;
     WriteRequest: WriteRequest;
-    DecisionRequest: DecisionRequest;
     PolicyEvaluationRequest: PolicyEvaluationRequest;
     PolicyEvaluationResponse: PolicyEvaluationResponse;
     CertificateRequest: CertificateRequest;
@@ -188,8 +187,18 @@ export interface components {
     GrantResource: GrantResource;
     GrantPage: GrantPage;
     GrantBodyTooLargeProblem: GrantBodyTooLargeProblem;
-    AccessRequest: Resource;
-    AccessDecision: Resource;
+    AccessRequestFields: AccessRequestFields;
+    AccessRequestCheckRequest: AccessRequestCheckRequest;
+    AccessRequestCheckResponse: AccessRequestCheckResponse;
+    AccessRequestCreateRequest: AccessRequestCreateRequest;
+    AccessRequestDecisionRequest: AccessRequestDecisionRequest;
+    AccessRequestStatus: AccessRequestStatus;
+    AccessRequestView: AccessRequestView;
+    AccessRequestDecision: AccessRequestDecision;
+    AccessRequestGrant: AccessRequestGrant;
+    AccessRequestResource: AccessRequestResource;
+    AccessRequestPage: AccessRequestPage;
+    AccessRequestBodyTooLargeProblem: AccessRequestBodyTooLargeProblem;
     Certificate: Resource;
     Gateway: Resource;
     JoinToken: Resource;
@@ -231,8 +240,30 @@ export interface GrantPage { items: GrantResource[]; next_cursor: string | null;
 export interface GrantListQuery { limit?: number; cursor?: string; }
 export type GrantBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
 // END GENERATED Grants
+// BEGIN GENERATED AccessRequests
+export interface AccessRequestFields { host: string; remote_user: string; duration_seconds: number; reason: string; }
+export interface AccessRequestCheckRequest { data: AccessRequestFields; }
+export interface AccessRequestCheckResponse { allowed: boolean; [extension: string]: unknown; }
+export interface AccessRequestCreateRequest { id: string; data: AccessRequestFields; }
+export interface AccessRequestDecisionRequest { decision: "approve" | "deny"; }
+/** Preserve unknown bounded status text for display only; it supplies no action or authority. */
+export type AccessRequestStatus = "pending" | "approved" | "denied" | "expired" | "cancelled" | (string & {});
+export type AccessRequestView = "mine" | "approvals";
+export interface AccessRequestDecision { outcome: "approve" | "deny"; actor_account_id: string; decided_at: string; [extension: string]: unknown; }
+/** Finite approval history, never evidence of current Grant or certificate authority. */
+export interface AccessRequestGrant { id: string; valid_from: string; valid_until: string; [extension: string]: unknown; }
+/** Cross-field time/state invariants are validated by the shared codec, not these structural types. */
+export interface AccessRequestResource {
+  id: string; etag: string; created_at: string; updated_at: string;
+  data: AccessRequestFields & { requester_account_id: string; requester_membership_id: string; expires_at: string; status: AccessRequestStatus; decision: AccessRequestDecision | null; grant: AccessRequestGrant | null; [extension: string]: unknown };
+  [extension: string]: unknown;
+}
+export interface AccessRequestPage { items: AccessRequestResource[]; next_cursor: string | null; [extension: string]: unknown; }
+export interface AccessRequestListQuery { view: AccessRequestView; limit?: number; cursor?: string; }
+export type AccessRequestBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
+// END GENERATED AccessRequests
 // BEGIN GENERATED Audit
-export type AuditResourceKind = "organization" | "invitation" | "membership" | "host" | "host_group" | "access_profile" | "route" | "trust_record" | "snippet" | "gateway_network" | "group" | "policy" | "grant" | "certificate_authority" | "certificate";
+export type AuditResourceKind = "organization" | "invitation" | "membership" | "host" | "host_group" | "access_profile" | "route" | "trust_record" | "snippet" | "gateway_network" | "group" | "policy" | "grant" | "access_request" | "certificate_authority" | "certificate";
 export type AuditCategory = "authentication" | "authorization" | "account_change" | "scoplen" | "unknown";
 export type AuditOutcome = "success" | "failure" | "unknown";
 export interface AuditResource { kind: AuditResourceKind; id: string; [extension: string]: unknown; }
@@ -408,7 +439,6 @@ export interface GatewayTicketResponse {
 // END GENERATED GatewayTicket
 export interface ListQuery { limit?: number; cursor?: string; filter?: string; sort?: string; }
 export interface WriteRequest { data: Record<string, unknown>; }
-export interface DecisionRequest { decision: "approve" | "deny"; reason?: string; }
 export interface PolicyEvaluationRequest { action: string; resource: Record<string, unknown>; context: Record<string, unknown>; }
 export interface PolicyEvaluationResponse { decision: "allow" | "deny"; policies: string[]; }
 // BEGIN GENERATED CertificateRequest
@@ -777,7 +807,7 @@ export interface PolicyPage { items: PolicyResource[]; next_cursor: string | nul
 export interface SimpleRuleSelector { type: 1 | 2 | 4 | 5 | 6 | 7 | 11; id: string; }
 export interface SimpleRuleConnect { hosts: string[]; host_groups: string[]; remote_user: string; }
 export type SimpleRuleSubject = { membership: string; group?: never } | { group: string; membership?: never };
-export type SimpleRule = { view: SimpleRuleSelector[]; connect?: never } | { connect: SimpleRuleConnect; view?: never };
+export type SimpleRule = { view: SimpleRuleSelector[]; connect?: never; request_access?: never } | { connect: SimpleRuleConnect; view?: never; request_access?: never } | { request_access: string[]; view?: never; connect?: never };
 /** Pure preview input; use the shared native generator and persist through the authorized policy route. */
 export type SimpleRuleInput = { organization: string } & SimpleRuleSubject & SimpleRule;
 export type GroupPolicyBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
@@ -846,7 +876,7 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "account:read audit:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
@@ -1265,6 +1295,54 @@ export const accountBrowserOperations = [
       "policies:write"
     ],
     "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/access-requests/check",
+    "scopes": [
+      "access-requests:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/access-requests",
+    "scopes": [
+      "access-requests:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/access-requests",
+    "scopes": [
+      "access-requests:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/access-requests/{id}",
+    "scopes": [
+      "access-requests:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/access-requests/{id}/decisions",
+    "scopes": [
+      "access-requests:decide"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/access-requests/{id}/cancel",
+    "scopes": [
+      "access-requests:write"
+    ],
+    "writerReceipt": true
   }
 ] as const;
 // END GENERATED AccountBrowser
