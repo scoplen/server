@@ -70,6 +70,7 @@ fn route(parts: &Parts) -> Option<(DeviceAccessOperation, &str, Option<&str>)> {
     Some((DeviceAccessOperation::from_route(parts.method.as_str(), template)?, org, target))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryEndpoint> {
     Some(match operation {
         DeviceAccessOperation::TeamInvitationCreate => AccountEntryEndpoint::TeamInvitationCreate,
@@ -156,6 +157,18 @@ pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryE
         }
         DeviceAccessOperation::OrganizationGrantDelete => {
             AccountEntryEndpoint::OrganizationGrantDelete
+        }
+        DeviceAccessOperation::AccessRequestCheck => {
+            AccountEntryEndpoint::OrganizationAccessRequestCheck
+        }
+        DeviceAccessOperation::AccessRequestCreate => {
+            AccountEntryEndpoint::OrganizationAccessRequestCreate
+        }
+        DeviceAccessOperation::AccessRequestDecide => {
+            AccountEntryEndpoint::OrganizationAccessRequestDecide
+        }
+        DeviceAccessOperation::AccessRequestCancel => {
+            AccountEntryEndpoint::OrganizationAccessRequestCancel
         }
         DeviceAccessOperation::UserCertificateIssue => {
             AccountEntryEndpoint::OrganizationUserCertificateIssue

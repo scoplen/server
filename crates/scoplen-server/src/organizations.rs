@@ -32,6 +32,7 @@ use crate::{
     personal_sync::PersonalSyncAuthenticator,
 };
 
+mod access_requests;
 mod audit;
 mod grants;
 mod group_policy;
@@ -76,6 +77,7 @@ pub(crate) fn router(
         .merge(inventory::routes())
         .merge(group_policy::routes())
         .merge(grants::routes())
+        .merge(access_requests::routes())
         .merge(user_ca::routes())
         .merge(audit::routes())
         .with_state(OrganizationState {

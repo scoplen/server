@@ -238,6 +238,12 @@ jobs:
         run: >-
           cargo test --locked -p scoplen-store --test organization_grants
           --test organization_grant_migrations --features postgres-integration -- --test-threads=1
+      - name: Check access requests, uncertain commits and populated forward migration
+        run: >-
+          cargo test --locked -p scoplen-store --test organization_access_requests
+          --test organization_access_request_migrations --features postgres-integration -- --test-threads=1
+      - name: Check access-request worker expiry and shutdown
+        run: cargo test --locked -p scoplen-server --lib --features postgres-integration runtime::tests::access_requests:: -- --test-threads=1
       - name: Create isolated team HTTP database
         run: docker exec "${{ job.services.postgres.id }}" psql -U scoplen -d scoplen -c 'CREATE DATABASE scoplen_organizations_http_ci'
       - name: Check PostgreSQL team creation, discovery, receipts and uncertain commits

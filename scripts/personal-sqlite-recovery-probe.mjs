@@ -57,7 +57,7 @@ if (invoked) {
 }
 
 const oldMigration = 20261024030000;
-const newMigration = 20261117000000;
+const newMigration = 20261117010000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -204,8 +204,9 @@ export function inspectDatabase(path, current) {
         .get();
       assert.deepEqual(Buffer.from(clock.retired_through_ns), Buffer.alloc(16));
       assert.equal(
-        database.prepare("SELECT COUNT(*) AS count FROM sync_write_admission").get()
-          .count,
+        database
+          .prepare("SELECT COUNT(*) AS count FROM sync_write_admission")
+          .get().count,
         0,
       );
     }
@@ -234,20 +235,25 @@ export function inspectDatabase(path, current) {
           ]
         : [],
     );
-    const grantTables = database
+    const accessTables = database
       .prepare(
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'organization_grants'",
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_access_requests', 'organization_grants') ORDER BY name",
       )
       .all()
       .map((row) => row.name);
-    assert.deepEqual(grantTables, current ? ["organization_grants"] : []);
+    assert.deepEqual(
+      accessTables,
+      current ? ["organization_access_requests", "organization_grants"] : [],
+    );
     if (current) {
-      assert.equal(
-        database.prepare("SELECT COUNT(*) AS count FROM organization_grants")
-          .get().count,
-        0,
-        "upgrade must not invent Host Grants",
-      );
+      for (const table of accessTables) {
+        assert.equal(
+          database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()
+            .count,
+          0,
+          "upgrade must not invent Host Grants or access requests",
+        );
+      }
     }
     const userCaTables = database
       .prepare(
@@ -257,7 +263,15 @@ export function inspectDatabase(path, current) {
       .map((row) => row.name);
     assert.deepEqual(
       userCaTables,
-      current ? ["organization_user_ca_krl_activation", "organization_user_ca_krls", "organization_user_ca_revocations", "organization_user_cas", "organization_user_certificates"] : [],
+      current
+        ? [
+            "organization_user_ca_krl_activation",
+            "organization_user_ca_krls",
+            "organization_user_ca_revocations",
+            "organization_user_cas",
+            "organization_user_certificates",
+          ]
+        : [],
     );
     const browserTables = database
       .prepare(

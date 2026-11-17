@@ -106,6 +106,26 @@ fn create_digest(
 macro_rules! grants {
     ($store:ty, $db:ty, $begin:literal, $principal:ident, $audit:ident) => {
         impl $store {
+            /// The caller owns current authority, references, revision, audit and commit.
+            pub(super) async fn persist_organization_grant(
+                tx: &mut Transaction<'_, $db>, organization: Uuid,
+                resource: &mut GrantResource, created_at_ms: i64, updated_at_ms: i64, replace: bool,
+            ) -> Result<Vec<u8>, Error> {
+                let bytes = retag(resource)?;
+                let sql = if replace {
+                    "INSERT INTO organization_grants (organization_id,id,membership_id,host_id,response_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (organization_id,id) DO UPDATE SET membership_id=excluded.membership_id,host_id=excluded.host_id,response_json=excluded.response_json,updated_at_ms=excluded.updated_at_ms WHERE organization_grants.withdrawn_at_ms IS NULL"
+                } else {
+                    "INSERT INTO organization_grants (organization_id,id,membership_id,host_id,response_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)"
+                };
+                let changed = sqlx::query(sql)
+                    .bind(organization.as_bytes().as_slice()).bind(resource.id.as_bytes().as_slice())
+                    .bind(resource.fields.membership.as_bytes().as_slice()).bind(resource.fields.host.as_bytes().as_slice())
+                    .bind(&bytes).bind(created_at_ms).bind(updated_at_ms)
+                    .execute(&mut **tx).await.map_err(|error|write_error(&error))?.rows_affected();
+                if changed != 1 {return Err(Error::StorageUnavailable);}
+                Ok(bytes)
+            }
+
             /// Lifecycle callers already own the tenant lock, revision, audit and notification.
             pub(super) async fn withdraw_organization_grants(
                 tx: &mut Transaction<'_, $db>,
@@ -409,15 +429,12 @@ macro_rules! grants {
                         updated_at: timestamp(updated_at_ms)?,
                         fields,
                     };
-                    let bytes = retag(&mut resource)?;
-                    sqlx::query(
-                        "INSERT INTO organization_grants (organization_id,id,membership_id,host_id,response_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (organization_id,id) DO UPDATE SET membership_id=excluded.membership_id,host_id=excluded.host_id,response_json=excluded.response_json,updated_at_ms=excluded.updated_at_ms",
-                    )
-                    .bind(org).bind(id)
-                    .bind(resource.fields.membership.as_bytes().as_slice())
-                    .bind(resource.fields.host.as_bytes().as_slice())
-                    .bind(&bytes).bind(now).bind(updated_at_ms)
-                    .execute(&mut *tx).await.map_err(|error|write_error(&error))?;
+                    let created_at_ms = previous.as_ref().map_or(Ok(now), |previous| {
+                        scoplen_api::audit::parse_audit_timestamp(&previous.resource.created_at)
+                            .map_err(|_| Error::StorageUnavailable)
+                    })?;
+                    let bytes = Self::persist_organization_grant(&mut tx,target.organization,
+                        &mut resource,created_at_ms,updated_at_ms,previous.is_some()).await?;
                     Some(bytes)
                 } else {
                     sqlx::query(

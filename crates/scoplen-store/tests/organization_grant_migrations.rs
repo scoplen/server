@@ -96,7 +96,7 @@ macro_rules! constraints {
             sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES ($1,1,$2,1000,1,0,1001,601001)")
                 .bind(endpoint).bind([127_u8,0,0,1].as_slice()).execute($pool).await.expect("independent Grant endpoint");
         }
-        let rejected = sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (46,1,$1,1000,1,0,1001,601001)")
+        let rejected = sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (50,1,$1,1000,1,0,1001,601001)")
             .bind([127_u8,0,0,1].as_slice()).execute($pool).await;
         assert!(rejected.is_err(), "endpoint bound remains closed");
         grant

@@ -10,6 +10,7 @@ use super::{
 };
 use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet, Request};
 use scoplen_api::{
+    access_request::{AccessRequestFields, AccessRequestResource},
     control_plane::{
         ConnectAuthorization, OrganizationAuthorizationContext, OrganizationAuthorizer,
         OrganizationHostGrant,
@@ -153,6 +154,68 @@ impl Graph {
         )
         .map_err(|_| Error::StorageUnavailable)?;
         self.authorize_context(action, kind, id, context)
+    }
+
+    pub(super) fn authorize_request_access(
+        &self,
+        fields: &AccessRequestFields,
+    ) -> Result<bool, Error> {
+        let context = Context::from_json_value(
+            json!({"organization":entity_ref("Organization",self.organization.id),
+                "membership":entity_ref("Membership",self.organization.membership.id),
+                "now":self.now.div_euclid(1000),"duration_seconds":fields.duration_seconds,
+                "reason":fields.reason}),
+            None,
+        )
+        .map_err(|_| Error::StorageUnavailable)?;
+        self.authorize_context("request_access", "Host", fields.host, context)
+    }
+
+    pub(super) fn authorize_access_request(
+        &mut self,
+        request: &AccessRequestResource,
+        requester_active: bool,
+        requester_email: Option<String>,
+    ) -> Result<bool, Error> {
+        if self.organization.membership.account_id == request.requester_account_id {
+            return Ok(false);
+        }
+        let mut account = json!({"status":if requester_active {"active"} else {"inactive"}});
+        if let Some(email) = requester_email {
+            account["email"] = json!(email);
+        }
+        let context = Context::from_json_value(
+            json!({"organization":entity_ref("Organization",self.organization.id),
+                "membership":entity_ref("Membership",self.organization.membership.id),
+                "now":self.now.div_euclid(1000),"requester":entity_ref("Account",request.requester_account_id),
+                "resource":entity_ref("Host",request.fields.host)}), None,
+        ).map_err(|_| Error::StorageUnavailable)?;
+        let account_key = ("Account".into(), request.requester_account_id);
+        let request_key = ("AccessRequest".into(), request.id);
+        let previous_account = self
+            .entities
+            .insert(account_key.clone(), entity("Account", request.requester_account_id, &account));
+        let previous_request = self.entities.insert(
+            request_key.clone(),
+            entity(
+                "AccessRequest",
+                request.id,
+                &json!({"organization":entity_ref("Organization",self.organization.id),
+                "requester":entity_ref("Account",request.requester_account_id),
+                "resource":entity_ref("Host",request.fields.host)}),
+            ),
+        );
+        let decision =
+            self.authorize_context("approve_access", "AccessRequest", request.id, context);
+        // Routing a later row must not inherit this request's transient projection.
+        for (key, previous) in [(account_key, previous_account), (request_key, previous_request)] {
+            if let Some(previous) = previous {
+                self.entities.insert(key, previous);
+            } else {
+                self.entities.remove(&key);
+            }
+        }
+        decision
     }
 
     pub(super) fn authorize_connect(
@@ -680,6 +743,7 @@ macro_rules! inventory {
                         if current.etag!=if_match {return Err(Error::PreconditionFailed);}
                         if kind==InventoryType::Host {
                             Self::ensure_grant_host_deletion_allowed(&mut tx,org,id).await?;
+                            Self::ensure_access_request_host_deletion_allowed(&mut tx,org,id).await?;
                         }
                         let referenced:Option<Vec<u8>>=sqlx::query_scalar("SELECT source_id FROM organization_inventory_references WHERE organization_id=$1 AND target_id=$2 LIMIT 1")
                             .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).fetch_optional(&mut *tx).await?;

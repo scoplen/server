@@ -267,8 +267,9 @@ All Rust protocol consumers, route-contract CI and generated console API types u
 `proto@18422e7`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 D-150 adds the six shared single-Host access-request operations, exact Device/browser scopes,
-bounded codecs and request-access rule generation. This adoption alone does not mount the
-production request workflow or add a Console request workspace.
+bounded codecs and request-access rule generation. The API mounts the complete request workflow
+on SQLite and PostgreSQL, including atomic finite-Grant approval and independent worker expiry.
+The Account Console provides My requests, Approvals and ordinary request-access rules.
 D-148 corrects composed SSH transport loss in `scoplen-ssh`, which this workspace does not
 consume. This pin adds no server SSH reconnect behavior.
 All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
@@ -874,8 +875,33 @@ Suspension, removal, self-leave and dissolution withdraw affected Grants atomica
 rejoin requires a fresh Grant; an old id cannot be reused. Unwithdrawn Grants, including scheduled
 and expired ones, block deletion of their referenced Host until withdrawn or retargeted.
 Grant changes appear in the team's Audit timeline with the actual Device or browser-family actor.
-The first profile covers named Memberships and Hosts; group subjects and approval requests remain
-separate work.
+The first profile covers named Memberships and Hosts; group subjects remain separate work.
+
+Single-Host access requests let an eligible member ask for a finite Grant for an exact Host,
+remote user, duration (1..86,400 seconds) and reason. The Account Console provides **My requests**
+and **Approvals**, with explicit review, Approve/Deny/Cancel and Refresh. Active surfaces refresh
+every 60 seconds. The ordinary rule editor can permit request_access over selected Hosts;
+visibility and approval authority remain independent. The requester cannot approve their own
+request, including as Owner. An approval creates one finite Grant without requiring broad policy
+management permission. Denial, cancellation and worker expiry create no Grant or view change.
+
+API clients use POST `access-requests/check` with `{"data":{"host":"<Host UUIDv7>",
+"remote_user":"deploy","duration_seconds":120,"reason":"Scheduled maintenance"}}`. Check
+returns only `{"allowed":true|false}` and creates nothing. POST `access-requests` adds the
+original UUIDv7 `id` and `Idempotency-Key`; GET lists with required `view=mine|approvals`, and GET
+`access-requests/{id}` reads current persisted state. POST `{id}/decisions` sends
+`{"decision":"approve"|"deny"}`; POST `{id}/cancel` sends no body. Both transitions require
+the original strong `If-Match` and UUIDv7 operation key. Required scopes are
+`access-requests:write` for check/create/cancel, `access-requests:read` for lists/reads and
+`access-requests:decide` for decisions, plus current tenant and policy authority.
+
+Requests expire exactly 24 hours after creation, including fractional seconds. The deadline
+blocks late actions even before worker maintenance updates persisted status. Pending requests
+block Host deletion; terminal history alone does not. Keep an uncertain operation's original
+writer, key, payload and ETag for explicit confirmation. Confirmation returns original bytes
+without recreating a withdrawn Grant. Historical approval is not current connection authority;
+normal certificate acquisition and current policies/Grants still apply. Console API/SSR checks
+and builds do not establish rendered/native interaction or real request-to-SSH acceptance.
 
 The initial Organization user-CA API supports POST/GET `certificate-authorities` and GET
 `certificate-authorities/{id}`. Creation requires `ca:write`, current `manage_ca` permission,

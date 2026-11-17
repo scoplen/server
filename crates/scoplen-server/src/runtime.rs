@@ -695,6 +695,9 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
     fn cleanup_organization_creation_receipts(
         &self,
     ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
+    fn expire_organization_access_requests(
+        &self,
+    ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
     fn requeue_expired_jobs(
         &self,
         now_ms: i64,
@@ -788,6 +791,12 @@ macro_rules! impl_worker_store_backend {
                 &self,
             ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send {
                 <$store>::cleanup_organization_creation_receipts(self)
+            }
+
+            fn expire_organization_access_requests(
+                &self,
+            ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send {
+                <$store>::expire_organization_access_requests(self)
             }
 
             fn requeue_expired_jobs(
@@ -916,6 +925,7 @@ macro_rules! impl_worker_store_backend {
 impl_worker_store_backend!(SqliteStore);
 impl_worker_store_backend!(PostgresStore);
 
+#[allow(clippy::too_many_lines)]
 async fn run_worker_role<S: WorkerStoreBackend + 'static>(
     store: Arc<S>,
     signer: Arc<LocalAuditSigner>,
@@ -985,6 +995,19 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
             Err(error) => {
                 error!(%error, role = "worker", "organization receipt retention pass failed");
             }
+        }
+        let request_expiry = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.expire_organization_access_requests() => result,
+        };
+        match request_expiry {
+            Ok(expired) => info!(
+                role = "worker",
+                expired_access_requests = expired,
+                "access request expiry pass"
+            ),
+            Err(error) => error!(%error, role = "worker", "access request expiry pass failed"),
         }
         let retention = tokio::select! {
             biased;
@@ -1749,6 +1772,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod access_requests;
+
     use std::fs;
 
     use super::*;
