@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Adopt the published typed Host Grant contracts and generated Console declarations, including
+  the closed Audit `grant` kind. Grant storage, routes, certificate integration and management
+  remain separate implementation outcomes.
+
 - Add current-authorized Organization audit timeline and contiguous range-verification GETs
   for enrolled Devices and Account-browser families on SQLite and PostgreSQL. Preserve original
   bytes, project only registered safe metadata, and validate hash links and included checkpoints

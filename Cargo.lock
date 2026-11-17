@@ -4283,7 +4283,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a#c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a"
+source = "git+https://github.com/scoplen/proto.git?rev=f493ece77da2c87b81106056525c83963d6b970e#f493ece77da2c87b81106056525c83963d6b970e"
 dependencies = [
  "base64 0.22.1",
  "cedar-policy",
@@ -4333,7 +4333,7 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-crypto"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a#c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a"
+source = "git+https://github.com/scoplen/proto.git?rev=f493ece77da2c87b81106056525c83963d6b970e#f493ece77da2c87b81106056525c83963d6b970e"
 dependencies = [
  "age",
  "argon2",
@@ -4397,7 +4397,7 @@ dependencies = [
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/scoplen/proto.git?rev=c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a#c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a"
+source = "git+https://github.com/scoplen/proto.git?rev=f493ece77da2c87b81106056525c83963d6b970e#f493ece77da2c87b81106056525c83963d6b970e"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -5134,7 +5134,7 @@ dependencies = [
 [[package]]
 name = "ssh-key"
 version = "0.7.0-rc.11"
-source = "git+https://github.com/scoplen/proto.git?rev=c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a#c4c28f4dd2e8c48c4194cc97028476ce8fdf2b3a"
+source = "git+https://github.com/scoplen/proto.git?rev=f493ece77da2c87b81106056525c83963d6b970e#f493ece77da2c87b81106056525c83963d6b970e"
 dependencies = [
  "ctutils",
  "ed25519-dalek 3.0.0",

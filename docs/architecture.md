@@ -28,10 +28,12 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@c4c28f4` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
+`proto@f493ece` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
 `scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
 This revision includes Account password, Device admission and Organization inventory contracts,
-plus bounded immutable Organization audit queries and range verification. It removes retired
+plus bounded immutable Organization audit queries, range verification and typed named-member
+Host Grants. The Console accepts the closed Audit `grant` kind. This dependency upgrade does
+not mount Grant routes, persist Grants or authorize connections from them. It removes retired
 Personal invitation/enrollment and pairing formats. Consuming these
 contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
 
