@@ -54,6 +54,9 @@ export class AccountClient implements AccountTransport {
   get authenticated() {
     return Boolean(this.#token && this.#key);
   }
+  get sessionGeneration() {
+    return this.#generation;
+  }
   get blocked() {
     return this.#logoutAttempted;
   }

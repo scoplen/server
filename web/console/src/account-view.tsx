@@ -8,6 +8,7 @@ import { Field } from "./editors.tsx";
 import { LanguageControl, useLocale } from "./locale.tsx";
 import type { InvitationCrypto, JoinTarget } from "./invitation.ts";
 import type { RuleGenerator } from "./rule-editor.tsx";
+import type { InventoryCsvParser } from "./inventory-import.ts";
 
 type Translate = (en: string, zh: string) => string;
 function authFeedback(failure: unknown, t: Translate) {
@@ -100,7 +101,11 @@ export function AccountApp({
 }: {
   client?: AccountClient;
   origin: string;
-  shared: { invitations: InvitationCrypto; rules: RuleGenerator };
+  shared: {
+    invitations: InvitationCrypto;
+    rules: RuleGenerator;
+    csv: InventoryCsvParser;
+  };
   initialTarget?: JoinTarget;
   invalidLink: boolean;
   unavailable?: "https" | "browser";
