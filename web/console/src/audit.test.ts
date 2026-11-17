@@ -154,6 +154,23 @@ test("audit pages bind tenant, exact descending sequence, cursor, count and cont
   );
 });
 
+test("published Grant audit kinds remain distinct from unknown labels", () => {
+  const input = {
+    ...event(),
+    category: "authorization",
+    event_class: "organization.grants_created",
+    resource: { kind: "grant", id: target },
+  };
+  assert.deepEqual(
+    parseAuditPage(page([input]), org).items[0].resource,
+    input.resource,
+  );
+  for (const kind of ["Grant", "grants", "grant-extra"])
+    assert.throws(() =>
+      parseAuditPage(page([{ ...input, resource: { kind, id: target } }]), org),
+    );
+});
+
 test("required nullable audit attribution stays explicit and unclassified events stay unknown", () => {
   const unknown = {
     ...event(),
