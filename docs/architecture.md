@@ -28,7 +28,7 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@f493ece` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
+`proto@2ccaaa7` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
 `scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
 This revision includes Account password, Device admission and Organization inventory contracts,
 plus bounded immutable Organization audit queries, range verification and typed named-member
@@ -49,8 +49,9 @@ authorized transaction. Responses report first failure or the highest included c
 its uncovered suffix; no cursor, background verification job or result receipt is persisted.
 
 The server stores encrypted object envelopes
-without inspecting Credential fields. D-121 interactive SSH authentication belongs to
-`scoplen-ssh`, which this workspace does not consume. Server SSH execution and host-agent
+without inspecting Credential fields. D-121 interactive SSH authentication and D-148 composed
+transport loss belong to `scoplen-ssh`, which this workspace does not consume. The independent
+pin upgrade establishes no server SSH reconnect behavior. Server SSH execution and host-agent
 integration remain separate roadmap work.
 
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
