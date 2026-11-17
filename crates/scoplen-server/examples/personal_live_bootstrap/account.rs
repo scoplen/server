@@ -73,6 +73,14 @@ pub(super) async fn prepare_grant_client(
     grants::prepare_client(https, directory, openssh_descriptor).await
 }
 
+pub(super) async fn prepare_request_client(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    grants::prepare_request_client(https, directory, openssh_descriptor).await
+}
+
 struct Device {
     id: Uuid,
     keys: DeviceKeys,
