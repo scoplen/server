@@ -378,8 +378,18 @@ The exact reason bytes, original Account/Membership/Host/user and approved inter
 through the published codecs. Missing/weak/stale preconditions, self-approval even for Owner,
 changed payload/If-Match and another Device/browser profile or browser family cannot replace
 the original writer or operation. Browser refresh retains its original receipt ownership.
-The two profiles are separated by a real 61-second admission window; production limits are
-retained, and a rejected business operation is never retried automatically.
+Production admission allows ten attempts per operation and Account per 60-second window;
+Device and browser writers for the same Account share that budget. Each profile uses three
+Owner decision phases with explicit real 61-second waits between them:
+
+| Phase | Owner decision attempts | Checks |
+| --- | --- | --- |
+| Preconditions and routing | 8 | Self-approval, three preconditions, deny and confirmation, routing and visibility |
+| Eligibility and exact approval | 8 | Three requester eligibility denials, approve and confirmation, other writer, changed decision and original If-Match |
+| Withdrawn history | 3 | Original confirmation, current-routing refusal, restored-routing confirmation |
+
+The two profiles also retain a real 61-second wait between them. All five waits consume real
+time; production limits are unchanged, and a rejected business operation is never retried.
 
 Public policy changes independently remove approve routing, approver Host visibility,
 request permission and requester Host visibility. Existing credentials observe those current
@@ -403,7 +413,7 @@ It also does not establish response-loss injection, rendered/native interaction 
 cross-repository integration gate.
 
 `requests-check.started` is created exclusively before the first request. The complete flow
-has a six-minute deadline; each HTTPS request retains its fifteen-second bound. Any failure
+has a twelve-minute deadline; each HTTPS request retains its fifteen-second bound. Any failure
 or interruption abandons the fixture rather than replaying potentially committed business.
 Only complete success writes `requests-acceptance.json` with exactly these content-free fields:
 

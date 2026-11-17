@@ -323,7 +323,7 @@ async fn verify_requests(directory: &Path) -> Result<()> {
         "One attempt only; discard this fixture after any failure.",
     )?;
     tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(360), Box::pin(account::verify_requests(&https)))
+        tokio::time::timeout(Duration::from_mins(12), Box::pin(account::verify_requests(&https)))
             .await
             .map_err(|_| "Request check exceeded its deadline; abandon this fixture")?
     })
