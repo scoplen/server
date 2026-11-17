@@ -294,7 +294,7 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@e868b23`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@b0bc922`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 D-151 supplies shared CSV preparation, typed atomic import messages and the thin browser export.
 D-153 adds the shared Direct OpenSSH preparer and its browser export; both source choices use
@@ -1029,11 +1029,28 @@ The server assigns TrustRecord attribution. Credentials, authenticated-proxy sec
 Personal credential fallback cannot be stored in this inventory. References must resolve to
 independently readable objects in the same team; an active reference prevents target deletion.
 Equal replacements and original-create confirmations add no revision, sequence or audit.
-Account browsers can author only Host, HostGroup, AccessProfile and Route objects. Their K-1
+Account browsers can author Host, HostGroup, AccessProfile, Route and Snippet objects. Their K-1
 writer is the genuine server-generated browser-family UUID, with no fabricated Device. Inventory
 and Group/Policy create receipts bind the `account-browser` writer kind and original family;
 refresh within that family can confirm them, while another login family or Device conflicts.
 Native writer ids and receipt bytes remain unchanged. Team lifecycle receipts remain Account-bound.
+
+In the Account Console, open a team and choose **Snippets** to list, inspect, create, edit or
+delete shared command templates. The editor supports the typed name, template, optional folder,
+text tags and variable definitions. Text, Integer and Choice may have defaults; Integer defaults
+remain canonical signed 64-bit decimal strings, and Choice defaults must belong to the distinct
+choices. Secret variables have no stored default. This page edits the library only: runtime
+values and command execution belong to the desktop app. Grant visibility through an ordinary
+**Access rules > Create simple rule > View** selection; Snippet visibility grants no connection
+permission.
+
+Original create confirmation remains in memory for the same current Account/team/browser family,
+including same-family refresh, until its original 24-hour deadline. A new login cannot confirm it.
+Discarding an unresolved operation requires confirmation and a current review before another edit.
+Lost or unverifiable PUT/DELETE replies and stale versions require **Refresh and review** before
+another explicit edit; the Console never substitutes a new ETag or replays those writes.
+Unsupported schemas or fields cannot become editable complete replacements. API, static-component
+and packaged WASM checks remain distinct from rendered keyboard, focus and narrow-layout acceptance.
 
 `POST /api/v1/orgs/{org}/inventory/imports` creates 1..100 new Direct Hosts and their default
 Logins in one transaction. Prepare UTF-8 CSV with the exact header
