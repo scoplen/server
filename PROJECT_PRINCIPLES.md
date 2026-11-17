@@ -10,7 +10,11 @@ self-hosted server, host agent, administration CLI, and web console.
   web console. It does not own client source or shared wire contracts.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
   use published `proto@18422e7`. D-150 adds shared single-Host access-request contracts,
-  scopes and rule generation; adoption alone does not mount the production workflow.
+  scopes and rule generation. Both stores and the six genuine Device/browser routes implement
+  request checks, own/routed history, atomic finite-Grant approval and worker expiry. Original
+  writer-bound confirmation never restores a withdrawn Grant. Console My requests, Approvals
+  and request-rule components have API/SSR evidence; rendered/native and cross-repository
+  request-to-SSH acceptance remain separate.
   D-148 changes shared SSH composition; this workspace does not
   consume `scoplen-ssh`, so the pin upgrade establishes no server SSH reconnect behavior.
 - The vendor does not receive deployment data. Operators control the server's data directory,

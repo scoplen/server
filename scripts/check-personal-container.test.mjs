@@ -500,7 +500,7 @@ test("recovery probe follows the latest SQLite migration and preserves its old-i
   );
 });
 
-test("actual SQLite recovery inspection preserves old rows and requires current Grant, browser and KRL tables", async () => {
+test("actual SQLite recovery inspection preserves old rows and requires current Grant, request, browser and KRL tables", async () => {
   const directory = await mkdtemp(join(tmpdir(), "scoplen-recovery-schema-"));
   const path = join(directory, "scoplen.sqlite");
   const database = new DatabaseSync(path);
@@ -545,19 +545,29 @@ test("actual SQLite recovery inspection preserves old rows and requires current 
           Buffer.from("disposable pre-upgrade encrypted-envelope fixture"),
         );
     inspectDatabase(path, false);
-    database.exec("CREATE TABLE organization_grants (id BLOB PRIMARY KEY)");
-    assert.throws(() => inspectDatabase(path, false), { code: "ERR_ASSERTION" });
-    database.exec("DROP TABLE organization_grants");
+    for (const table of [
+      "organization_grants",
+      "organization_access_requests",
+    ]) {
+      database.exec(`CREATE TABLE ${table} (id BLOB PRIMARY KEY)`);
+      assert.throws(() => inspectDatabase(path, false), {
+        code: "ERR_ASSERTION",
+      });
+      database.exec(`DROP TABLE ${table}`);
+    }
     for (const name of names.filter((name) => Number(name.slice(0, 14)) > old))
       await applyMigration(name);
     inspectDatabase(path, true);
     for (const table of [
       "organization_grants",
+      "organization_access_requests",
       "account_browser_families",
       "organization_user_ca_krl_activation",
     ]) {
       database.exec(`ALTER TABLE ${table} RENAME TO missing_recovery_table`);
-      assert.throws(() => inspectDatabase(path, true), { code: "ERR_ASSERTION" });
+      assert.throws(() => inspectDatabase(path, true), {
+        code: "ERR_ASSERTION",
+      });
       database.exec(`ALTER TABLE missing_recovery_table RENAME TO ${table}`);
     }
     inspectDatabase(path, true);

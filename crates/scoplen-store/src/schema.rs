@@ -3353,6 +3353,113 @@ const ORGANIZATION_GRANTS: TableSpec = TableSpec {
     ],
 };
 
+const ORGANIZATION_ACCESS_REQUESTS: TableSpec = TableSpec {
+    name: "organization_access_requests",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "requester_account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "requester_membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "host_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "status", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "requester_account_id",
+            target_table: "identity_accounts",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "requester_membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_inventory_objects",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "host_id",
+            target_table: "organization_inventory_objects",
+            target_column: "object_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "organization_access_requests_id", columns: &["id"] },
+        IndexSpec {
+            name: "organization_access_requests_mine",
+            columns: &["organization_id", "requester_account_id", "id"],
+        },
+        IndexSpec {
+            name: "organization_access_requests_approvals",
+            columns: &["organization_id", "status", "expires_at_ms", "id"],
+        },
+        IndexSpec {
+            name: "organization_access_requests_expiry",
+            columns: &["status", "expires_at_ms", "organization_id", "id"],
+        },
+        IndexSpec {
+            name: "organization_access_requests_host",
+            columns: &["organization_id", "host_id", "status"],
+        },
+    ],
+};
+
 const ORGANIZATION_USER_CAS: TableSpec = TableSpec {
     name: "organization_user_cas",
     columns: &[
@@ -3596,6 +3703,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_GROUP_MEMBERS,
     ORGANIZATION_POLICIES,
     ORGANIZATION_GRANTS,
+    ORGANIZATION_ACCESS_REQUESTS,
     ORGANIZATION_INVITATIONS,
     ORGANIZATION_OPERATION_RECEIPTS,
     ORGANIZATION_MEMBERSHIPS,
@@ -4152,6 +4260,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261117000000_host_grants.sql");
     const POSTGRES_HOST_GRANTS: &str =
         include_str!("../migrations/postgres/20261117000000_host_grants.sql");
+    const SQLITE_ACCESS_REQUESTS: &str =
+        include_str!("../migrations/sqlite/20261117010000_access_requests.sql");
+    const POSTGRES_ACCESS_REQUESTS: &str =
+        include_str!("../migrations/postgres/20261117010000_access_requests.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4210,6 +4322,7 @@ mod tests {
             SQLITE_ACCOUNT_BROWSER,
             SQLITE_USER_CA_KRL,
             SQLITE_HOST_GRANTS,
+            SQLITE_ACCESS_REQUESTS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4248,6 +4361,7 @@ mod tests {
             POSTGRES_ACCOUNT_BROWSER,
             POSTGRES_USER_CA_KRL,
             POSTGRES_HOST_GRANTS,
+            POSTGRES_ACCESS_REQUESTS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

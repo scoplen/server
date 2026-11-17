@@ -351,6 +351,88 @@ the fixture; never replay it or overwrite its files. No credential, identifier o
 is printed, and completion does not claim rendered/native acceptance or completion of the
 integration gate. The caller owns all services, private diagnostics and exact resource cleanup.
 
+## Independent access-request client handoff
+
+Build the production server and example from the same current checkout. Prepare another new
+private HTTPS fixture on each database, enable Account registration and team creation before
+startup, and complete `bootstrap`. Use a new empty database and fresh owned OpenSSH target;
+never reuse a previous attempt's Accounts, markers or descriptors. The OpenSSH descriptor and
+ownership inspection use the same exact four-field profile as the Grant handoff above.
+Against that running fixture, start the long-lived producer once:
+
+```text
+personal_live_bootstrap prepare-request-client <fixture-directory> --openssh-descriptor <owned-openssh-descriptor>
+```
+
+This is a terminal-driven public HTTPS and independent client-core/SSH acceptance flow. It
+does not launch a desktop window or browser. The caller owns service startup, target setup,
+private diagnostics and cleanup. The producer only inspects the existing owned target; it
+neither starts nor configures it, installs system trust, nor opens the database.
+
+The producer reuses genuine independent Owner/Member password registration, Device
+authentication, browser families, named invitation, local user CA and visible Host/Login
+preparation. The Login retains the exact `smoke` username, direct route `0` and Host default
+profile. The Member receives only View for that Host/Login and the ordinary single-Host
+RequestAccess rule. There is no connect policy, Grant or pre-issued SSH certificate. Public
+Grant listing must confirm the initial empty set before any client phase is published.
+
+Each private descriptor preserves all twelve original Grant descriptor fields unchanged and
+adds exactly `request_id`, `request_duration_seconds` and `request_reason`, for fifteen fields
+in total and the same complete 8,192-byte bound. The requested duration is 600 seconds; the
+consumer must use the exact descriptor reason without normalization. `request_id` is explicit
+null in `before`, then the same original canonical UUIDv7 in `active` and `withdrawn`.
+
+| Phase | Descriptor | Required independent result |
+| --- | --- | --- |
+| Before application/approval | `request-client-before.json` | Definite team connect denial, exact-input check and explicit creation of the pending request; `issuance_denied` with null cutoff |
+| Original request approved | `request-client-active.json` | Refresh the original request and explicitly connect; `ssh_sftp` with the actual approval-created Grant's finite cutoff |
+| Approval-created Grant withdrawn | `request-client-withdrawn.json` | Original request history remains approved, but cold-Store/new-Device certificate issuance is denied; `issuance_denied` with null cutoff |
+
+Wait for `request-client-<phase>.ready` containing exactly `ready\n` before reading the
+corresponding descriptor. Run the independent consumer once per phase with its cold Store
+and new Device, retaining the common Account/team/Host/Login/request identity. The consumer
+owns request creation and normal certificate acquisition, Host-key review, actual SSH and
+binary SFTP. It must not create or repair a Grant, asset, policy or CA, substitute a Login/user,
+pre-issue a certificate, or treat historical approval as present authority.
+
+The consumer itself exclusively creates `request-client-<phase>.complete`. Its contents are
+one compact UTF-8 JSON object followed by exactly one LF, with these exact fields:
+
+| Phase | Completion fields and values |
+| --- | --- |
+| `before` | `request_id`: actual canonical UUIDv7; `host_id`: descriptor Host; `remote_user`: `"smoke"`; `duration_seconds`: 600; `status`: `"pending"` |
+| `active` | `request_id`: original request; `status`: `"approved"`; `ssh_sftp`: true |
+| `withdrawn` | `request_id`: original request; `status`: `"approved"`; `issuance_denied`: true |
+
+There is no reason field in completion evidence and no separate `.complete.json` file.
+Unknown, duplicate or missing fields, changed identities/input, wrong statuses and false
+evidence fail the handoff. The producer waits for the final LF before decoding a possibly
+partial write. The controller must independently confirm exactly one passed consumer check,
+zero failed/ignored checks and exit status zero; it must never synthesize, replace or overwrite
+the consumer's completion file. The existing Grant mode still uses its original twelve-field
+descriptors and controller-created `passed\n` completion signal.
+
+After `before`, the producer refreshes its genuine Owner browser family, lists the currently
+routed approvals and GETs the original request. It requires exactly one pending request with
+the original Member Account/Membership and exact Host, username, duration and reason. Only
+then does it explicitly approve through the public request decision API with the original
+ETag and a fresh operation key. Approval itself must create the unique finite Grant; the
+producer never separately creates one. A current public Grant read/list must match the
+original Membership/Host/user and approved interval before the active cutoff is published.
+
+After active SSH/SFTP completion, the producer refreshes again, reads that same current Grant
+and withdraws it through the ordinary conditional Grant API. It confirms the request's
+approved history is unchanged and the Grant set is empty before publishing `withdrawn`.
+Previously disclosed certificates and existing SSH sessions are not claimed to terminate.
+
+Each phase has a four-minute deadline and the complete producer a fifteen-minute deadline.
+Descriptors, ready markers, generated password files and `request-client.started` are created
+exclusively. Any failure, interruption or unknown business outcome abandons this entire
+fixture; never automatically replay mutations, replace an operation key/ETag, overwrite
+handoff material or reuse the same Accounts. Retain failure evidence privately. Success does
+not establish rendered/native interaction, the wider request failure matrix or the complete
+integration gate; those require their separate checks.
+
 ## Descriptor, privacy and failures
 
 After confirmed Operator setup, login, logout, eligible terminal logout confirmation and

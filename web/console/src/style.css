@@ -880,6 +880,19 @@ fieldset {
 .grant-remote-user {
   white-space: pre-wrap;
 }
+.request-reason {
+  white-space: pre-wrap;
+  tab-size: 4;
+}
+.request-review {
+  margin-block: 24px;
+  padding-block: 20px;
+  border-block: 1px solid var(--border);
+}
+.request-toolbar [aria-pressed="true"] {
+  color: var(--primary);
+  border-color: var(--primary);
+}
 .grant-status {
   font:
     500 12px "Inter Variable",

@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use scoplen_api::inventory::{InventoryFields, InventoryReplaceRequest};
+use scoplen_api::inventory::{InventoryFields, InventoryReplaceRequest, InventoryResource};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -19,6 +19,17 @@ use super::{
     native, rule, withdraw,
 };
 use crate::{read_bounded, write_private};
+
+#[path = "requests_handoff.rs"]
+mod requests;
+
+pub(super) async fn prepare_request_client(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    requests::prepare(https, directory, openssh_descriptor).await
+}
 
 const PHASES: [&str; 3] = ["before", "active", "withdrawn"];
 const MAX_DESCRIPTOR_BYTES: usize = 8_192;
@@ -234,24 +245,24 @@ async fn phase(directory: &Path, name: &str, descriptor: &Descriptor<'_>) -> Res
     .map_err(|_| "Grant client phase exceeded its deadline; abandon this fixture")?
 }
 
-#[allow(clippy::too_many_lines)]
-pub(super) async fn prepare(
-    https: &Https,
-    directory: &Path,
-    openssh_descriptor: &Path,
-) -> Result<()> {
-    for name in PHASES {
-        for suffix in ["json", "ready", "complete"] {
-            require_absent(&directory.join(format!("grant-client-{name}.{suffix}")))?;
-        }
-    }
+struct Prepared {
+    owner: Registration,
+    member: Registration,
+    owner_browser: Browser,
+    org: Uuid,
+    membership: Uuid,
+    host: InventoryResource,
+    profile: InventoryResource,
+}
+
+async fn prepare_target(https: &Https, openssh_descriptor: &Path) -> Result<Prepared> {
     let ssh = OwnedOpenSsh::load(openssh_descriptor)?;
     ssh.verify().await?;
     let owner = Registration::new(&https.origin)?;
     owner.register(https).await?;
     let member = Registration::new(&https.origin)?;
     member.register(https).await?;
-    let mut owner_browser = Browser::login(https, &owner).await?;
+    let owner_browser = Browser::login(https, &owner).await?;
     let member_browser = Browser::login(https, &member).await?;
     let org = create_team(https, owner_browser.actor()).await?.id;
     let membership =
@@ -339,6 +350,21 @@ pub(super) async fn prepare(
             return Err("Grant member cannot read the prepared Host and Login unchanged");
         }
     }
+    Ok(Prepared { owner, member, owner_browser, org, membership, host, profile })
+}
+
+pub(super) async fn prepare(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    for name in PHASES {
+        for suffix in ["json", "ready", "complete"] {
+            require_absent(&directory.join(format!("grant-client-{name}.{suffix}")))?;
+        }
+    }
+    let Prepared { owner, member, mut owner_browser, org, membership, host, profile } =
+        prepare_target(https, openssh_descriptor).await?;
     let owner_password_file = directory.join("grant-client-owner-password.txt");
     let member_password_file = directory.join("grant-client-member-password.txt");
     super::super::write_browser_password(&owner_password_file, &owner.password)?;

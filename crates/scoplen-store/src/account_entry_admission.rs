@@ -63,6 +63,10 @@ pub enum AccountEntryEndpoint {
     OrganizationGrantCreate = 43,
     OrganizationGrantReplace = 44,
     OrganizationGrantDelete = 45,
+    OrganizationAccessRequestCheck = 46,
+    OrganizationAccessRequestCreate = 47,
+    OrganizationAccessRequestDecide = 48,
+    OrganizationAccessRequestCancel = 49,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

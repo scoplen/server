@@ -25,12 +25,14 @@ import { SimpleRuleEditor, type RuleGenerator } from "./rule-editor.tsx";
 import { requestFeedback } from "./feedback.ts";
 import { AuditPanel } from "./audit-view.tsx";
 import { GrantPanel } from "./grants-view.tsx";
+import { AccessRequestPanel } from "./access-requests-view.tsx";
 
 type Section =
   | CollectionKind
   | "members"
   | "invitations"
   | "grants"
+  | "requests"
   | "audit"
   | "settings"
   | "join";
@@ -139,6 +141,7 @@ export function TeamWorkspace({
     invitations: t("Invitations", "邀请"),
     audit: t("Audit", "审计"),
     grants: t("Host Grants", "主机连接授权"),
+    requests: t("Requests", "访问申请"),
     settings: t("Team settings", "团队设置"),
     join: t("Join a team", "加入团队"),
   };
@@ -261,6 +264,7 @@ export function TeamWorkspace({
       target === "join" ||
       target === "audit" ||
       target === "grants" ||
+      target === "requests" ||
       !selected
     )
       return;
@@ -611,6 +615,7 @@ export function TeamWorkspace({
                     "groups",
                     "policies",
                     "grants",
+                    "requests",
                     "audit",
                     "settings",
                   ] as Section[]
@@ -654,6 +659,7 @@ export function TeamWorkspace({
                 section !== "join" &&
                 section !== "audit" &&
                 section !== "grants" &&
+                section !== "requests" &&
                 !editor &&
                 !createTeam && (
                   <button
@@ -871,6 +877,23 @@ export function TeamWorkspace({
                 key={team.id}
                 teamApi={api}
                 organization={team.id}
+                disabled={busy || session.busy}
+              />
+            )
+          ) : section === "requests" ? (
+            session.busy || session.blocked || session.expired || !profile ? (
+              <p className="notice" role="status">
+                {t(
+                  "Requests are unavailable while this session is ending or expired. Sign in again to continue.",
+                  "会话正在结束或已过期，访问申请已隐藏。请重新登录以继续。",
+                )}
+              </p>
+            ) : (
+              <AccessRequestPanel
+                key={`${team.id}:${profile.id}`}
+                teamApi={api}
+                organization={team.id}
+                account={profile.id}
                 disabled={busy || session.busy}
               />
             )
@@ -1485,6 +1508,7 @@ export function TeamWorkspace({
             !createTeam &&
             section !== "join" &&
             section !== "audit" &&
+            section !== "requests" &&
             section !== "settings" && (
               <button
                 className="secondary load-more"

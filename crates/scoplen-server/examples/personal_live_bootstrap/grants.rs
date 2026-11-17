@@ -40,6 +40,14 @@ pub(super) async fn prepare_client(
     handoff::prepare(https, directory, openssh_descriptor).await
 }
 
+pub(super) async fn prepare_request_client(
+    https: &Https,
+    directory: &std::path::Path,
+    openssh_descriptor: &std::path::Path,
+) -> Result<()> {
+    handoff::prepare_request_client(https, directory, openssh_descriptor).await
+}
+
 struct Created {
     request: GrantCreateRequest,
     key: String,

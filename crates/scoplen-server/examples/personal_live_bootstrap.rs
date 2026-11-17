@@ -101,6 +101,8 @@ enum Command {
     VerifyGrants { directory: PathBuf },
     /// Once only: prepare three private phases for independent Grant SSH/SFTP acceptance.
     PrepareGrantClient(GrantClientArguments),
+    /// Once only: hand off a real member request, independent approval and SSH/SFTP use.
+    PrepareRequestClient(GrantClientArguments),
 }
 
 #[derive(Args)]
@@ -232,6 +234,7 @@ async fn run(command: Command) -> Result<()> {
         }
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
         Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments).await?,
+        Command::PrepareRequestClient(arguments) => prepare_request_client(arguments).await?,
     }
     Ok(())
 }
@@ -257,6 +260,30 @@ async fn prepare_grant_client(arguments: GrantClientArguments) -> Result<()> {
     .await
     .map_err(|_| "Grant client preparation task failed; abandon this fixture")??;
     println!("independent Grant client handoff completed");
+    Ok(())
+}
+
+async fn prepare_request_client(arguments: GrantClientArguments) -> Result<()> {
+    let directory = canonical_fixture_directory(&arguments.directory)?;
+    let openssh_descriptor = arguments.openssh_descriptor;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("request-client.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_mins(15),
+            Box::pin(account::prepare_request_client(&https, &directory, &openssh_descriptor)),
+        )
+        .await
+        .map_err(|_| "Request client preparation exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Request client preparation task failed; abandon this fixture")??;
+    println!("independent Request client handoff completed");
     Ok(())
 }
 
@@ -1133,6 +1160,42 @@ mod tests {
             assert!(!scratch.0.join(format!("grant-client-{phase}.ready")).exists());
         }
         assert!(!scratch.0.join("grant-client-owner-password.txt").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_client_handoff_requires_owned_target_and_refuses_replay() {
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "prepare-request-client",
+                "unused",
+                "--openssh-descriptor",
+                "unused.json",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["consumer", "prepare-request-client", "unused"]).is_err());
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || {
+            Command::PrepareRequestClient(GrantClientArguments {
+                directory: scratch.0.clone(),
+                openssh_descriptor: scratch.0.join("absent-openssh.json"),
+            })
+        };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("request-client.started").is_file());
+        for phase in ["before", "active", "withdrawn"] {
+            for suffix in ["json", "ready", "complete"] {
+                assert!(!scratch.0.join(format!("request-client-{phase}.{suffix}")).exists());
+            }
+        }
+        assert!(!scratch.0.join("request-client-owner-password.txt").exists());
+        assert!(!scratch.0.join("request-client-member-password.txt").exists());
         assert_eq!(
             run(command()).await.unwrap_err(),
             "could not exclusively write private fixture material"

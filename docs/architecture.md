@@ -263,6 +263,48 @@ request and receipt bytes remain unchanged; confirmation rechecks current author
 the exact original certificate. Withdrawing a Grant stops future issuance under it, while
 disclosed certificates expire normally and existing sessions continue.
 
+Single-Host access requests use six typed Device/Account-browser routes and the published
+recursive codecs. Check evaluates only the exact Host, duration and reason against current
+request_access and independent visibility. Creation repeats that evaluation inside the tenant
+transaction. Own history retains opaque submitted ids; other reads and the unexpired pending
+approval inbox require current complete approve_access routing, target visibility and a
+non-self requester. No directory or view_policy permission is required. Cancellation withdraws
+only the caller's own pending intent without requiring fresh Host visibility or eligibility.
+
+Mirrored forward migrations retain immutable requester Account/original Membership/Host/input,
+exact millisecond-preserving 24-hour deadlines, terminal status, decision and original Grant
+interval history. Same-team references, globally used ids, bounded response bytes and indexes
+protect tenant integrity, mine/approval lists and expiry work. Pending requests block Host
+deletion; terminal history alone does not. Existing Account deletion and tenant retention apply.
+
+Decisions recheck the original requester's active Membership, current Account, live visible
+Host and exact original request eligibility. Approval needs no manage_policy permission: one
+transaction creates one new finite D-147 Grant for the original member/Host/username, floors
+approval time to a whole Unix second, checks the exact requested interval, persists the
+request/decision and 24-hour original receipt, advances the Organization revision and appends
+the attributable request and Grant events. Only that confirmed approval sends the existing
+content-free Organization notification. Deny/cancel append one event and receipt without a
+Grant or revision. Reads preserve persisted status and never expire requests opportunistically.
+The 30-second worker independently examines at most 100 indexed overdue pending candidates,
+locks each owning Organization, rechecks its deadline/status and commits one system expiry
+event. Shutdown can cancel a blocked pass; only confirmed counts are logged.
+
+Current caller authority precedes protected ETags and original receipts. Receipt binding
+includes trusted origin, Account, actual Device/browser family, method/path, original If-Match
+and canonical payload. Explicit original confirmation returns exact successful bytes without
+recreating requests, decisions or withdrawn Grants. Failed preparation rolls back; an
+unconfirmed attempted COMMIT requires explicit original-operation confirmation and is never
+automatically replayed.
+
+The Account Console has My requests and current Approvals surfaces, explicit review and
+Approve/Deny/Cancel, deadline-aware actions, original-operation confirmation, and a 60-second
+refresh while either surface is active, including empty inboxes. Session/team changes fence
+late results. The ordinary rule editor supports request_access over selected Hosts. Console
+evidence comprises 99 Node/SSR tests, lint/typechecking, the official published archive browser
+artifact/provenance and a 24-asset production build. Component/HTTP evidence does not establish
+rendered keyboard/focus or narrow-window behavior, native desktop interaction, or the genuine
+cross-repository request-to-certificate-to-SSH/SFTP acceptance.
+
 The initial Organization user CA is a separate local Ed25519 signer in `scoplen-ca`.
 `scoplen-store` owns encrypted custody, current authority and transaction completion. One
 Organization-owned CA row stores the public Resource and a versioned XChaCha20-Poly1305 seed

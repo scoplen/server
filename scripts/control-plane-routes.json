@@ -90,5 +90,11 @@
   {"method": "POST", "path": "/orgs/{org}/policies"},
   {"method": "GET", "path": "/orgs/{org}/policies/{id}"},
   {"method": "PUT", "path": "/orgs/{org}/policies/{id}"},
-  {"method": "DELETE", "path": "/orgs/{org}/policies/{id}"}
+  {"method": "DELETE", "path": "/orgs/{org}/policies/{id}"},
+  {"method": "POST", "path": "/orgs/{org}/access-requests/check"},
+  {"method": "POST", "path": "/orgs/{org}/access-requests"},
+  {"method": "GET", "path": "/orgs/{org}/access-requests"},
+  {"method": "GET", "path": "/orgs/{org}/access-requests/{id}"},
+  {"method": "POST", "path": "/orgs/{org}/access-requests/{id}/decisions"},
+  {"method": "POST", "path": "/orgs/{org}/access-requests/{id}/cancel"}
 ]

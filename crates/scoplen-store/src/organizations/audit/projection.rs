@@ -123,6 +123,15 @@ fn classification(
         | "organization.grants_deleted" => {
             (Authorization, "object_id", Some(Kind::Grant), ActorKind::Either)
         }
+        "organization.access_request_created"
+        | "organization.access_request_approved"
+        | "organization.access_request_denied"
+        | "organization.access_request_cancelled" => {
+            (Authorization, "request_id", Some(Kind::AccessRequest), ActorKind::Either)
+        }
+        "organization.access_request_expired" => {
+            (Authorization, "request_id", Some(Kind::AccessRequest), ActorKind::System)
+        }
         "organization.user_ca_krl_activated" => {
             (Authorization, "authority_id", Some(Kind::CertificateAuthority), ActorKind::System)
         }
@@ -357,6 +366,39 @@ mod tests {
                 assert_eq!(
                     event.resource,
                     Some(AuditResource { kind: AuditResourceKind::Grant, id: id(4) })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn access_request_producers_preserve_callers_and_expiry_is_system() {
+        for action in [
+            "organization.access_request_created",
+            "organization.access_request_approved",
+            "organization.access_request_denied",
+            "organization.access_request_cancelled",
+            "organization.access_request_expired",
+        ] {
+            for actor in ["device_id", "browser_family_id"] {
+                let mut fields = json!({"action":action,"account_id":id(2),"request_id":id(4)});
+                fields[actor] = json!(id(3));
+                let event = from_bytes(&serde_json::to_vec(&fields).unwrap());
+                let system = action == "organization.access_request_expired";
+                assert_eq!(event.category, AuditCategory::Authorization);
+                assert_eq!(event.outcome, AuditOutcome::Success);
+                assert_eq!(
+                    event.resource,
+                    Some(AuditResource { kind: AuditResourceKind::AccessRequest, id: id(4) })
+                );
+                assert_eq!(event.actor_account_id, (!system).then_some(id(2)));
+                assert_eq!(
+                    event.actor_device_id,
+                    (!system && actor == "device_id").then_some(id(3))
+                );
+                assert_eq!(
+                    event.actor_browser_family_id,
+                    (!system && actor == "browser_family_id").then_some(id(3))
                 );
             }
         }
