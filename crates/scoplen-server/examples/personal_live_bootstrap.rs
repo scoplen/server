@@ -2,6 +2,7 @@
 //! Disposable, loopback-only public HTTPS bootstrap for independent integration consumers.
 
 use std::{
+    env::vars_os,
     fs,
     io::Read as _,
     net::{Ipv4Addr, SocketAddr, TcpListener},
@@ -13,7 +14,7 @@ use std::{
 
 use axum::{body::Bytes, http::Request};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
@@ -98,6 +99,16 @@ enum Command {
     VerifyAudit { directory: PathBuf },
     /// Once only: verify Host Grant management and certificate bounds through real HTTPS.
     VerifyGrants { directory: PathBuf },
+    /// Once only: prepare three private phases for independent Grant SSH/SFTP acceptance.
+    PrepareGrantClient(GrantClientArguments),
+}
+
+#[derive(Args)]
+struct GrantClientArguments {
+    directory: PathBuf,
+    /// Existing owned OpenSSH fixture descriptor; no target is created or changed here.
+    #[arg(long)]
+    openssh_descriptor: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -126,9 +137,7 @@ async fn main() -> ExitCode {
 }
 
 async fn run(command: Command) -> Result<()> {
-    if std::env::vars_os()
-        .any(|(name, _)| name.to_string_lossy().to_ascii_uppercase().starts_with("SPL_"))
-    {
+    if vars_os().any(|(name, _)| name.to_string_lossy().to_ascii_uppercase().starts_with("SPL_")) {
         return Err("unset SPL_* overrides before preparing or using a disposable fixture");
     }
     match command {
@@ -222,7 +231,32 @@ async fn run(command: Command) -> Result<()> {
             println!("public Device and Account-browser audit check passed");
         }
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
+        Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments).await?,
     }
+    Ok(())
+}
+
+async fn prepare_grant_client(arguments: GrantClientArguments) -> Result<()> {
+    let directory = canonical_fixture_directory(&arguments.directory)?;
+    let openssh_descriptor = arguments.openssh_descriptor;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("grant-client.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_mins(15),
+            Box::pin(account::prepare_grant_client(&https, &directory, &openssh_descriptor)),
+        )
+        .await
+        .map_err(|_| "Grant client preparation exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Grant client preparation task failed; abandon this fixture")??;
+    println!("independent Grant client handoff completed");
     Ok(())
 }
 
@@ -1067,6 +1101,40 @@ mod tests {
         assert!(!scratch.0.join("grants-acceptance.json").exists());
         assert_eq!(
             run(Command::VerifyGrants { directory: scratch.0.clone() }).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_client_handoff_requires_owned_target_and_refuses_replay() {
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "prepare-grant-client",
+                "unused",
+                "--openssh-descriptor",
+                "unused.json",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["consumer", "prepare-grant-client", "unused"]).is_err());
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || {
+            Command::PrepareGrantClient(GrantClientArguments {
+                directory: scratch.0.clone(),
+                openssh_descriptor: scratch.0.join("absent-openssh.json"),
+            })
+        };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("grant-client.started").is_file());
+        for phase in ["before", "active", "withdrawn"] {
+            assert!(!scratch.0.join(format!("grant-client-{phase}.json")).exists());
+            assert!(!scratch.0.join(format!("grant-client-{phase}.ready")).exists());
+        }
+        assert!(!scratch.0.join("grant-client-owner-password.txt").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
             "could not exclusively write private fixture material"
         );
     }

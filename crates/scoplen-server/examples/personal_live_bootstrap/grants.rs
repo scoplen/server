@@ -29,6 +29,17 @@ use super::{
 };
 use crate::{Https, Result};
 
+#[path = "grants_handoff.rs"]
+mod handoff;
+
+pub(super) async fn prepare_client(
+    https: &Https,
+    directory: &std::path::Path,
+    openssh_descriptor: &std::path::Path,
+) -> Result<()> {
+    handoff::prepare(https, directory, openssh_descriptor).await
+}
+
 struct Created {
     request: GrantCreateRequest,
     key: String,

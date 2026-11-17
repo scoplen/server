@@ -290,6 +290,65 @@ and binary SFTP against an owned target. Rendered/native interaction, immediate 
 of disclosed certificates, existing-session termination and the complete integration gate
 remain independent acceptance work.
 
+## Independent Grant client handoff
+
+Use a separate fresh HTTPS fixture on each database, with team creation enabled and
+`bootstrap` completed as above. The independent client controller first supplies its existing
+owned OpenSSH descriptor with exactly `disposable`, `container`, `owner` and `port`. Start one
+long-lived producer against that running fixture:
+
+```text
+personal_live_bootstrap prepare-grant-client <fixture-directory> --openssh-descriptor <owned-openssh-descriptor>
+```
+
+Before registering Accounts or creating assets, the producer inspects the existing
+`scoplen-team-ssh-*` container. It requires a UUID ownership value matching the
+`com.scoplen.fixture` label, running state and exactly one `2222/tcp` binding at
+`127.0.0.1:<descriptor.port>`. It neither creates nor configures an SSH target. Inspection has
+a fifteen-second deadline, captures bounded output and does not print it.
+
+Two random password Accounts register through public HTTPS and sign in as genuine
+Account-browser families. Through those public APIs the producer creates one team, named
+Member invitation, local user CA, loopback Host and Login. The Login uses `smoke`, direct
+route `0` and the Host's `default_profile`. One view policy permits the member to read both
+Host and Login. No ordinary connect policy is created and no certificate is pre-issued.
+The prepared Host and Login are read back unchanged through the member's browser session.
+
+The producer keeps its owner browser credentials in memory and publishes three phases using
+the same Account/team/Host/Login/CA identities:
+
+| Phase | Descriptor | Required independent result |
+| --- | --- | --- |
+| Before any Grant | `grant-client-before.json` | `issuance_denied`, explicit null cutoff |
+| Finite Grant active | `grant-client-active.json` | `ssh_sftp`, cutoff exactly ten minutes after Grant creation time |
+| Grant withdrawn | `grant-client-withdrawn.json` | `issuance_denied`, explicit null cutoff |
+
+Every private descriptor is at most 8,192 bytes and has exactly these twelve fields:
+`disposable`, `origin`, `ca_certificate`, `organization_id`, `host_id`, `profile_id`,
+`owner_username`, `owner_password_file`, `member_username`, `member_password_file`,
+`expected_outcome` and `certificate_not_after`. `disposable` is true; the origin retains the
+prepared trusted loopback HTTPS boundary. CA and password paths are absolute. Password files
+contain only the generated password bytes, without a newline. The active cutoff is a finite
+whole Unix second; both denial phases contain explicit JSON null.
+
+For each phase, the controller waits for `grant-client-<phase>.ready` containing `ready\n`
+before reading the corresponding complete descriptor. It runs the existing independent
+consumer once with a cold Store and a new Device. Denial must be the expected permission
+failure; network, storage or fixture errors fail the check. Active success requires actual
+SSH and binary SFTP plus inspection of the resulting cached certificate against the supplied
+cutoff. The client performs normal Host-key review, target validation and automatic issuance;
+it does not repair team assets, policies, Grants or the CA.
+
+Only after that consumer reports one passed and zero failed checks with exit status zero may
+the controller exclusively create `grant-client-<phase>.complete` with exactly `passed\n`.
+The producer waits at most four minutes for each signal, refreshes its browser family before
+creating or withdrawing the Grant, and advances only on the exact signal. The entire producer
+has a fifteen-minute deadline. Its descriptors, ready markers, passwords and
+`grant-client.started` marker are created exclusively. Any failure or interruption abandons
+the fixture; never replay it or overwrite its files. No credential, identifier or certificate
+is printed, and completion does not claim rendered/native acceptance or completion of the
+integration gate. The caller owns all services, private diagnostics and exact resource cleanup.
+
 ## Descriptor, privacy and failures
 
 After confirmed Operator setup, login, logout, eligible terminal logout confirmation and
