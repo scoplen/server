@@ -397,7 +397,7 @@ the fixture; never replay it or overwrite its files. No credential, identifier o
 is printed, and completion does not claim rendered/native acceptance or completion of the
 integration gate. The caller owns all services, private diagnostics and exact resource cleanup.
 
-## CSV inventory import acceptance
+## CSV and Direct OpenSSH inventory import acceptance
 
 Build the server and example from the same checkout. Prepare a fresh private HTTPS fixture,
 enable Account registration and team creation, and complete `bootstrap`. Run independently
@@ -405,11 +405,35 @@ with SQLite and a new owned PostgreSQL database:
 
 ```text
 personal_live_bootstrap verify-inventory-import <fixture-directory>
+personal_live_bootstrap verify-inventory-import <another-new-fixture-directory> --source openssh
 ```
 
+Both import commands accept only `--source csv|openssh`; omission means `csv`. Run each
+source/database combination in a new fixture. These are acceptance procedures, not evidence
+that a particular checkout has been compiled or the flow has passed.
+
 The command uses public registration, genuine Device authentication and independently keyed
-Account-browser login. The published Rust CSV parser prepares two rows with the same name
-and endpoint, an omitted Login name and the default port. Both credential profiles submit
+Account-browser login. In CSV mode the published Rust parser prepares two rows with the same
+name and endpoint, an omitted Login name and the default port. In OpenSSH mode the published
+Rust preparer receives this synthetic source, with port 2203 for the HTTPS check or the owned
+SSH target's port for the independent client handoff:
+
+```text
+User smoke
+Port <fixture-port>
+Host Mixed
+ HostName 127.0.0.1
+Host Blocked
+ ProxyJump none
+```
+
+The helper checks the complete ordered preview: candidate 1 is Ready with the exact `Mixed`,
+`127.0.0.1`, port and `smoke` fields; candidate 2 is Blocked with `unsupported_option` on
+physical line 6. Only the explicitly selected Ready candidate gets new Host/Login ids. Its
+Login name is omitted. The source, blocked candidate, proxy/identity/command/trust settings
+are never part of the typed HTTP request. No user or system SSH configuration is inspected.
+
+Both credential profiles submit
 typed batches and read every final Host/default-Login pair without repairing it. Complete
 Organization views must contain the exact K-1 fields, real writer origins and contiguous
 Host-then-Login sequences. Every batch adds exactly one view revision and one attributable
@@ -418,29 +442,58 @@ Host-then-Login sequences. Every batch adds exactly one view revision and one at
 Original Device confirmation and same-family browser confirmation after real refresh preserve
 the exact original response without another sequence, object, revision or audit. Changed
 payloads, used ids under a different key, another writer or browser family, malformed later
-rows and foreign-team access must preserve the captured public state. The command waits one
-real admission window between Device and browser phases; it neither alters admission state
-nor retries rejected writes automatically. Each HTTPS request has a fifteen-second deadline
-and the whole check has a five-minute deadline. Its exclusive `inventory-import-check.started`
-marker prevents repeating a possibly committed attempt. Only full success creates
-`inventory-import-acceptance.json`; no credential or identifier is printed or exported.
+rows and foreign-team access must preserve the captured public state. OpenSSH mode also
+creates a real current `manage_inventory` forbid through the public policy API. Both original
+Device/browser writers must receive `403 policy.denied` for a fresh request and their exact
+original confirmation, without any partial public inventory or Audit change. Disabling that
+same policy through its current ETag restores original confirmation without another mutation.
+
+The command waits a real 61-second admission window between Device and browser phases;
+OpenSSH mode waits another before the policy checks. It neither alters admission state nor
+retries rejected writes automatically. Each HTTPS request has a fifteen-second deadline and
+the whole check has a five-minute deadline. Exclusive markers prevent repeating the chosen
+source's possibly committed attempt:
+
+| Source | Started marker | Complete-success record |
+| --- | --- | --- |
+| CSV | `inventory-import-check.started` | `inventory-import-acceptance.json` |
+| OpenSSH | `openssh-import-check.started` | `openssh-import-acceptance.json` |
+
+A started marker records only that an attempt began. Any failure or interruption requires a
+new fixture; it writes no success record and must not be retried with either source. Only
+complete OpenSSH HTTPS success writes these exact content-free claims, all `true`:
+
+```json
+{"openssh_import_device_browser_https_verified":true,"openssh_import_original_confirmation_verified":true,"openssh_import_current_policy_verified":true,"openssh_import_tenant_view_audit_verified":true}
+```
+
+No credential or identifier is printed or exported by this check.
 
 For independent SSH and binary SFTP, use another fresh fixture and the existing owned
 OpenSSH descriptor and three-phase Grant consumer procedure above, selecting:
 
 ```text
 personal_live_bootstrap prepare-inventory-import-client <fixture-directory> --openssh-descriptor <private-owned-target.json>
+personal_live_bootstrap prepare-inventory-import-client <another-new-fixture-directory> --openssh-descriptor <another-private-owned-target.json> --source openssh
 ```
 
 This variant imports the target and its default Login in one public POST instead of creating
 and repairing the pair with separate writes. It verifies both current Resources before
 granting the member independent view authority. The descriptors, ready/completion markers,
-finite Grant and withdrawal phases are exactly the existing Grant handoff. The independent
+finite Grant and withdrawal phases are exactly the existing Grant handoff. Both source modes
+use the same twelve descriptor fields above, with no source field or additional identities:
+`before` and `withdrawn` require `issuance_denied` and explicit null cutoffs; `active` requires
+`ssh_sftp` and the original finite Grant cutoff. `grant-client.started` means only an attempt
+began; each `grant-client-<phase>.ready` means its complete descriptor can be read. Only the
+independent consumer's exact `passed\n` completion signal advances that phase. The independent
 consumer owns its login, Device admission, Organization pull/ACK, automatic certificate
 issuance, Host-key review, SSH command and binary SFTP. The producer does not claim those
 checks succeeded until the consumer supplies its exact completion signals. Storage fault
 injection, lost PostgreSQL COMMIT acknowledgement and rendered interaction retain their
-separate acceptance boundaries.
+separate acceptance boundaries. A successful HTTPS record alone does not establish client
+view/ACK, certificate/SSH/SFTP, packaged Console WASM, rendered keyboard/focus/responsive or
+native-platform interaction. Those results need their own actual consumer evidence on each
+database; the helper never repairs the imported pair to obtain success.
 
 ## Access-request HTTPS failure acceptance
 

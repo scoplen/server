@@ -36,8 +36,11 @@ mod inventory_import;
 #[path = "requests.rs"]
 mod requests;
 
-pub(super) async fn verify_inventory_import(https: &Https) -> Result<()> {
-    inventory_import::verify(https).await
+pub(super) async fn verify_inventory_import(
+    https: &Https,
+    source: crate::InventoryImportSource,
+) -> Result<()> {
+    inventory_import::verify(https, source).await
 }
 
 pub(super) async fn verify_requests(https: &Https) -> Result<()> {
@@ -48,7 +51,7 @@ pub(super) async fn prepare_client(
     https: &Https,
     directory: &std::path::Path,
     openssh_descriptor: &std::path::Path,
-    import_inventory: bool,
+    import_inventory: Option<crate::InventoryImportSource>,
 ) -> Result<()> {
     handoff::prepare(https, directory, openssh_descriptor, import_inventory).await
 }

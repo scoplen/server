@@ -256,14 +256,14 @@ struct Prepared {
 }
 
 async fn prepare_target(https: &Https, openssh_descriptor: &Path) -> Result<Prepared> {
-    prepare_target_inner(https, openssh_descriptor, false).await
+    prepare_target_inner(https, openssh_descriptor, None).await
 }
 
 #[allow(clippy::too_many_lines)]
 async fn prepare_target_inner(
     https: &Https,
     openssh_descriptor: &Path,
-    import_inventory: bool,
+    import_inventory: Option<crate::InventoryImportSource>,
 ) -> Result<Prepared> {
     let ssh = OwnedOpenSsh::load(openssh_descriptor)?;
     ssh.verify().await?;
@@ -278,8 +278,8 @@ async fn prepare_target_inner(
         invite(https, owner_browser.actor(), member_browser.actor(), &member, org).await?;
     let owner_token = owner.device.authenticate(https).await?;
     ca(https, native(&owner, &owner_token), org).await?;
-    let (host, profile) = if import_inventory {
-        super::inventory_import::target(https, owner_browser.actor(), org, ssh.port).await?
+    let (host, profile) = if let Some(source) = import_inventory {
+        super::inventory_import::target(https, owner_browser.actor(), org, ssh.port, source).await?
     } else {
         let host_fields = json!({
             "name":"Owned Grant SSH target", "address":"127.0.0.1", "port":ssh.port,
@@ -373,7 +373,7 @@ pub(super) async fn prepare(
     https: &Https,
     directory: &Path,
     openssh_descriptor: &Path,
-    import_inventory: bool,
+    import_inventory: Option<crate::InventoryImportSource>,
 ) -> Result<()> {
     for name in PHASES {
         for suffix in ["json", "ready", "complete"] {

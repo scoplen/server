@@ -6,7 +6,9 @@ use scoplen_api::{
     auth::AuthTokenResponse,
     inventory::{InventoryFields, InventoryType},
     inventory_import::{
-        InventoryImportRequest, InventoryImportResult, InventoryImportRow, parse_inventory_csv,
+        InventoryImportFields, InventoryImportRequest, InventoryImportResult, InventoryImportRow,
+        InventoryOpenSshCandidate, InventoryOpenSshDiagnostic, InventoryOpenSshDiagnosticKind,
+        parse_inventory_csv, parse_inventory_openssh,
     },
     sync::{
         SessionVault, SyncOrganizationAckRequest, SyncOrganizationAckResponse,
@@ -18,7 +20,7 @@ use scoplen_model::Object;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::super::audit::{Actor, timeline};
+use super::super::audit::{Actor, replace_policy, timeline};
 use super::{
     Browser, Https, Registration, Result, create_team, exchange, inventory, native, problem,
 };
@@ -35,6 +37,7 @@ struct Context<'a> {
     owner: &'a Registration,
     token: &'a AuthTokenResponse,
     org: Uuid,
+    source: crate::InventoryImportSource,
 }
 
 struct Imported {
@@ -48,13 +51,19 @@ pub(super) async fn target(
     actor: Actor<'_>,
     org: Uuid,
     port: u16,
+    source: crate::InventoryImportSource,
 ) -> Result<(scoplen_api::inventory::InventoryResource, scoplen_api::inventory::InventoryResource)>
 {
-    let csv = format!(
-        "name,address,port,username,login_name\nImported SSH target,127.0.0.1,{port},smoke,Operations\n"
-    );
-    let fields = parse_inventory_csv(csv.as_bytes())
-        .map_err(|_| "Inventory SSH target CSV preparation failed")?;
+    let fields = match source {
+        crate::InventoryImportSource::Csv => {
+            let csv = format!(
+                "name,address,port,username,login_name\nImported SSH target,127.0.0.1,{port},smoke,Operations\n"
+            );
+            parse_inventory_csv(csv.as_bytes())
+                .map_err(|_| "Inventory SSH target CSV preparation failed")?
+        }
+        crate::InventoryImportSource::OpenSsh => reviewed_openssh_selection(port)?,
+    };
     let request = InventoryImportRequest {
         rows: fields
             .into_iter()
@@ -109,11 +118,45 @@ pub(super) async fn target(
     Ok((host, login))
 }
 
-fn reviewed_request() -> Result<InventoryImportRequest> {
-    let fields = parse_inventory_csv(
-        b"name,address,port,username,login_name\r\n\"Same, host\",example.test,,operator,\r\n\"Same, host\",example.test,22,operator,Operations\r\n",
-    )
-    .map_err(|_| "Inventory HTTPS shared CSV preparation failed")?;
+fn reviewed_openssh_selection(port: u16) -> Result<Vec<InventoryImportFields>> {
+    let source = format!(
+        "User smoke\nPort {port}\nHost Mixed\n HostName 127.0.0.1\nHost Blocked\n ProxyJump none\n"
+    );
+    let candidates = parse_inventory_openssh(source.as_bytes())
+        .map_err(|_| "Inventory HTTPS shared OpenSSH preparation failed")?;
+    let [
+        InventoryOpenSshCandidate::Ready { candidate: 1, fields },
+        InventoryOpenSshCandidate::Blocked { diagnostic },
+    ] = candidates.as_slice()
+    else {
+        return Err("Inventory HTTPS OpenSSH complete preview differs");
+    };
+    if diagnostic
+        != &(InventoryOpenSshDiagnostic {
+            kind: InventoryOpenSshDiagnosticKind::UnsupportedOption,
+            line: Some(6),
+            candidate: 2,
+            field: None,
+        })
+        || fields.name != "Mixed"
+        || fields.address != "127.0.0.1"
+        || fields.port != port
+        || fields.username != "smoke"
+        || fields.login_name.is_some()
+    {
+        return Err("Inventory HTTPS OpenSSH reviewed fields or blocked diagnostic differs");
+    }
+    Ok(vec![fields.clone()])
+}
+
+fn reviewed_request(source: crate::InventoryImportSource) -> Result<InventoryImportRequest> {
+    let fields = match source {
+        crate::InventoryImportSource::Csv => parse_inventory_csv(
+            b"name,address,port,username,login_name\r\n\"Same, host\",example.test,,operator,\r\n\"Same, host\",example.test,22,operator,Operations\r\n",
+        )
+        .map_err(|_| "Inventory HTTPS shared CSV preparation failed")?,
+        crate::InventoryImportSource::OpenSsh => reviewed_openssh_selection(2203)?,
+    };
     let request = InventoryImportRequest {
         rows: fields
             .into_iter()
@@ -174,7 +217,7 @@ impl Context<'_> {
     }
 
     async fn submit(&self, actor: Actor<'_>) -> Result<Imported> {
-        let request = reviewed_request()?;
+        let request = reviewed_request(self.source)?;
         let key = Uuid::now_v7().to_string();
         let body = request.to_json().map_err(|_| "Inventory HTTPS import encoding failed")?;
         let reply = exchange(
@@ -366,7 +409,7 @@ fn effect(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) async fn verify(https: &Https) -> Result<()> {
+pub(super) async fn verify(https: &Https, source: crate::InventoryImportSource) -> Result<()> {
     println!("Inventory import acceptance: genuine Account, Device and browser writers");
     let owner = Registration::new(&https.origin)?;
     owner.register(https).await?;
@@ -377,7 +420,7 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
     let other_browser = Browser::login(https, &other).await?;
     let org = create_team(https, browser.actor()).await?.id;
     let foreign = create_team(https, other_browser.actor()).await?.id;
-    let c = Context { https, owner: &owner, token: &token, org };
+    let c = Context { https, owner: &owner, token: &token, org, source };
     let actor = native(&owner, &token);
     let before = c.snapshot().await?;
     let device_import = c.submit(actor).await?;
@@ -450,9 +493,15 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
     )
     .await?;
     c.failure(actor, &c.path(), &body, &browser_import.key, 409, "organization.conflict").await?;
-    let fresh = reviewed_request()?
-        .to_json()
-        .map_err(|_| "Inventory HTTPS malformed control is invalid")?;
+    let mut fresh = reviewed_request(source)?;
+    if fresh.rows.len() == 1 {
+        fresh.rows.push(InventoryImportRow {
+            host_id: Uuid::now_v7(),
+            access_profile_id: Uuid::now_v7(),
+            fields: fresh.rows[0].fields.clone(),
+        });
+    }
+    let fresh = fresh.to_json().map_err(|_| "Inventory HTTPS malformed control is invalid")?;
     let mut malformed: serde_json::Value =
         serde_json::from_slice(&fresh).map_err(|_| "Inventory HTTPS JSON control is invalid")?;
     malformed["rows"][1]["credential"] = serde_json::json!("not-accepted");
@@ -467,9 +516,67 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
         "organization.invalid_request",
     )
     .await?;
+    if matches!(source, crate::InventoryImportSource::OpenSsh) {
+        println!("OpenSSH import acceptance: current admission window before authority checks");
+        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        browser.refresh(https).await?;
+        let forbid = super::policy(
+            https,
+            browser.actor(),
+            org,
+            "forbid(principal, action == Action::\"manage_inventory\", resource);".into(),
+        )
+        .await?;
+        let fresh = reviewed_request(source)?
+            .to_json()
+            .map_err(|_| "Inventory HTTPS denied request is invalid")?;
+        let fresh_key = Uuid::now_v7().to_string();
+        for (writer, imported) in [(actor, &device_import), (browser.actor(), &browser_import)] {
+            c.failure(writer, &c.path(), &fresh, &fresh_key, 403, "policy.denied").await?;
+            let original = imported
+                .request
+                .to_json()
+                .map_err(|_| "Inventory HTTPS denied original intent is invalid")?;
+            c.failure(writer, &c.path(), &original, &imported.key, 403, "policy.denied").await?;
+        }
+        replace_policy(https, browser.actor(), org, forbid, false).await?;
+        let restored = c.snapshot().await?;
+        c.confirm(actor, &device_import).await?;
+        c.confirm(browser.actor(), &browser_import).await?;
+        if restored != c.snapshot().await? {
+            return Err("Inventory HTTPS restored authority repeated an original mutation");
+        }
+    }
     c.ack(&c.snapshot().await?).await?;
     println!(
         "Inventory import acceptance: atomic pairs, current views, original confirmation and tenant isolation passed"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openssh_review_selects_only_ready_fields_without_source_or_optional_artifacts() {
+        let selected = reviewed_openssh_selection(42_222).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "Mixed");
+        assert_eq!(selected[0].address, "127.0.0.1");
+        assert_eq!(selected[0].port, 42_222);
+        assert_eq!(selected[0].username, "smoke");
+        assert_eq!(selected[0].login_name, None);
+        let request = reviewed_request(crate::InventoryImportSource::OpenSsh).unwrap();
+        assert_eq!(request.rows.len(), 1);
+        assert_ne!(request.rows[0].host_id, request.rows[0].access_profile_id);
+        let value: serde_json::Value = serde_json::from_slice(&request.to_json().unwrap()).unwrap();
+        let mut keys =
+            value["rows"][0].as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["access_profile_id", "address", "host_id", "name", "port", "username"]);
+        assert_eq!(value["rows"][0]["name"], "Mixed");
+        assert_eq!(value["rows"][0]["port"], 2203);
+        assert_eq!(reviewed_request(crate::InventoryImportSource::Csv).unwrap().rows.len(), 2);
+    }
 }
