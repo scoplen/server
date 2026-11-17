@@ -118,7 +118,7 @@ async fn create_asset(
         201,
     )
 }
-async fn enroll_member(f: &Fixture, a: &Actor, b: &Actor, org: Uuid) -> Uuid {
+pub(super) async fn enroll_member(f: &Fixture, a: &Actor, b: &Actor, org: Uuid) -> Uuid {
     let (inv, password, _, _) = issue(f, a, b, org, vec![TeamRole::Member]).await;
     let body = TeamInvitationAcceptRequest { password }.to_json().expect("accept");
     let reply = call(

@@ -4,9 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
-- Adopt the published typed Host Grant contracts and generated Console declarations, including
-  the closed Audit `grant` kind. Grant storage, routes, certificate integration and management
-  remain separate implementation outcomes.
+- Add named-member Host Grants on SQLite and PostgreSQL and in the Account Console. Create,
+  review, replace and withdraw one member's permission to connect to a Host as an exact remote
+  user, with scheduled or expiring access. Preserve original creation confirmation, current
+  authorization and independent asset visibility. Withdraw Grants with membership loss and
+  dissolution; cap Host certificates at the effective Grant expiry. HostGroup issuance retains
+  ordinary policies, and already issued certificates keep their signed expiry.
 
 - Add current-authorized Organization audit timeline and contiguous range-verification GETs
   for enrolled Devices and Account-browser families on SQLite and PostgreSQL. Preserve original

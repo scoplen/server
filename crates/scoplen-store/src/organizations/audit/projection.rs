@@ -118,6 +118,11 @@ fn classification(
         "organization.user_ca_created" => {
             (Authorization, "authority_id", Some(Kind::CertificateAuthority), ActorKind::Device)
         }
+        "organization.grants_created"
+        | "organization.grants_updated"
+        | "organization.grants_deleted" => {
+            (Authorization, "object_id", Some(Kind::Grant), ActorKind::Either)
+        }
         "organization.user_ca_krl_activated" => {
             (Authorization, "authority_id", Some(Kind::CertificateAuthority), ActorKind::System)
         }
@@ -328,6 +333,33 @@ mod tests {
         assert_eq!(system.category, AuditCategory::Authorization);
         assert!(system.actor_account_id.is_none());
         assert!(system.actor_device_id.is_none());
+    }
+
+    #[test]
+    fn grant_producers_preserve_real_native_and_browser_attribution() {
+        for action in [
+            "organization.grants_created",
+            "organization.grants_updated",
+            "organization.grants_deleted",
+        ] {
+            for actor_field in ["device_id", "browser_family_id"] {
+                let mut fields = json!({"action":action,"account_id":id(2),"object_id":id(4)});
+                fields[actor_field] = json!(id(3));
+                let event = from_bytes(&serde_json::to_vec(&fields).unwrap());
+                assert_eq!(event.category, AuditCategory::Authorization);
+                assert_eq!(event.outcome, AuditOutcome::Success);
+                assert_eq!(event.actor_account_id, Some(id(2)));
+                assert_eq!(event.actor_device_id, (actor_field == "device_id").then_some(id(3)));
+                assert_eq!(
+                    event.actor_browser_family_id,
+                    (actor_field == "browser_family_id").then_some(id(3))
+                );
+                assert_eq!(
+                    event.resource,
+                    Some(AuditResource { kind: AuditResourceKind::Grant, id: id(4) })
+                );
+            }
+        }
     }
 
     #[test]

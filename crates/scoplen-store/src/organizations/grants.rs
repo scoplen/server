@@ -52,7 +52,7 @@ fn precondition(value: Option<&str>) -> Result<&str, Error> {
     })
 }
 
-fn write_error(error: sqlx::Error) -> Error {
+fn write_error(error: &sqlx::Error) -> Error {
     if error.as_database_error().is_some_and(sqlx::error::DatabaseError::is_unique_violation) {
         Error::Conflict
     } else {
@@ -417,7 +417,7 @@ macro_rules! grants {
                     .bind(resource.fields.membership.as_bytes().as_slice())
                     .bind(resource.fields.host.as_bytes().as_slice())
                     .bind(&bytes).bind(now).bind(updated_at_ms)
-                    .execute(&mut *tx).await.map_err(write_error)?;
+                    .execute(&mut *tx).await.map_err(|error|write_error(&error))?;
                     Some(bytes)
                 } else {
                     sqlx::query(
@@ -450,7 +450,7 @@ macro_rules! grants {
                     .bind(org).bind(digest.as_slice())
                     .bind(response_json.as_ref().ok_or(Error::StorageUnavailable)?)
                     .bind(now).bind(now.checked_add(86_400_000).ok_or(Error::StorageUnavailable)?)
-                    .execute(&mut *tx).await.map_err(write_error)?;
+                    .execute(&mut *tx).await.map_err(|error|write_error(&error))?;
                 }
                 $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_| if receipt.is_some() {

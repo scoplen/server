@@ -393,12 +393,19 @@ macro_rules! store_checks {
 
             let future = GrantTarget { organization: org, id: Uuid::now_v7() };
             let expired = GrantTarget { organization: org, id: Uuid::now_v7() };
+            let mut guard_hosts=vec![host.clone()];
             for (target, start, end) in [(future, 253_402_300_798, Some(253_402_300_799)), (expired, 0, Some(1))] {
+                let request=InventoryCreateRequest{id:Uuid::now_v7(),fields:host.fields.clone()};
+                let guard_host=store.write_organization_inventory(
+                    &native,expires(),ORIGIN,InventoryTarget{org,kind:InventoryType::Host,id:request.id},
+                    InventoryWrite::Create{key:Uuid::now_v7(),request:&request},
+                ).await.expect("independent interval Host").resource.expect("Host Resource");
                 store.write_organization_grant(
                     &native, expires(), ORIGIN, target, GrantWrite::Create {
-                        key: Uuid::now_v7(), fields: &GrantFields { valid_from: start, valid_until: end, ..fields.clone() },
+                        key: Uuid::now_v7(), fields: &GrantFields { host:guard_host.id, valid_from: start, valid_until: end, ..fields.clone() },
                     },
                 ).await.expect("future and expired intervals remain administrable");
+                guard_hosts.push(guard_host);
             }
             let first = store.list_organization_grants(&native, expires(), org, OrganizationListQuery { limit: 2, cursor: None })
                 .await.expect("first ascending page");
@@ -408,19 +415,23 @@ macro_rules! store_checks {
                 .await.expect("second ascending page");
             assert_eq!(second.items.iter().map(|item|item.id).collect::<Vec<_>>(), [expired.id]);
             assert_eq!(second.next_cursor, None);
-            for current in [replacement, first.items[1].clone(), second.items[0].clone()] {
+            for (current,guard_host) in [replacement, first.items[1].clone(), second.items[0].clone()].into_iter().zip(&guard_hosts) {
+                assert!(matches!(store.write_organization_inventory(
+                    &native, expires(), ORIGIN, InventoryTarget { org, kind: InventoryType::Host, id: guard_host.id },
+                    InventoryWrite::Delete { if_match: &guard_host.etag },
+                ).await, Err(Error::Conflict)), "current, future and expired Grants each guard the Host");
                 assert!(store.write_organization_grant(
                     &native, expires(), ORIGIN, GrantTarget { organization: org, id: current.id },
                     GrantWrite::Delete { if_match: Some(&current.etag) },
                 ).await.expect("explicit withdrawal").changed);
+                store.write_organization_inventory(
+                    &native, expires(), ORIGIN, InventoryTarget { org, kind: InventoryType::Host, id: guard_host.id },
+                    InventoryWrite::Delete { if_match: &guard_host.etag },
+                ).await.expect("withdrawn references do not guard the Host");
             }
             assert!(matches!(store.read_organization_grant(&native, expires(), target).await, Err(Error::NotFound)));
             assert!(store.list_organization_grants(&native, expires(), org, OrganizationListQuery::default())
                 .await.expect("withdrawn directory").items.is_empty());
-            store.write_organization_inventory(
-                &native, expires(), ORIGIN, InventoryTarget { org, kind: InventoryType::Host, id: host.id },
-                InventoryWrite::Delete { if_match: &host.etag },
-            ).await.expect("withdrawn references do not guard the Host");
             let withdrawn = snapshot!(store, org);
             assert!(matches!(store.write_organization_grant(
                 &native, expires(), ORIGIN, other_target,

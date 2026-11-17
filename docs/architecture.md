@@ -32,8 +32,7 @@ The Rust protocol consumers and generated console API types use the published
 `scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
 This revision includes Account password, Device admission and Organization inventory contracts,
 plus bounded immutable Organization audit queries, range verification and typed named-member
-Host Grants. The Console accepts the closed Audit `grant` kind. This dependency upgrade does
-not mount Grant routes, persist Grants or authorize connections from them. It removes retired
+Host Grants. The Console accepts the closed Audit `grant` kind. It removes retired
 Personal invitation/enrollment and pairing formats. Consuming these
 contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
 
@@ -239,6 +238,26 @@ and view revision. The revision-fenced complete authorized view supplies indepen
 visibility, with current visibility also protecting retained history after deletion; live reads
 and complete views exclude deleted objects. Shared vault authorization
 retains its own roadmap outcome.
+
+Named-member Host Grants have five typed management routes for both genuine Device and
+Account-browser actors. The store checks transaction-current `view_policy`/`manage_policy`
+before protected preconditions, resolves only active same-team Membership/live Host references,
+and retains the real writer in original 24-hour creation receipts and Audit events. Equal-field
+replacement is a no-op. Committed changes atomically publish the authorization/view revision
+and Audit event before content-free notification. Withdrawal keeps the globally used id and
+original receipt; current loaders exclude it. Membership suspension/removal/self-leave and
+dissolution withdraw Grants in their existing transaction, without extra Grant Audit fan-out.
+Restore and original-create confirmation cannot revive them. Unwithdrawn Host references block
+Host deletion even before or after the validity interval.
+
+Only explicit Host certificate selectors load Grants. The shared connect helper preserves the
+complete current Cedar graph and independent inventory visibility. Applicable Grants supply
+alternative connection permissions; an ordinary independent permit remains uncapped by Grants.
+The earliest finite per-Host cap bounds the signer's original requested expiry and existing
+1,800-second ceiling. HostGroup issuance never loads or passes Grants. Original certificate
+request and receipt bytes remain unchanged; confirmation rechecks current authority and returns
+the exact original certificate. Withdrawing a Grant stops future issuance under it, while
+disclosed certificates expire normally and existing sessions continue.
 
 The initial Organization user CA is a separate local Ed25519 signer in `scoplen-ca`.
 `scoplen-store` owns encrypted custody, current authority and transaction completion. One

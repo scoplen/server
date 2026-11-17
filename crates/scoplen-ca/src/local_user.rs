@@ -48,6 +48,8 @@ pub struct UserCertificateContext {
     pub serial: u64,
     /// Trusted current server time in Unix seconds.
     pub now_seconds: u64,
+    /// Earliest current authorization expiry across all selected Hosts, if bounded.
+    pub authorization_not_after: Option<u64>,
 }
 
 /// Independent OS-random Ed25519 user-CA seed, erased when released.
@@ -208,10 +210,16 @@ impl LocalUserCa {
         let valid_after =
             context.now_seconds.checked_sub(60).ok_or(LocalUserCaError::InvalidContext)?;
         let ttl = request.ttl_seconds.min(DEFAULT_USER_CERTIFICATE_TTL_SECONDS);
-        let valid_before = context
+        let requested_before = context
             .now_seconds
             .checked_add(u64::from(ttl))
             .ok_or(LocalUserCaError::InvalidContext)?;
+        let valid_before = context
+            .authorization_not_after
+            .map_or(requested_before, |bound| requested_before.min(bound));
+        if valid_before <= context.now_seconds {
+            return Err(LocalUserCaError::InvalidContext);
+        }
         let public = PublicKey::from_openssh(&request.public_key)
             .map_err(|_| LocalUserCaError::InvalidContext)?;
         let mut nonce = [0; 32];

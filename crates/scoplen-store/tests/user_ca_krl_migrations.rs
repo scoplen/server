@@ -78,6 +78,7 @@ fn historical(identity: &LegacyIdentity) -> Vec<HistoricalCa> {
                 certificate: id,
                 serial,
                 now_seconds: issued_at,
+                authorization_not_after: None,
             };
             let response = CertificateIssuanceResponse::new(
                 id,
