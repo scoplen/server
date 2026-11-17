@@ -2402,6 +2402,7 @@ const ACCOUNT_OPERATION_RECEIPTS: TableSpec = TableSpec {
             columns: &["device_signing_public_key"],
         },
         IndexSpec { name: "account_operation_receipts_kem", columns: &["device_kem_public_key"] },
+        IndexSpec { name: "account_operation_receipts_enrolled_device", columns: &["device_id"] },
     ],
 };
 
@@ -4055,8 +4056,19 @@ fn compare_schema(actual: &SchemaShape) -> Result<(), String> {
 
 fn table_source<'a>(source: &'a str, table: &str) -> Result<&'a str, String> {
     let lower = source.to_ascii_lowercase();
-    let marker = format!("create table {table}");
-    let start = lower.find(&marker).ok_or_else(|| format!("CREATE TABLE {table} is missing"))?;
+    let replacement = format!("{table}_next");
+    let rename = format!("alter table {replacement} rename to {table};");
+    let start = lower
+        .match_indices("create table ")
+        .filter_map(|(start, marker)| {
+            let declaration = &lower[start + marker.len()..];
+            let name_end = declaration.find(|c: char| c.is_ascii_whitespace() || c == '(')?;
+            let name = &declaration[..name_end];
+            (name == table || (name == replacement && lower[start..].contains(&rename)))
+                .then_some(start)
+        })
+        .last()
+        .ok_or_else(|| format!("CREATE TABLE {table} is missing"))?;
     let body_start = source[start..]
         .find('(')
         .map(|offset| start + offset + 1)
@@ -4081,11 +4093,20 @@ fn validate_migration_source(source: &str, postgres: bool) -> Result<(), String>
                     let marker = format!("alter table {} add column {}", table.name, column.name);
                     source
                         .lines()
+                        .rev()
                         .find(|line| line.trim_start().to_ascii_lowercase().starts_with(&marker))
                 });
             let line =
                 line.ok_or_else(|| format!("{} is missing from {}", column.name, table.name))?;
             let normalized = line.to_ascii_lowercase();
+            let type_marker =
+                format!("alter table {} alter column {} type ", table.name, column.name);
+            let declared_type = source
+                .lines()
+                .rev()
+                .find(|line| line.trim_start().to_ascii_lowercase().starts_with(&type_marker))
+                .unwrap_or(line)
+                .to_ascii_lowercase();
             let kind_marker = match (postgres, column.kind) {
                 (true, LogicalType::Bytes) => "bytea",
                 (true, LogicalType::Integer) => "bigint",
@@ -4094,7 +4115,7 @@ fn validate_migration_source(source: &str, postgres: bool) -> Result<(), String>
                 (false, LogicalType::Bytes) => "blob",
                 (false, LogicalType::Integer | LogicalType::Boolean) => "integer",
             };
-            if !normalized.contains(kind_marker) {
+            if !declared_type.contains(kind_marker) {
                 return Err(format!("{}.{} has the wrong type", table.name, column.name));
             }
             if !column.nullable && !normalized.contains("not null") {
@@ -4275,6 +4296,8 @@ mod tests {
         include_str!("../migrations/sqlite/20261117020000_account_password_change.sql");
     const POSTGRES_PASSWORD_CHANGE: &str =
         include_str!("../migrations/postgres/20261117020000_account_password_change.sql");
+    const SQLITE_BROWSER_TOKEN_INDEXES: &str =
+        include_str!("../migrations/sqlite/20261117030000_account_browser_token_indexes.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4335,6 +4358,7 @@ mod tests {
             SQLITE_HOST_GRANTS,
             SQLITE_ACCESS_REQUESTS,
             SQLITE_PASSWORD_CHANGE,
+            SQLITE_BROWSER_TOKEN_INDEXES,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4378,8 +4402,32 @@ mod tests {
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
-        validate_migration_source(&postgres.join("\n"), true)
+        let postgres = postgres.join("\n");
+        validate_migration_source(&postgres, true)
             .expect("PostgreSQL migration set matches schema");
+        assert!(
+            validate_migration_source(
+                &postgres.replace(
+                    "ALTER COLUMN credential_generation TYPE BYTEA",
+                    "ALTER COLUMN credential_generation TYPE TEXT",
+                ),
+                true,
+            )
+            .is_err(),
+            "an invalid final generation type must still fail",
+        );
+    }
+
+    #[test]
+    fn table_source_follows_completed_rebuilds_without_matching_temporary_tables() {
+        let source = "CREATE TABLE example (value INTEGER NOT NULL);\n\
+            CREATE TABLE example_next (value BLOB NOT NULL);\n\
+            DROP TABLE example;\n\
+            ALTER TABLE example_next RENAME TO example;\n\
+            CREATE TABLE example_retained AS SELECT * FROM example;\n\
+            CREATE TABLE example_next (value TEXT NOT NULL);";
+        assert_eq!(table_source(source, "example").unwrap(), "value BLOB NOT NULL");
+        assert!(table_source(source, "exam").is_err(), "table names must match exactly");
     }
 
     #[test]
