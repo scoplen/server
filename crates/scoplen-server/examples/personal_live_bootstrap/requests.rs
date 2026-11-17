@@ -469,6 +469,10 @@ async fn current_routing(
         return Err("Request HTTPS approval ignored current approver visibility");
     }
     replace_policy(c.https, approver, c.org, hidden, false).await?;
+    println!(
+        "Request acceptance: waiting one real admission window after eight Owner decision attempts"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
     requester_eligibility(c, requester, approver, pending, cancellable, member_actor).await?;
     Ok(routing)
 }
@@ -713,6 +717,10 @@ async fn profile(
         "organization.conflict",
     )
     .await?;
+    println!(
+        "Request acceptance: waiting one real admission window after eight more Owner decision attempts"
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
     let current = c
         .snapshot()
         .await?
