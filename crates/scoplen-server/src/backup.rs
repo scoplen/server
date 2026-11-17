@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! D-118 offline deployment archives. This module never initializes deployment state.
+//! Complete deployment archives. This module never initializes deployment state.
 
 mod files;
 
@@ -7,7 +7,7 @@ use std::{
     collections::BTreeSet,
     fmt::Write as _,
     fs::{self, File},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -361,10 +361,45 @@ pub async fn create(
     passphrase_file: &Path,
     lease: &DeploymentLease,
 ) -> Result<BackupReport> {
+    if !lease.is_exclusive() {
+        return Err(fail("offline backup requires exclusive deployment admission"));
+    }
+    create_archive(config, output, passphrase_file, lease).await
+}
+
+/// Capture an existing SQLite deployment beside ordinary database writers.
+/// The caller retains deployment admission until process exit, including error paths.
+///
+/// # Errors
+///
+/// Refuses ACME or any managed cache path, unsupported storage and incomplete source state.
+/// External writers to captured local files must be excluded by the operator.
+pub async fn create_online(
+    config: &Config,
+    output: &Path,
+    passphrase_file: &Path,
+    lease: &DeploymentLease,
+) -> Result<BackupReport> {
+    if config.tls.mode == TlsMode::Acme {
+        return Err(fail("online backup does not support ACME"));
+    }
+    match fs::symlink_metadata(config.server.data_dir.join("acme-cache")) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => return Err(fail("online backup requires an absent managed ACME cache path")),
+    }
+    create_archive(config, output, passphrase_file, lease).await
+}
+
+async fn create_archive(
+    config: &Config,
+    output: &Path,
+    passphrase_file: &Path,
+    lease: &DeploymentLease,
+) -> Result<BackupReport> {
     revision()?;
     let source = files::existing(&config.server.data_dir, true)?;
     if !config.storage.backend.trim().eq_ignore_ascii_case("sqlite") {
-        return Err(fail("this backup profile supports only offline SQLite"));
+        return Err(fail("this backup profile supports only SQLite"));
     }
     let ObjectStorageConfig::Filesystem { root } = config
         .storage

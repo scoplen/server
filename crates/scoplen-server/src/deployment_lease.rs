@@ -18,7 +18,10 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// A lock on the stable deployment lease file. Clones retain the same locked handle.
 #[derive(Clone)]
-pub struct DeploymentLease(Arc<File>);
+pub struct DeploymentLease {
+    file: Arc<File>,
+    exclusive: bool,
+}
 
 impl DeploymentLease {
     /// Admit a server process or local mutation for its complete state-access lifetime.
@@ -40,7 +43,11 @@ impl DeploymentLease {
     }
 
     pub(crate) fn file(&self) -> Arc<File> {
-        self.0.clone()
+        self.file.clone()
+    }
+
+    pub(crate) fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 
     fn acquire(data_dir: &Path, exclusive: bool) -> Result<Self, ServerError> {
@@ -55,7 +62,7 @@ impl DeploymentLease {
             .map_err(ServerError::DeploymentLeaseUnavailable)?;
         let result = if exclusive { file.try_lock() } else { file.try_lock_shared() };
         match result {
-            Ok(()) => Ok(Self(Arc::new(file))),
+            Ok(()) => Ok(Self { file: Arc::new(file), exclusive }),
             Err(TryLockError::WouldBlock) => Err(ServerError::DeploymentLeaseOccupied),
             Err(TryLockError::Error(error)) => Err(ServerError::DeploymentLeaseUnavailable(error)),
         }

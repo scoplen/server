@@ -56,8 +56,14 @@ const ADMIT: &str = "/api/v1/auth/accounts/device-admissions";
 mod audit;
 #[path = "grants.rs"]
 mod grants;
+#[path = "online_backup.rs"]
+mod online_backup;
 #[path = "password_change.rs"]
 mod password_change;
+
+pub(super) async fn verify_online_backup(https: &Https, directory: &Path) -> Result<()> {
+    online_backup::verify(https, directory).await
+}
 
 pub(super) async fn verify_password_change(https: &Https) -> Result<()> {
     password_change::verify(https).await
@@ -678,6 +684,7 @@ struct PersonalConsumer {
     snapshot: AccountBootstrapSnapshot,
     bootstrap: PasswordBootstrap,
     object: Object,
+    sequence: u64,
 }
 
 impl PersonalConsumer {
@@ -712,7 +719,7 @@ impl PersonalConsumer {
         admit(https, &device, login, &snapshot, &bootstrap).await?;
         let token = device.authenticate(https).await?;
         let token = device.refresh(https, token).await?;
-        Ok(Self { account, first_token, device, token, snapshot, bootstrap, object })
+        Ok(Self { account, first_token, device, token, snapshot, bootstrap, object, sequence: 1 })
     }
 
     async fn exchange(mut self, https: &Https) -> Result<Self> {
@@ -767,6 +774,7 @@ impl PersonalConsumer {
             2,
         )
         .await?;
+        self.sequence = 2;
         Ok(self)
     }
 
@@ -792,7 +800,7 @@ impl PersonalConsumer {
             (self.account.payload.personal_vault_id, &vault_key),
             &self.device,
             &self.object,
-            2,
+            self.sequence,
         )
         .await
     }
@@ -805,7 +813,7 @@ impl PersonalConsumer {
             (self.account.payload.personal_vault_id, &self.account.vault_key),
             &self.device,
             &self.object,
-            2,
+            self.sequence,
         )
         .await
     }

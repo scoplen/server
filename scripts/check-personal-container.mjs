@@ -50,6 +50,7 @@ const failurePhases = new Set([
   "public encrypted archive restoration",
   "restored archive data verification",
   "restored Compose startup and persistent restart",
+  "online archive capture and restored Device restart",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
@@ -527,6 +528,116 @@ export async function runTeamRestart({
   }
 }
 
+export async function runOnlineBackup({
+  fixture,
+  run,
+  capture,
+  restore,
+  restart,
+  timeout = 120_000,
+}) {
+  const names = [
+    "ready",
+    "start",
+    "complete",
+    "post",
+    "resume",
+    "restored",
+    "restart",
+  ];
+  for (const name of names) {
+    try {
+      await lstat(join(fixture, `online-backup.${name}`));
+      assert.fail("online backup signal already exists");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  const controller = new AbortController();
+  let settled = false;
+  const completed = run(controller.signal).finally(() => {
+    settled = true;
+  });
+  completed.catch(() => {});
+  const wait = async (name) => {
+    const deadline = Date.now() + timeout;
+    for (;;) {
+      if (settled) {
+        await completed;
+        assert.fail("online backup driver exited before completion");
+      }
+      try {
+        const contents = await readFile(
+          join(fixture, `online-backup.${name}`),
+          "utf8",
+        );
+        assert(
+          "ready\n".startsWith(contents),
+          "invalid online backup driver signal",
+        );
+        if (contents === "ready\n") return;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      assert(Date.now() < deadline, "online backup driver signal timed out");
+      await new Promise((accept) => setTimeout(accept, 50));
+    }
+  };
+  const signal = (name) =>
+    writeFile(join(fixture, `online-backup.${name}`), "continue\n", {
+      flag: "wx",
+      mode: 0o600,
+    });
+  let capturing;
+  try {
+    await wait("ready");
+    const started = Date.now();
+    capturing = capture();
+    capturing.catch(() => {});
+    await signal("start");
+    await capturing;
+    const finished = Date.now();
+    await signal("complete");
+    await wait("post");
+    const writes = JSON.parse(
+      await readFile(join(fixture, "online-backup-writes.json"), "utf8"),
+    );
+    assert(
+      Array.isArray(writes) && writes.every(Number.isSafeInteger),
+      "invalid online write receipts",
+    );
+    const confirmed = writes.filter(
+      (time) => time >= started && time <= finished,
+    ).length;
+    assert(
+      confirmed > 0,
+      "no confirmed public write during online CLI capture",
+    );
+    await restore();
+    await signal("resume");
+    await wait("restored");
+    await restart();
+    assert(!settled, "online backup driver exited before restored restart");
+    await signal("restart");
+    await completed;
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(join(fixture, "online-backup-acceptance.json"), "utf8"),
+      ),
+      {
+        online_public_writes_verified: true,
+        online_restored_device_team_verified: true,
+        online_restored_restart_verified: true,
+      },
+    );
+    return confirmed;
+  } finally {
+    controller.abort();
+    await completed.catch(() => {});
+    await capturing?.catch(() => {});
+  }
+}
+
 export async function checkPersonalContainer(driverPath, doctorPath) {
   assert(
     !Object.keys(process.env).some((name) =>
@@ -559,6 +670,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
   const recoveryContainer = `${project}-recovery`;
   const recoveryVolume = `${project}_recovery`;
   const archiveVolume = `${project}_archive`;
+  const onlineArchiveVolume = `${project}_online_archive`;
   let sequence = 0;
   let phase = "preflight";
   let succeeded = false;
@@ -739,7 +851,11 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     const emptyEnv = join(directory, "compose.env");
     const override = join(directory, "compose.override.json");
     await writeFile(emptyEnv, "", { flag: "wx", mode: 0o600 });
-    const overrideContent = (selectedImage, restored = false) =>
+    const overrideContent = (
+      selectedImage,
+      restored = false,
+      restoredVolume = archiveVolume,
+    ) =>
       JSON.stringify({
         services: {
           server: {
@@ -769,7 +885,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         volumes: {
           data: { labels: { [ownerLabel]: run } },
           ...(restored
-            ? { archive: { external: true, name: archiveVolume } }
+            ? { archive: { external: true, name: restoredVolume } }
             : {}),
         },
         networks: { default: { labels: { [ownerLabel]: run } } },
@@ -1169,6 +1285,70 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       keys.push(response.body);
     }
 
+    const archiveCommand = async (
+      operation,
+      args,
+      source = false,
+      destination = archiveVolume,
+      sourceVolume = `${project}_data`,
+      restoredSource = false,
+    ) => {
+      const result = await docker([
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+        "--user",
+        "65532:65532",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--env",
+        "SPL_SERVER_PUBLIC_HOST=localhost",
+        "--env",
+        `SPL_SERVER_PUBLIC_PORT=${port}`,
+        ...(restoredSource
+          ? [
+              "--env",
+              "SPL_SERVER_DATA_DIR=/var/lib/spl/restored",
+              "--env",
+              "SPL_STORAGE_KMS_KEY_FILE=/var/lib/spl/restored/kms.key",
+              "--env",
+              "SPL_STORAGE_KMS_AUDIT_KEY_FILE=/var/lib/spl/restored/audit-signing.key",
+              "--env",
+              "SPL_STORAGE_OBJECT_DIRECTORY=/var/lib/spl/restored/objects",
+            ]
+          : []),
+        "--mount",
+        `type=volume,source=${destination},target=/recovery`,
+        ...(source
+          ? [
+              "--mount",
+              `type=volume,source=${sourceVolume},target=/var/lib/spl`,
+              "--mount",
+              `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
+            ]
+          : []),
+        "--entrypoint",
+        "/app/splctl",
+        image,
+        "backup",
+        operation,
+        ...args,
+        "--passphrase-file",
+        "/recovery/passphrase.txt",
+      ]);
+      assertBackupAcceptance(result, operation);
+    };
+
     progress("public Account password entry and encrypted sync");
     const accountArguments = [
       "verify-account",
@@ -1262,50 +1442,6 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           ["--mount", `type=volume,source=${archiveVolume},target=/recovery`],
           "0:0",
         );
-        const archiveCommand = async (operation, args, source = false) => {
-          const result = await docker([
-            "run",
-            "--rm",
-            "--pull",
-            "never",
-            "--network",
-            "none",
-            "--read-only",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
-            "--user",
-            "65532:65532",
-            "--label",
-            `${ownerLabel}=${run}`,
-            "--env",
-            "SPL_SERVER_PUBLIC_HOST=localhost",
-            "--env",
-            `SPL_SERVER_PUBLIC_PORT=${port}`,
-            "--mount",
-            `type=volume,source=${archiveVolume},target=/recovery`,
-            ...(source
-              ? [
-                  "--mount",
-                  `type=volume,source=${project}_data,target=/var/lib/spl`,
-                  "--mount",
-                  `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
-                ]
-              : []),
-            "--entrypoint",
-            "/app/splctl",
-            image,
-            "backup",
-            operation,
-            ...args,
-            "--passphrase-file",
-            "/recovery/passphrase.txt",
-          ]);
-          assertBackupAcceptance(result, operation);
-        };
         progress("public encrypted archive creation");
         await archiveCommand(
           "create",
@@ -1409,6 +1545,117 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         await readFile(join(fixture, name)),
         acceptanceBytes[index],
       );
+
+    progress("online archive capture and restored Device restart");
+    await docker([
+      "volume",
+      "create",
+      "--label",
+      `${ownerLabel}=${run}`,
+      onlineArchiveVolume,
+    ]);
+    assertOwnedResource(
+      (await inspect("volume", onlineArchiveVolume)).Labels,
+      run,
+    );
+    await sqliteProbe(
+      "prepare-archive-parent",
+      ["--mount", `type=volume,source=${onlineArchiveVolume},target=/recovery`],
+      "0:0",
+    );
+    const checkOnlineService = async () => {
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        try {
+          if ((await request(origin, "/readyz", ca)).status === 200) break;
+        } catch {}
+        assert(
+          Date.now() < deadline,
+          "online restored production HTTPS readiness timed out",
+        );
+        await new Promise((accept) => setTimeout(accept, 500));
+      }
+      await doctor(true);
+      assert.equal((await inspect("container", container)).RestartCount, 0);
+    };
+    const confirmedOnlineWrites = await runOnlineBackup({
+      fixture,
+      run: (signal) =>
+        command(driver, ["verify-online-backup", fixture], {
+          signal,
+          timeout: 360_000,
+        }),
+      capture: () =>
+        archiveCommand(
+          "create",
+          [
+            "--online",
+            "--config",
+            "/etc/scoplen/personal.toml",
+            "--output",
+            "/recovery/online.age",
+          ],
+          true,
+          onlineArchiveVolume,
+          archiveVolume,
+          true,
+        ),
+      restore: async () => {
+        await archiveCommand(
+          "verify",
+          ["--archive", "/recovery/online.age"],
+          false,
+          onlineArchiveVolume,
+        );
+        await archiveCommand(
+          "restore",
+          [
+            "--archive",
+            "/recovery/online.age",
+            "--data-dir",
+            "/recovery/restored",
+          ],
+          false,
+          onlineArchiveVolume,
+        );
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await sqliteProbe("check-online-archive-restore", [
+          "--mount",
+          `type=volume,source=${archiveVolume},target=/source-parent,readonly`,
+          "--mount",
+          `type=volume,source=${onlineArchiveVolume},target=/recovery,readonly`,
+        ]);
+        await writeFile(
+          override,
+          overrideContent(image, true, onlineArchiveVolume),
+        );
+        await compose(["config", "--quiet"]);
+        await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+        container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+        const restored = await inspect("container", container);
+        assertOwnedResource(restored.Config.Labels, run, project);
+        assert.equal(restored.Image, imageId);
+        assert(
+          restored.Mounts.some(
+            (mount) =>
+              mount.Destination === "/var/lib/spl" &&
+              mount.Name === onlineArchiveVolume,
+          ),
+        );
+        await checkOnlineService();
+      },
+      restart: async () => {
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await compose(["up", "--detach", "--no-build"]);
+        await checkOnlineService();
+      },
+    });
+
+    console.log(
+      `Online capture confirmed ${confirmedOnlineWrites} public writes and restored original Devices across restart.`,
+    );
 
     progress("offline snapshot restore");
     await compose(["stop", "server"]);
@@ -1560,6 +1807,11 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           run,
         );
         await docker(["volume", "rm", archiveVolume]);
+        assertOwnedResource(
+          (await inspect("volume", onlineArchiveVolume)).Labels,
+          run,
+        );
+        await docker(["volume", "rm", onlineArchiveVolume]);
         for (const [tag, expectedId] of [
           [image, imageId],
           [historicalImage, historicalImageId],

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Offline archive commands, with process-lifetime exclusive source admission.
+//! Archive commands with process-lifetime deployment admission.
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -12,8 +12,11 @@ use scoplen_server::{
 
 #[derive(Subcommand)]
 pub(crate) enum Command {
-    /// Stop the deployment first, then create a complete encrypted archive.
+    /// Create a complete encrypted archive; stop the deployment unless using --online.
     Create {
+        /// Capture live SQLite with stable local files and plain or static-files TLS.
+        #[arg(long)]
+        online: bool,
         #[arg(long, default_value = "spl-server.toml", env = "SPL_CONFIG")]
         config: PathBuf,
         #[arg(long)]
@@ -52,11 +55,19 @@ pub(crate) async fn run(command: Command) -> ExitCode {
 
 async fn execute(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Command::Create { config, output, passphrase_file } => {
+        Command::Create { online, config, output, passphrase_file } => {
             let config = Config::load(&config)?;
-            let lease = DeploymentLease::try_exclusive(&config.server.data_dir)?;
+            let lease = if online {
+                DeploymentLease::try_shared(&config.server.data_dir)?
+            } else {
+                DeploymentLease::try_exclusive(&config.server.data_dir)?
+            };
             let lease = super::PROCESS_LEASE.get_or_init(|| lease);
-            backup::create(&config, &output, &passphrase_file, lease).await?;
+            if online {
+                backup::create_online(&config, &output, &passphrase_file, lease).await?;
+            } else {
+                backup::create(&config, &output, &passphrase_file, lease).await?;
+            }
             println!("Backup created.");
         }
         Command::Verify { archive, passphrase_file } => {
