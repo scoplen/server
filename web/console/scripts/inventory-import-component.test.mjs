@@ -69,6 +69,26 @@ test("CSV entry discloses new assets, exact header, limits and no connection or 
     />Import \d+ hosts<|Confirm original import|<select/,
   );
 });
+test("CSV picker owns a named secondary button and hidden input with matching disabled state", () => {
+  for (const disabled of [false, true]) {
+    const html = content({ phase: "empty", imported: 0 }, { disabled });
+    const button = html.match(/<button\b([^>]*)>Choose CSV file<\/button>/);
+    assert.ok(button, "missing named CSV picker button");
+    assert.match(button[1], /type="button"/);
+    assert.match(button[1], /class="secondary"/);
+    const helpId = button[1].match(/aria-describedby="([^"]+)"/)?.[1];
+    assert.ok(helpId, "missing CSV picker description");
+    assert.ok(html.includes(`<span id="${helpId}" class="field-help">`));
+    const input = html.match(/<input\b[^>]*type="file"[^>]*>/)?.[0];
+    assert.ok(input, "missing CSV file input");
+    assert.match(input, /accept="\.csv,text\/csv"/);
+    assert.match(input, /aria-label="CSV file"/);
+    assert.match(input, /hidden=""/);
+    assert.equal(button[1].includes('disabled=""'), disabled);
+    assert.equal(input.includes('disabled=""'), disabled);
+  }
+});
+
 test("preview includes every actual row and all five fields with preserved whitespace and safe escaping", () => {
   const body = {
     rows: Array.from({ length: 100 }, (_, index) => row(index + 1)),

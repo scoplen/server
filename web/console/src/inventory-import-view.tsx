@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import {
   InventoryCsvFailure,
   InventoryImportApi,
@@ -9,7 +9,6 @@ import {
 } from "./inventory-import.ts";
 import type { InventoryImportRequest } from "./generated/api.ts";
 import { RequestFailure, TeamApi } from "./team.ts";
-import { Field } from "./editors.tsx";
 import { useLocale } from "./locale.tsx";
 import { requestFeedback } from "./feedback.ts";
 
@@ -183,6 +182,8 @@ export function InventoryImportContent({
   onClose: () => void;
 }) {
   const { t } = useLocale();
+  const fileInput = useRef<HTMLInputElement>(null);
+  const fileHelpId = useId();
   const working = ["parsing", "importing", "confirming"].includes(state.phase);
   const blocked = disabled || working;
   const pending = state.pending;
@@ -241,16 +242,23 @@ export function InventoryImportContent({
       ) : (
         !working && (
           <div className="form-fields">
-            <Field
-              label={t("CSV file", "CSV 文件")}
-              help={t(
-                "UTF-8, at most 1 MiB and 100 Hosts. Leave port empty for 22 and login_name empty to omit it. Required cells and legal whitespace are preserved exactly; text must already be NFC.",
-                "UTF-8，最多 1 MiB、100 台主机。端口留空则为 22，login_name 留空则省略。必填单元格及合法空白会原样保留；文本必须已为 NFC。",
-              )}
-            >
+            <div className="field">
+              <span>{t("CSV file", "CSV 文件")}</span>
+              <button
+                type="button"
+                className="secondary"
+                aria-describedby={fileHelpId}
+                disabled={blocked}
+                onClick={() => fileInput.current?.click()}
+              >
+                {t("Choose CSV file", "选择 CSV 文件")}
+              </button>
               <input
+                ref={fileInput}
                 type="file"
                 accept=".csv,text/csv"
+                aria-label={t("CSV file", "CSV 文件")}
+                hidden
                 disabled={blocked}
                 onChange={(event) => {
                   const file = event.currentTarget.files?.[0];
@@ -258,7 +266,13 @@ export function InventoryImportContent({
                   if (file) onFile(file);
                 }}
               />
-            </Field>
+              <span id={fileHelpId} className="field-help">
+                {t(
+                  "UTF-8, at most 1 MiB and 100 Hosts. Leave port empty for 22 and login_name empty to omit it. Required cells and legal whitespace are preserved exactly; text must already be NFC.",
+                  "UTF-8，最多 1 MiB、100 台主机。端口留空则为 22，login_name 留空则省略。必填单元格及合法空白会原样保留；文本必须已为 NFC。",
+                )}
+              </span>
+            </div>
             <p className="caption">
               {t("Exact header", "精确表头")}:{" "}
               <code className="import-header">
