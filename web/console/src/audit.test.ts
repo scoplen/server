@@ -171,6 +171,81 @@ test("published Grant audit kinds remain distinct from unknown labels", () => {
     );
 });
 
+test("access-request audit events survive timeline decoding and filtered Account HTTP paging", async () => {
+  const items = ["created", "approved", "denied", "cancelled", "expired"].map(
+    (action, index) => ({
+      ...event(String(6 - index)),
+      category: "authorization",
+      event_class: `organization.access_request_${action}`,
+      actor_account_id: action === "expired" ? null : actor,
+      actor_browser_family_id: action === "expired" ? null : target,
+      resource: { kind: "access_request", id: target },
+    }),
+  );
+  assert.deepEqual(parseAuditPage(page([...items, event("1")]), org).items, [
+    ...items,
+    event("1"),
+  ]);
+  for (const kind of ["AccessRequest", "access_requests", "access-request"])
+    assert.throws(() =>
+      parseAuditPage(
+        page([{ ...items[0], resource: { kind, id: target } }]),
+        org,
+      ),
+    );
+  const key = await AccountProofKey.create();
+  let calls = 0;
+  mock.method(
+    globalThis,
+    "fetch",
+    async (url: string, options: RequestInit) => {
+      calls++;
+      const request = new URL(url);
+      assert.equal(request.pathname, `/api/v1/orgs/${org}/audit-events`);
+      assert.equal(options.method, "GET");
+      assert.equal(options.credentials, "omit");
+      assert.equal(
+        request.searchParams.get("filter"),
+        `resource eq "access_request:${target}"`,
+      );
+      assert.equal(
+        request.searchParams.get("cursor"),
+        calls === 1 ? null : "4",
+      );
+      return response(
+        calls === 1 ? page(items.slice(0, 3), "4") : page(items.slice(3)),
+      );
+    },
+  );
+  const api = new AuditApi({
+    origin,
+    request: (method, path, options) =>
+      accountFetch({
+        origin,
+        key,
+        method,
+        path,
+        options,
+        token: "token",
+        operation: "request",
+      }),
+  });
+  const filters = {
+    ...emptyAuditFilters(),
+    resource: `access_request:${target}`,
+  };
+  const first = await api.list(org, filters);
+  assert.equal(first.next_cursor, "4");
+  const earlier = await api.list(org, filters, first.next_cursor!);
+  assert.equal(earlier.next_cursor, null);
+  assert.deepEqual([...first.items, ...earlier.items], items);
+  await assert.rejects(
+    api.list(org, { ...filters, resource: `access_requests:${target}` }),
+    AuditInputError,
+  );
+  assert.equal(calls, 2);
+});
+
 test("required nullable audit attribution stays explicit and unclassified events stay unknown", () => {
   const unknown = {
     ...event(),

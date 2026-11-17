@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Accept Access Request audit events and resource filters in the Account Console, preserving
+  the published resource kind through timeline decoding and further-page loading.
+
 - Add named-member Host Grants on SQLite and PostgreSQL and in the Account Console. Create,
   review, replace and withdraw one member's permission to connect to a Host as an exact remote
   user, with scheduled or expiring access. Preserve original creation confirmation, current
