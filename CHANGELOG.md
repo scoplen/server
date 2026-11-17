@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Restore SQLite browser token lookup and retirement indexes through a forward migration,
+  preserving published migrations and existing credentials. Follow rebuilt tables and final
+  column types in schema checks, and keep the recovery probe on the latest migration.
+
 - Align the Personal SQLite upgrade and recovery check with the password-change migration,
   preserving the matching historical-image recovery anchor.
 

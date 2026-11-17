@@ -82,9 +82,25 @@ async fn sqlite_password_change_upgrade_preserves_all_bindings_children_and_guar
     old.migrations.to_mut().retain(|migration| migration.version < MIGRATION);
     old.run(&pool).await.unwrap();
     let ids = populate!(&pool);
+    let mut password_change = sqlx::migrate!("./migrations/sqlite");
+    password_change.migrations.to_mut().retain(|migration| migration.version <= MIGRATION);
+    password_change.run(&pool).await.expect("published password-change migration");
     pool.close().await;
     let store = SqliteStore::open(&path).await.expect("forward migration");
     preserved!(store.pool(), ids);
+    for (index, columns) in [
+        ("account_browser_access_expiry", vec!["expires_at_ms"]),
+        ("account_browser_access_family", vec!["family_id"]),
+        ("account_browser_refresh_family", vec!["family_id"]),
+    ] {
+        let actual: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_index_info($1) ORDER BY seqno")
+                .bind(index)
+                .fetch_all(store.pool())
+                .await
+                .expect("restored browser token index");
+        assert_eq!(actual, columns, "forward migration restores {index}");
+    }
     constraints!(store.pool(), ids);
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.expect("idempotent reopen");
