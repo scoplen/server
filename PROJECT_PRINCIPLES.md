@@ -8,6 +8,9 @@ self-hosted server, host agent, administration CLI, and web console.
 
 - The server owns durable service behavior, role supervision, operator configuration, and the
   web console. It does not own client source or shared wire contracts.
+- Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
+  use published `proto@2ccaaa7`. D-148 changes shared SSH composition; this workspace does not
+  consume `scoplen-ssh`, so the pin upgrade establishes no server SSH reconnect behavior.
 - The vendor does not receive deployment data. Operators control the server's data directory,
   keys, logs, backups, and retention.
 - `splctl doctor` validates configuration and checks trusted public HTTPS health/readiness
