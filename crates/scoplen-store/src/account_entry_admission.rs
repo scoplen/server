@@ -67,6 +67,7 @@ pub enum AccountEntryEndpoint {
     OrganizationAccessRequestCreate = 47,
     OrganizationAccessRequestDecide = 48,
     OrganizationAccessRequestCancel = 49,
+    PasswordChange = 50,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.
@@ -155,14 +156,18 @@ impl AccountEntryPrivateBucket<'_> {
         endpoint: AccountEntryEndpoint,
     ) -> Result<(i64, Vec<u8>), AccountEntryStateError> {
         use AccountEntryEndpoint::{
-            DeviceAdmission, PasswordLogin, PasswordOptions, Register, RequestChallenge,
+            DeviceAdmission, PasswordChange, PasswordLogin, PasswordOptions, Register,
+            RequestChallenge,
         };
         match self {
             Self::Username(key) if matches!(endpoint, PasswordOptions | PasswordLogin) => {
                 Ok((2, key.0.as_ref().to_vec()))
             }
             Self::DecodedDevice(id)
-                if matches!(endpoint, RequestChallenge | Register | DeviceAdmission) =>
+                if matches!(
+                    endpoint,
+                    RequestChallenge | Register | DeviceAdmission | PasswordChange
+                ) =>
             {
                 valid_id(id)?;
                 Ok((3, id.as_bytes().to_vec()))

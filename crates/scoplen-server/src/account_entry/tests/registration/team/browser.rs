@@ -356,8 +356,12 @@ async fn metadata_and_authority(f: &Fixture) {
         .await
         .problem(400, "auth.invalid_request", false);
     assert!(current(f, &browser).await);
-    // A retained family must match the Account's current immutable credential generation.
-    f.execute("UPDATE account_browser_families SET credential_generation=credential_generation+1")
+    // A retained family must match the Account's current credential generation.
+    let generation = match &f.backend {
+        AuthBackend::Sqlite(_) => "X'0000000000000002'",
+        AuthBackend::Postgres(_) => "decode('0000000000000002','hex')",
+    };
+    f.execute(&format!("UPDATE account_browser_families SET credential_generation={generation}"))
         .await;
     assert!(!current(f, &browser).await);
     request(f, &browser.key, REFRESH, b"{}", None, Some(&browser.cookie)).await.problem(

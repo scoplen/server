@@ -13,10 +13,10 @@ workspace = true
 cedar-policy = "=4.4.0"
 scoplen-audit = { path = "../scoplen-audit" }
 scoplen-ca = { path = "../scoplen-ca" }
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "cb93ede22d51272c24c7fd1f64bd09a46d96b08f" }
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "cb93ede22d51272c24c7fd1f64bd09a46d96b08f" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
 scoplen-identity = { path = "../scoplen-identity" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "cb93ede22d51272c24c7fd1f64bd09a46d96b08f" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
 bytes.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true

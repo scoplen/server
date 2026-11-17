@@ -70,12 +70,12 @@ macro_rules! capabilities {
             let Some(row) = row else { return Ok(None); };
             let account:Vec<u8> = row.try_get("account_id").map_err(|_|AccountEntryStateError::Integrity)?;
             let snapshot:Vec<u8> = row.try_get("snapshot_digest").map_err(|_|AccountEntryStateError::Integrity)?;
-            let generation:i64 = row.try_get("credential_generation")?;
+            let generation = crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountEntryStateError::Integrity)?;
             let issued:i64 = row.try_get("issued_at_ms")?;
             let expires:i64 = row.try_get("expires_at_ms")?;
             let account_id = Uuid::from_slice(&account).map_err(|_|AccountEntryStateError::Integrity)?;
             valid_id(account_id).map_err(|_|AccountEntryStateError::Integrity)?;
-            if issued<=0 || now<issued || issued.checked_add(300_000)!=Some(expires) || generation<=0 {
+            if issued<=0 || now<issued || issued.checked_add(300_000)!=Some(expires) {
                 return Err(AccountEntryStateError::Integrity);
             }
             let snapshot_digest=snapshot.try_into().map_err(|_|AccountEntryStateError::Integrity)?;
@@ -85,7 +85,7 @@ macro_rules! capabilities {
                 return Err(AccountEntryStateError::Integrity);
             }
             Ok(Some(ClaimedAccountAdmissionCapability {
-                account_id,credential_generation:u64::try_from(generation).map_err(|_|AccountEntryStateError::Integrity)?,
+                account_id,credential_generation:generation,
                 snapshot_digest,expires_at_ms:expires,
             }))
         }

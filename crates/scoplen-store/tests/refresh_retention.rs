@@ -81,8 +81,8 @@ macro_rules! backend {
 
             pub async fn browser_family(pool:&sqlx::Pool<$db>,principal:Uuid,expires:i64,revoked:bool)->Uuid {
                 let id=Uuid::now_v7();
-                sqlx::query("INSERT INTO account_browser_families (family_id,account_id,credential_generation,dpop_jkt,trusted_origin,scope,created_at_ms,expires_at_ms,revoked_at_ms) VALUES ($1,$2,1,$3,'https://refresh.example.test','account:read',$4,$5,$6)")
-                    .bind(id.as_bytes().as_slice()).bind(principal.as_bytes().as_slice()).bind("a".repeat(43))
+                sqlx::query("INSERT INTO account_browser_families (family_id,account_id,credential_generation,dpop_jkt,trusted_origin,scope,created_at_ms,expires_at_ms,revoked_at_ms) VALUES ($1,$2,$3,$4,'https://refresh.example.test','account:read',$5,$6,$7)")
+                    .bind(id.as_bytes().as_slice()).bind(principal.as_bytes().as_slice()).bind(1_u64.to_be_bytes().as_slice()).bind("a".repeat(43))
                     .bind(expires-FAMILY_MS).bind(expires).bind(revoked.then_some(expires-FAMILY_MS))
                     .execute(pool).await.expect("browser family");
                 id

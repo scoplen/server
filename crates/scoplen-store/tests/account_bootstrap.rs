@@ -690,8 +690,8 @@ macro_rules! legacy {
         let attachment = fixture("legacy-attachment");
         let payload = &attachment.payload;
         let mut tx = store.pool().begin().await.expect("forbidden credential attachment");
-        assert!(sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,1,1,?,?,?,?,?,?)", $pg))
-            .bind(identity.account_id.as_bytes().as_slice()).bind(&payload.origin).bind(&payload.username).bind(payload.password_salt.as_slice()).bind(payload.verifier.as_slice()).bind(payload.password_ark.as_slice()).bind(payload.personal_vault_id.as_bytes().as_slice()).bind(payload.account_signing_public_key.as_slice()).bind(payload.account_kem_public_key.as_slice()).execute(&mut *tx).await.is_err());
+        assert!(sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,?,1,?,?,?,?,?,?)", $pg))
+            .bind(identity.account_id.as_bytes().as_slice()).bind(&payload.origin).bind(&payload.username).bind(1_u64.to_be_bytes().as_slice()).bind(payload.password_salt.as_slice()).bind(payload.verifier.as_slice()).bind(payload.password_ark.as_slice()).bind(payload.personal_vault_id.as_bytes().as_slice()).bind(payload.account_signing_public_key.as_slice()).bind(payload.account_kem_public_key.as_slice()).execute(&mut *tx).await.is_err());
         tx.rollback().await.expect("legacy attachment rollback");
         let mut tx = store.pool().begin().await.expect("legacy bootstrap read");
         assert!(matches!(
@@ -786,8 +786,8 @@ macro_rules! ownership {
         assert!(store.put_account_key_bundle(account, &AccountKeyBundleUpdate::try_from(&bundle).expect("exact projection")).await.is_err());
         assert!(store.replace_account_key_statements(account, std::slice::from_ref(&payload.device_certificate), &[]).await.is_err());
         assert!(store.create_personal_sync_vault(Uuid::now_v7().into_bytes(), account, &payload.personal_wrapped_key).await.is_err());
-        sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,1,1,?,?,?,?,?,?)", $pg))
-            .bind(account.as_slice()).bind(&payload.origin).bind(&payload.username).bind(payload.password_salt.as_slice()).bind(payload.verifier.as_slice()).bind(payload.password_ark.as_slice()).bind(payload.personal_vault_id.as_bytes().as_slice()).bind(payload.account_signing_public_key.as_slice()).bind(payload.account_kem_public_key.as_slice()).execute(store.pool()).await.expect("restore exact owned credential fixture");
+        sqlx::query(&sql("INSERT INTO account_password_bootstrap (account_id,origin,username,credential_generation,password_profile,password_salt,verifier,password_ark,personal_vault_id,account_signing_public_key,account_kem_public_key) VALUES (?,?,?,?,1,?,?,?,?,?,?)", $pg))
+            .bind(account.as_slice()).bind(&payload.origin).bind(&payload.username).bind(1_u64.to_be_bytes().as_slice()).bind(payload.password_salt.as_slice()).bind(payload.verifier.as_slice()).bind(payload.password_ark.as_slice()).bind(payload.personal_vault_id.as_bytes().as_slice()).bind(payload.account_signing_public_key.as_slice()).bind(payload.account_kem_public_key.as_slice()).execute(store.pool()).await.expect("restore exact owned credential fixture");
         let mut tx = store.pool().begin().await.expect("parent cascade transaction");
         sqlx::query("DELETE FROM identity_devices").execute(&mut *tx).await.expect("remove independent non-cascading Device reference");
         sqlx::query("DELETE FROM identity_accounts").execute(&mut *tx).await.expect("parent Account deletion permits password cascade");

@@ -9,7 +9,7 @@ self-hosted server, host agent, administration CLI, and web console.
 - The server owns durable service behavior, role supervision, operator configuration, and the
   web console. It does not own client source or shared wire contracts.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
-  use published `proto@cb93ede`. D-151 supplies shared CSV preparation, typed atomic import
+  use published `proto@75907c4`. D-151 supplies shared CSV preparation, typed atomic import
   messages and the thin browser export. Both stores atomically create imported Host/default
   Login pairs with current authority, original-writer receipts and per-object audit. Console
   CSV preparation uses that same published parser and requires complete preview and explicit
@@ -135,6 +135,17 @@ self-hosted server, host agent, administration CLI, and web console.
   Actual HTTP lifecycle coverage reaches ordinary Device authentication and same-Account
   K-4/session reads on both databases. The schema has no Account active/suspended state; that
   enforcement and complete identity acceptance remain independent gaps.
+  The D-152 native password-change coordinator requires a fresh password capability and the
+  current certified, active and unrevoked enrolled Device. Both stores serialize complete
+  snapshot/current-root checks with successor credential replacement, immutable bounded receipt,
+  challenge/capability consumption and mandatory deployment audit. Full unsigned generations
+  remain readable through native login, admission and browser-family checks. Forward migrations
+  preserve original browser access/refresh children and all shared admission/receipt state.
+  K-4, Personal and Organization artifacts are unchanged; registered native Devices retain their
+  existing authority while older browser generations fail. Exact historical confirmation uses
+  retained public proofs, including after later password changes or Device revocation, and
+  confers no current authority. Known-password change does not add Account suspension, recovery,
+  Device removal or root rotation; complete D-152 runtime acceptance remains independently tracked.
   Worker refresh retirement is atomic across Device, Operator and Account-browser state: each heartbeat examines
   at most 16 expired families per kind, removes at most 256 digests and deletes only empty
   expired families. Family locks precede token deletion and expiry is rechecked after locking;

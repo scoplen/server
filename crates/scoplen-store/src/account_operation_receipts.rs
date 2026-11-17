@@ -95,7 +95,7 @@ macro_rules! receipts {
                     let blob=if $postgres {String::new()}else{format!("typeof({field})='blob' AND ")};
                     format!("CASE WHEN {blob}{length}({field})={size} THEN {field} END AS {field}")
                 }).join(",");
-            let row=sqlx::query(&format!("SELECT {fields},kind,admitted_key_revision,committed_at_ms FROM account_operation_receipts WHERE operation_id=$1"))
+            let row=sqlx::query(&format!("SELECT {fields},kind,admitted_key_revision,committed_at_ms FROM account_operation_receipts WHERE operation_id=$1 AND kind IN (1,2)"))
                 .bind(operation.as_bytes().as_slice()).fetch_optional(&mut **tx).await?;
             let Some(row)=row else{return Ok(None);};
             let revision:i64=row.try_get("admitted_key_revision")?;
@@ -124,7 +124,7 @@ macro_rules! receipts {
                 .bind(confirmation.account_id.as_bytes().as_slice()).fetch_one(&mut **tx).await?;
             if !(0..=65_536).contains(&count) {return Err(ReceiptError::Storage);}
             if count==65_536 {return Err(ReceiptError::QuotaExceeded);}
-            let kind=match confirmation.kind {AccountRequestKind::Register=>1_i64,AccountRequestKind::Admit=>2_i64};
+            let kind=match confirmation.kind {AccountRequestKind::Register=>1_i64,AccountRequestKind::Admit=>2_i64,AccountRequestKind::PasswordChange=>return Err(ReceiptError::Conflict)};
             let revision=i64::try_from(confirmation.admitted_key_revision).map_err(|_|ReceiptError::Storage)?;
             let inserted=sqlx::query("INSERT INTO account_operation_receipts (operation_id,account_id,personal_vault_id,device_id,request_digest,kind,device_signing_public_key,device_kem_public_key,account_signing_public_key,admitted_key_revision,committed_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
                 .bind(confirmation.operation_id.as_bytes().as_slice()).bind(confirmation.account_id.as_bytes().as_slice())
@@ -171,3 +171,71 @@ macro_rules! receipts {
 
 receipts!(Sqlite, read_sqlite_receipt, append_sqlite_receipt, fresh_sqlite_device, false);
 receipts!(Postgres, read_postgres_receipt, append_postgres_receipt, fresh_postgres_device, true);
+
+pub(crate) struct PasswordChangeReceipt {
+    pub(crate) confirmation: scoplen_api::account_admission::AccountPasswordChangeConfirmation,
+    pub(crate) signing: [u8; 65],
+    pub(crate) root: [u8; 32],
+}
+
+macro_rules! password_receipts {
+    ($db:ty,$read:ident,$append:ident,$postgres:literal) => {
+        pub(crate) async fn $read(tx:&mut Transaction<'_,$db>,operation:Uuid)
+            ->Result<Option<PasswordChangeReceipt>,ReceiptError> {
+            let length=if $postgres {"octet_length"}else{"length"};
+            let fields=[("operation_id",16),("account_id",16),("personal_vault_id",16),("device_id",16),
+                ("request_digest",32),("device_signing_public_key",65),("device_kem_public_key",65),
+                ("account_signing_public_key",32),("credential_generation",8)].map(|(field,size)| {
+                    let blob=if $postgres {String::new()}else{format!("typeof({field})='blob' AND ")};
+                    format!("CASE WHEN {blob}{length}({field})={size} THEN {field} END AS {field}")
+                }).join(",");
+            let Some(row)=sqlx::query(&format!("SELECT {fields},committed_at_ms FROM account_operation_receipts WHERE operation_id=$1 AND kind=3"))
+                .bind(operation.as_bytes().as_slice()).fetch_optional(&mut **tx).await? else{return Ok(None)};
+            let signing=fixed::<_,65>(&row,"device_signing_public_key")?;
+            let kem=fixed::<_,65>(&row,"device_kem_public_key")?;
+            let root=fixed::<_,32>(&row,"account_signing_public_key")?;
+            let generation=crate::account_credential_generation::decode(&fixed::<_,8>(&row,"credential_generation")?).ok_or(ReceiptError::Storage)?;
+            if row.try_get::<i64,_>("committed_at_ms")?<=0 || signing==kem
+                || canonical_device_public_key(&signing).ok()!=Some(signing)
+                || canonical_device_public_key(&kem).ok()!=Some(kem)
+                || ed25519_dalek::VerifyingKey::from_bytes(&root).is_err() {return Err(ReceiptError::Storage);}
+            Ok(Some(PasswordChangeReceipt{confirmation:scoplen_api::account_admission::AccountPasswordChangeConfirmation{
+                operation_id:receipt_id(fixed(&row,"operation_id")?)?,account_id:receipt_id(fixed(&row,"account_id")?)?,
+                personal_vault_id:receipt_id(fixed(&row,"personal_vault_id")?)?,device_id:receipt_id(fixed(&row,"device_id")?)?,
+                request_digest:fixed(&row,"request_digest")?,credential_generation:generation,
+            },signing,root}))
+        }
+
+        pub(crate) async fn $append(tx:&mut Transaction<'_,$db>,confirmation:&scoplen_api::account_admission::AccountPasswordChangeConfirmation,
+            keys:&([u8;65],[u8;65]),root:&[u8;32],now:i64)->Result<(),ReceiptError> {
+            let exists:i64=sqlx::query_scalar("SELECT COUNT(*) FROM account_operation_receipts WHERE operation_id=$1")
+                .bind(confirmation.operation_id.as_bytes().as_slice()).fetch_one(&mut **tx).await?;
+            if exists!=0 {return Err(ReceiptError::Conflict);}
+            let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM account_operation_receipts WHERE account_id=$1")
+                .bind(confirmation.account_id.as_bytes().as_slice()).fetch_one(&mut **tx).await?;
+            if !(0..=65_536).contains(&count) {return Err(ReceiptError::Storage);}
+            if count==65_536 {return Err(ReceiptError::QuotaExceeded);}
+            let changed=sqlx::query("INSERT INTO account_operation_receipts (operation_id,account_id,personal_vault_id,device_id,request_digest,kind,device_signing_public_key,device_kem_public_key,account_signing_public_key,credential_generation,committed_at_ms) VALUES ($1,$2,$3,$4,$5,3,$6,$7,$8,$9,$10)")
+                .bind(confirmation.operation_id.as_bytes().as_slice()).bind(confirmation.account_id.as_bytes().as_slice())
+                .bind(confirmation.personal_vault_id.as_bytes().as_slice()).bind(confirmation.device_id.as_bytes().as_slice())
+                .bind(confirmation.request_digest.as_slice()).bind(keys.0.as_slice()).bind(keys.1.as_slice())
+                .bind(root.as_slice()).bind(confirmation.credential_generation.to_be_bytes().as_slice()).bind(now)
+                .execute(&mut **tx).await?.rows_affected();
+            if changed!=1 {return Err(ReceiptError::Storage);}
+            Ok(())
+        }
+    };
+}
+
+password_receipts!(
+    Sqlite,
+    read_sqlite_password_change_receipt,
+    append_sqlite_password_change_receipt,
+    false
+);
+password_receipts!(
+    Postgres,
+    read_postgres_password_change_receipt,
+    append_postgres_password_change_receipt,
+    true
+);
