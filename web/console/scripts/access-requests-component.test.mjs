@@ -10,7 +10,7 @@ let server, views, rules;
 before(async () => {
   server = await createServer({
     root: fileURLToPath(new URL("..", import.meta.url)),
-    server: { middlewareMode: true, watch: null, hmr: false },
+    server: { middlewareMode: true, watch: null, hmr: false, ws: false },
     appType: "custom",
   });
   views = await server.ssrLoadModule("/src/access-requests-view.tsx");
