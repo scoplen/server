@@ -28,6 +28,7 @@ pub use actor::{OrganizationActor, OrganizationActorRef, OrganizationPrincipal};
 pub(crate) use actor::{postgres_actor, sqlite_actor};
 
 mod audit;
+pub mod grants;
 pub mod group_policy;
 pub mod inventory;
 mod name;
@@ -47,6 +48,8 @@ pub enum OrganizationStoreError {
     CreationDisabled,
     #[error("organization permission denied")]
     PermissionDenied,
+    #[error("organization precondition is required")]
+    PreconditionRequired,
     #[error("organization precondition failed")]
     PreconditionFailed,
     #[error("organization not found")]

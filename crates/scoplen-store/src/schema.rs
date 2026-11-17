@@ -3262,6 +3262,97 @@ const ORGANIZATION_POLICIES: TableSpec = TableSpec {
     indexes: &[],
 };
 
+const ORGANIZATION_GRANTS: TableSpec = TableSpec {
+    name: "organization_grants",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "host_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "updated_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "withdrawn_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_inventory_objects",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "host_id",
+            target_table: "organization_inventory_objects",
+            target_column: "object_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "organization_grants_id", columns: &["id"] },
+        IndexSpec {
+            name: "organization_grants_directory",
+            columns: &["organization_id", "withdrawn_at_ms", "id"],
+        },
+        IndexSpec {
+            name: "organization_grants_membership_host",
+            columns: &["organization_id", "membership_id", "host_id", "withdrawn_at_ms"],
+        },
+        IndexSpec {
+            name: "organization_grants_host",
+            columns: &["organization_id", "host_id", "withdrawn_at_ms"],
+        },
+    ],
+};
+
 const ORGANIZATION_USER_CAS: TableSpec = TableSpec {
     name: "organization_user_cas",
     columns: &[
@@ -3504,6 +3595,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_GROUPS,
     ORGANIZATION_GROUP_MEMBERS,
     ORGANIZATION_POLICIES,
+    ORGANIZATION_GRANTS,
     ORGANIZATION_INVITATIONS,
     ORGANIZATION_OPERATION_RECEIPTS,
     ORGANIZATION_MEMBERSHIPS,
@@ -4056,6 +4148,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261109000000_user_ca_krl.sql");
     const POSTGRES_USER_CA_KRL: &str =
         include_str!("../migrations/postgres/20261109000000_user_ca_krl.sql");
+    const SQLITE_HOST_GRANTS: &str =
+        include_str!("../migrations/sqlite/20261117000000_host_grants.sql");
+    const POSTGRES_HOST_GRANTS: &str =
+        include_str!("../migrations/postgres/20261117000000_host_grants.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4113,6 +4209,7 @@ mod tests {
             SQLITE_ORGANIZATION_USER_CA,
             SQLITE_ACCOUNT_BROWSER,
             SQLITE_USER_CA_KRL,
+            SQLITE_HOST_GRANTS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4150,6 +4247,7 @@ mod tests {
             POSTGRES_ORGANIZATION_USER_CA,
             POSTGRES_ACCOUNT_BROWSER,
             POSTGRES_USER_CA_KRL,
+            POSTGRES_HOST_GRANTS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
