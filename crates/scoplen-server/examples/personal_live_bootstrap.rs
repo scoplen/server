@@ -102,8 +102,12 @@ enum Command {
     VerifyGrants { directory: PathBuf },
     /// Once only: verify request denials, routing and original confirmation through real HTTPS.
     VerifyRequests { directory: PathBuf },
+    /// Once only: verify atomic inventory imports with genuine Device and browser writers.
+    VerifyInventoryImport { directory: PathBuf },
     /// Once only: prepare three private phases for independent Grant SSH/SFTP acceptance.
     PrepareGrantClient(GrantClientArguments),
+    /// Once only: use imported default Logins for independent Grant SSH/SFTP acceptance.
+    PrepareInventoryImportClient(GrantClientArguments),
     /// Once only: hand off a real member request, independent approval and SSH/SFTP use.
     PrepareRequestClient(GrantClientArguments),
 }
@@ -238,13 +242,20 @@ async fn run(command: Command) -> Result<()> {
         }
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
         Command::VerifyRequests { directory } => verify_requests(&directory).await?,
-        Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments).await?,
+        Command::VerifyInventoryImport { directory } => verify_inventory_import(&directory).await?,
+        Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments, false).await?,
+        Command::PrepareInventoryImportClient(arguments) => {
+            prepare_grant_client(arguments, true).await?;
+        }
         Command::PrepareRequestClient(arguments) => prepare_request_client(arguments).await?,
     }
     Ok(())
 }
 
-async fn prepare_grant_client(arguments: GrantClientArguments) -> Result<()> {
+async fn prepare_grant_client(
+    arguments: GrantClientArguments,
+    import_inventory: bool,
+) -> Result<()> {
     let directory = canonical_fixture_directory(&arguments.directory)?;
     let openssh_descriptor = arguments.openssh_descriptor;
     let config = fixture_config(&directory)?;
@@ -257,7 +268,12 @@ async fn prepare_grant_client(arguments: GrantClientArguments) -> Result<()> {
     tokio::spawn(async move {
         tokio::time::timeout(
             Duration::from_mins(15),
-            Box::pin(account::prepare_grant_client(&https, &directory, &openssh_descriptor)),
+            Box::pin(account::prepare_grant_client(
+                &https,
+                &directory,
+                &openssh_descriptor,
+                import_inventory,
+            )),
         )
         .await
         .map_err(|_| "Grant client preparation exceeded its deadline; abandon this fixture")?
@@ -331,6 +347,33 @@ async fn verify_requests(directory: &Path) -> Result<()> {
     .map_err(|_| "Request check task failed; abandon this fixture")??;
     write_private(&directory.join("requests-acceptance.json"), REQUESTS_ACCEPTANCE)?;
     println!("public Device and Account-browser request HTTPS check passed");
+    Ok(())
+}
+
+async fn verify_inventory_import(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("inventory-import-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_mins(5),
+            Box::pin(account::verify_inventory_import(&https)),
+        )
+        .await
+        .map_err(|_| "Inventory import check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Inventory import check task failed; abandon this fixture")??;
+    write_private(
+        &directory.join("inventory-import-acceptance.json"),
+        "{\"inventory_import_device_browser_https_verified\":true,\"inventory_import_original_confirmation_verified\":true,\"inventory_import_tenant_view_audit_verified\":true}",
+    )?;
+    println!("public Device and Account-browser inventory import HTTPS check passed");
     Ok(())
 }
 
@@ -1189,18 +1232,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grant_client_handoff_requires_owned_target_and_refuses_replay() {
-        assert!(
-            Cli::try_parse_from([
-                "consumer",
-                "prepare-grant-client",
-                "unused",
-                "--openssh-descriptor",
-                "unused.json",
-            ])
-            .is_ok()
+    async fn inventory_import_failure_never_publishes_acceptance_or_repeats_business() {
+        assert!(Cli::try_parse_from(["consumer", "verify-inventory-import", "unused"]).is_ok());
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || Command::VerifyInventoryImport { directory: scratch.0.clone() };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("inventory-import-check.started").is_file());
+        assert!(!scratch.0.join("inventory-import-acceptance.json").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
+            "could not exclusively write private fixture material"
         );
-        assert!(Cli::try_parse_from(["consumer", "prepare-grant-client", "unused"]).is_err());
+    }
+
+    #[tokio::test]
+    async fn grant_client_handoff_requires_owned_target_and_refuses_replay() {
+        for command in ["prepare-grant-client", "prepare-inventory-import-client"] {
+            assert!(
+                Cli::try_parse_from([
+                    "consumer",
+                    command,
+                    "unused",
+                    "--openssh-descriptor",
+                    "unused.json",
+                ])
+                .is_ok()
+            );
+            assert!(Cli::try_parse_from(["consumer", command, "unused"]).is_err());
+        }
         let scratch = Scratch::new();
         prepare(&scratch.0, None, None).expect("prepare");
         let command = || {

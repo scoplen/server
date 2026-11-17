@@ -1003,6 +1003,26 @@ and Group/Policy create receipts bind the `account-browser` writer kind and orig
 refresh within that family can confirm them, while another login family or Device conflicts.
 Native writer ids and receipt bytes remain unchanged. Team lifecycle receipts remain Account-bound.
 
+`POST /api/v1/orgs/{org}/inventory/imports` creates 1..100 new Direct Hosts and their default
+Logins in one transaction. Prepare UTF-8 CSV with the exact header
+`name,address,port,username,login_name` through the shared parser; empty port means 22 and
+empty Login name is omitted. The reviewed JSON rows include one new Host and AccessProfile
+UUIDv7 per row. Submit them with one original UUIDv7 `Idempotency-Key`. Names and endpoints
+may repeat; this operation never replaces an existing asset or accepts credentials, commands
+or arbitrary fields. Current permissions, all paired references, unused ids, quota, ordered
+sequences and per-object audit commit together with one view revision. Success returns only
+the original ordered id pairs; ordinary GET supplies current Resources. Preserve the exact
+request and key after an unknown commit and explicitly confirm with a fresh proof. Confirmation
+requires the same writer, including the original browser family across refresh, and adds no
+objects, sequences, revision, audit or notification. OpenSSH and cloud import remain separate work.
+
+In the Account Console, open a team and choose **Hosts > Import CSV**. Review every row before
+selecting **Import N hosts**. Successful imports refresh the ordinary Hosts list. If the outcome
+is unknown, this tab retains the original rows and operation for explicit confirmation within
+24 hours. Changing teams, locking, signing out or reloading discards that local intent; review
+current inventory before preparing another import. Confirmation does not prove current asset
+contents or access.
+
 `groups` and `policies` use the same Resource, pagination and conditional-write conventions.
 Groups contain current Membership ids and are managed through `teams:manage` and
 `manage_members`. Policy reads use `policies:read`; policy writes use `policies:write` and

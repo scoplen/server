@@ -10,7 +10,12 @@ self-hosted server, host agent, administration CLI, and web console.
   web console. It does not own client source or shared wire contracts.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
   use published `proto@cb93ede`. D-151 supplies shared CSV preparation, typed atomic import
-  messages and the thin browser export. D-150 adds shared single-Host access-request contracts,
+  messages and the thin browser export. Both stores atomically create imported Host/default
+  Login pairs with current authority, original-writer receipts and per-object audit. Console
+  CSV preparation uses that same published parser and requires complete preview and explicit
+  import or original-operation confirmation. Component and WASM evidence remain separate from
+  rendered interaction and independent deployed HTTPS/SSH acceptance. D-150 adds shared
+  single-Host access-request contracts,
   scopes and rule generation. Both stores and the six genuine Device/browser routes implement
   request checks, own/routed history, atomic finite-Grant approval and worker expiry. Original
   writer-bound confirmation never restores a withdrawn Grant. Console My requests, Approvals

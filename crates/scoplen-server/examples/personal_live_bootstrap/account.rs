@@ -69,12 +69,17 @@ pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     grants::verify_requests(https).await
 }
 
+pub(super) async fn verify_inventory_import(https: &Https) -> Result<()> {
+    grants::verify_inventory_import(https).await
+}
+
 pub(super) async fn prepare_grant_client(
     https: &Https,
     directory: &Path,
     openssh_descriptor: &Path,
+    import_inventory: bool,
 ) -> Result<()> {
-    grants::prepare_client(https, directory, openssh_descriptor).await
+    grants::prepare_client(https, directory, openssh_descriptor, import_inventory).await
 }
 
 pub(super) async fn prepare_request_client(

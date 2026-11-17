@@ -31,8 +31,14 @@ use crate::{Https, Result};
 
 #[path = "grants_handoff.rs"]
 mod handoff;
+#[path = "inventory_import.rs"]
+mod inventory_import;
 #[path = "requests.rs"]
 mod requests;
+
+pub(super) async fn verify_inventory_import(https: &Https) -> Result<()> {
+    inventory_import::verify(https).await
+}
 
 pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     requests::verify(https).await
@@ -42,8 +48,9 @@ pub(super) async fn prepare_client(
     https: &Https,
     directory: &std::path::Path,
     openssh_descriptor: &std::path::Path,
+    import_inventory: bool,
 ) -> Result<()> {
-    handoff::prepare(https, directory, openssh_descriptor).await
+    handoff::prepare(https, directory, openssh_descriptor, import_inventory).await
 }
 
 pub(super) async fn prepare_request_client(
