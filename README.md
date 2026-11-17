@@ -264,8 +264,11 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@2ccaaa7`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@18422e7`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
+D-150 adds the six shared single-Host access-request operations, exact Device/browser scopes,
+bounded codecs and request-access rule generation. This adoption alone does not mount the
+production request workflow or add a Console request workspace.
 D-148 corrects composed SSH transport loss in `scoplen-ssh`, which this workspace does not
 consume. This pin adds no server SSH reconnect behavior.
 All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
