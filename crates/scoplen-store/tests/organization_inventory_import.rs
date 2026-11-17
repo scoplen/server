@@ -264,6 +264,28 @@ macro_rules! policy {
     }};
 }
 
+macro_rules! install_sqlite_rollback_trigger {
+    ($connection:expr, $table:expr, $condition:expr) => {{
+        let connection = $connection;
+        let table = $table;
+        let condition = $condition;
+        // CREATE can reject a reused name from this connection's stale schema cache before
+        // checking the schema cookie. Read the schema on the same handle that installs it.
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='reject_import_write'",
+        )
+        .fetch_one(&mut *connection)
+        .await
+        .expect("refresh rollback trigger schema");
+        assert_eq!(remaining, 0, "before installing {table} rollback trigger");
+        sqlx::query(&format!("CREATE TRIGGER reject_import_write BEFORE INSERT ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT,'owned import failure'); END"))
+            .persistent(false)
+            .execute(&mut *connection)
+            .await
+            .unwrap_or_else(|error| panic!("install {table} rollback trigger: {error}"));
+    }};
+}
+
 macro_rules! store_checks {
     ($name:ident,$store:ty,$create:ident,$postgres:literal) => {
         #[allow(clippy::too_many_lines)]
@@ -338,8 +360,8 @@ macro_rules! store_checks {
                     sqlx::query(&format!("CREATE TRIGGER reject_import_write BEFORE INSERT ON {table} FOR EACH ROW EXECUTE FUNCTION reject_import_write()"))
                         .execute(store.pool()).await.unwrap();
                 } else {
-                    sqlx::query(&format!("CREATE TRIGGER reject_import_write BEFORE INSERT ON {table} WHEN {condition} BEGIN SELECT RAISE(ABORT,'owned import failure'); END"))
-                        .persistent(false).execute(store.pool()).await.unwrap_or_else(|error|panic!("install {table} rollback trigger: {error}"));
+                    let mut connection=store.pool().acquire().await.expect("rollback trigger connection");
+                    install_sqlite_rollback_trigger!(&mut *connection,table,&condition);
                 }
                 assert!(matches!(store.import_organization_inventory(&native,expires(),ORIGIN,org,Uuid::now_v7(),&batch(2)).await,Err(Error::StorageUnavailable)));
                 assert_eq!(snapshot!(store,org),browser_state,"whole batch rollback at {table}");
@@ -399,6 +421,60 @@ async fn sqlite_import_is_atomic_current_and_original_writer_bound() {
     .await
     .unwrap();
     sqlite_checks(&store).await;
+    store.pool().close().await;
+    support::remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn sqlite_rollback_trigger_refreshes_the_installing_connections_schema() {
+    let directory = std::env::temp_dir().join(format!("scoplen-import-trigger-{}", Uuid::new_v4()));
+    let store = SqliteStore::open(&directory.join("store.sqlite")).await.unwrap();
+    let mut writer = store.pool().acquire().await.unwrap();
+    let mut stale = store.pool().acquire().await.unwrap();
+    install_sqlite_rollback_trigger!(&mut *writer, "organization_inventory_objects", "TRUE");
+    let cached: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='reject_import_write'",
+    )
+    .fetch_one(&mut *stale)
+    .await
+    .unwrap();
+    assert_eq!(cached, 1);
+    sqlx::query("DROP TRIGGER reject_import_write")
+        .persistent(false)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let removed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='trigger' AND name='reject_import_write'",
+    )
+    .fetch_one(&mut *writer)
+    .await
+    .unwrap();
+    assert_eq!(removed, 0);
+    let error = sqlx::query("CREATE TRIGGER reject_import_write BEFORE INSERT ON audit_events WHEN TRUE BEGIN SELECT RAISE(ABORT,'owned import failure'); END")
+        .persistent(false)
+        .execute(&mut *stale)
+        .await
+        .expect_err("unrefreshed connection must reproduce the original fixture failure");
+    assert_eq!(
+        error.as_database_error().expect("SQLite error").message(),
+        "trigger reject_import_write already exists"
+    );
+    install_sqlite_rollback_trigger!(&mut *stale, "audit_events", "TRUE");
+    let installed: String = sqlx::query_scalar(
+        "SELECT tbl_name FROM sqlite_schema WHERE type='trigger' AND name='reject_import_write'",
+    )
+    .fetch_one(&mut *stale)
+    .await
+    .unwrap();
+    assert_eq!(installed, "audit_events");
+    sqlx::query("DROP TRIGGER reject_import_write")
+        .persistent(false)
+        .execute(&mut *stale)
+        .await
+        .unwrap();
+    drop(stale);
+    drop(writer);
     store.pool().close().await;
     support::remove_test_directory(directory).await;
 }
