@@ -8,9 +8,9 @@ description = "Scoplen certificate authority service."
 
 [dependencies]
 getrandom.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
-scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
-scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "75907c42de02185af0a1eb22f0bc9586b3073a0d" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "e868b230ef01879ab9ac35c0afa4d227607fb06b" }
+scoplen-crypto = { git = "https://github.com/scoplen/proto.git", rev = "e868b230ef01879ab9ac35c0afa4d227607fb06b" }
+scoplen-model = { git = "https://github.com/scoplen/proto.git", rev = "e868b230ef01879ab9ac35c0afa4d227607fb06b" }
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed25519", "p256", "p384", "p521", "rsa", "std"] }
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }

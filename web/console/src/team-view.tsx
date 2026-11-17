@@ -31,6 +31,7 @@ import {
   type InventoryImportHandle,
 } from "./inventory-import-view.tsx";
 import type { InventoryCsvParser } from "./inventory-import.ts";
+import type { InventoryOpenSshParser } from "./inventory-openssh.ts";
 
 type Section =
   | CollectionKind
@@ -88,6 +89,7 @@ export function TeamWorkspace({
     invitations: InvitationCrypto;
     rules: RuleGenerator;
     csv: InventoryCsvParser;
+    openssh: InventoryOpenSshParser;
   };
   initialTarget?: JoinTarget;
   session: {
@@ -745,7 +747,7 @@ export function TeamWorkspace({
                       setCsvImport(true);
                     }}
                   >
-                    {t("Import CSV", "导入 CSV")}
+                    {t("Import Hosts", "导入主机")}
                   </button>
                 )}
               {team &&
@@ -989,6 +991,7 @@ export function TeamWorkspace({
                 organization={team.id}
                 account={profile.id}
                 parser={shared.csv}
+                openssh={shared.openssh}
                 disabled={busy || session.busy}
                 handle={importHandle}
                 onBusy={setImportBusy}

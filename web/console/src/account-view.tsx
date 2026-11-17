@@ -9,6 +9,7 @@ import { LanguageControl, useLocale } from "./locale.tsx";
 import type { InvitationCrypto, JoinTarget } from "./invitation.ts";
 import type { RuleGenerator } from "./rule-editor.tsx";
 import type { InventoryCsvParser } from "./inventory-import.ts";
+import type { InventoryOpenSshParser } from "./inventory-openssh.ts";
 
 type Translate = (en: string, zh: string) => string;
 function authFeedback(failure: unknown, t: Translate) {
@@ -105,6 +106,7 @@ export function AccountApp({
     invitations: InvitationCrypto;
     rules: RuleGenerator;
     csv: InventoryCsvParser;
+    openssh: InventoryOpenSshParser;
   };
   initialTarget?: JoinTarget;
   invalidLink: boolean;
