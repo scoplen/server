@@ -189,6 +189,10 @@ fn response_limit(path: &str, method: &str, status: u16) -> usize {
         scoplen_api::grant::MAX_GRANT_PAGE_BYTES
     } else if path.contains("/grants") {
         scoplen_api::grant::MAX_GRANT_BYTES
+    } else if path.split('?').next().is_some_and(|path| path.ends_with("/access-requests"))
+        && method == "GET"
+    {
+        scoplen_api::access_request::MAX_ACCESS_REQUEST_PAGE_BYTES
     } else if path.ends_with("/certificates") {
         scoplen_api::certificate::MAX_CERTIFICATE_ISSUANCE_RESPONSE_BYTES
     } else {
@@ -514,7 +518,7 @@ async fn create_policy(
     )
 }
 
-async fn replace_policy(
+pub(super) async fn replace_policy(
     https: &Https,
     owner: Actor<'_>,
     org: Uuid,
@@ -582,7 +586,7 @@ fn list_path(org: Uuid, limit: u16, cursor: Option<u64>, filter: Option<&str>) -
     format!("/api/v1/orgs/{org}/audit-events?{}", query.finish())
 }
 
-async fn timeline(
+pub(super) async fn timeline(
     https: &Https,
     actor: Actor<'_>,
     org: Uuid,
