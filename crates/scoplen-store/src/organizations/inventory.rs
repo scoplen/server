@@ -204,6 +204,7 @@ fn browser_inventory_type(
                 | InventoryType::HostGroup
                 | InventoryType::AccessProfile
                 | InventoryType::Route
+                | InventoryType::Snippet
         )
     {
         return Err(Error::PermissionDenied);

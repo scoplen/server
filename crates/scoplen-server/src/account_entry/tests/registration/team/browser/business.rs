@@ -41,7 +41,7 @@ pub(super) async fn business(
     http(f.address, method, path, body, &headers).await
 }
 
-fn asset(reply: &Reply, kind: InventoryType, status: u16) -> InventoryResource {
+pub(super) fn asset(reply: &Reply, kind: InventoryType, status: u16) -> InventoryResource {
     assert_eq!(reply.status, status, "{}", String::from_utf8_lossy(&reply.body));
     reply.private();
     assert!(reply.header("x-request-id").is_some());
@@ -79,7 +79,7 @@ pub(super) async fn create_asset(
     )
 }
 
-async fn receipt_digest(f: &Fixture, key: Uuid) -> Vec<u8> {
+pub(super) async fn receipt_digest(f: &Fixture, key: Uuid) -> Vec<u8> {
     match &f.backend {
         AuthBackend::Sqlite(store) => sqlx::query_scalar(
             "SELECT request_digest FROM organization_inventory_receipts WHERE idempotency_key=$1",
@@ -353,11 +353,7 @@ async fn authoring_and_receipts(f: &Fixture) {
                 && event.get("device_id").is_none())
     );
     // The browser never gains Device sync, CA or the excluded inventory families.
-    for path in [
-        format!("{root}/trust-records"),
-        format!("{root}/snippets"),
-        format!("{root}/gateway-networks"),
-    ] {
+    for path in [format!("{root}/trust-records"), format!("{root}/gateway-networks")] {
         business(f, &browser, "GET", &path, &[], &[]).await.problem(403, "policy.denied", false);
     }
     business(f, &browser, "GET", &format!("{root}/certificate-authorities"), &[], &[])

@@ -4,6 +4,14 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add Account-browser Snippet library management on SQLite and PostgreSQL and in the Account
+  Console. Reuse the five typed inventory operations, current permissions, original-family
+  receipts, conditional edits and the native complete-view/ACK contract. Edit Text, Integer,
+  Choice and Secret definitions through custom selectors; never store Secret defaults or request
+  runtime values. Preserve original creation confirmation and require explicit current review
+  after uncertain or stale edits. Consume the published protocol revision consistently in Rust,
+  route-contract CI, generated Console types and the archived-source browser package.
+
 - Add an OpenSSH configuration source to the Account Console's Host import. Review every
   Ready or Blocked candidate and explicitly select Direct Hosts before importing the ordered
   subset through the existing atomic operation and original confirmation. Preserve CSV behavior,
