@@ -99,6 +99,14 @@ pub(super) async fn prepare_request_client(
     grants::prepare_request_client(https, directory, openssh_descriptor).await
 }
 
+pub(super) async fn prepare_snippet_client(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    grants::prepare_snippet_client(https, directory, openssh_descriptor).await
+}
+
 struct Device {
     id: Uuid,
     keys: DeviceKeys,
@@ -676,6 +684,10 @@ impl PersonalConsumer {
     async fn new(https: &Https) -> Result<Self> {
         let account = Registration::new(&https.origin)?;
         account.register(https).await?;
+        Self::from_registered(https, account).await
+    }
+
+    async fn from_registered(https: &Https, account: Registration) -> Result<Self> {
         let first_token = account.device.authenticate(https).await?;
         let object = host(account.device.id)?;
         upload(
@@ -778,6 +790,19 @@ impl PersonalConsumer {
             &self.device,
             &self.token,
             (self.account.payload.personal_vault_id, &vault_key),
+            &self.device,
+            &self.object,
+            2,
+        )
+        .await
+    }
+
+    async fn read_personal_from_original_device(&self, https: &Https) -> Result<()> {
+        download(
+            https,
+            &self.account.device,
+            &self.first_token,
+            (self.account.payload.personal_vault_id, &self.account.vault_key),
             &self.device,
             &self.object,
             2,

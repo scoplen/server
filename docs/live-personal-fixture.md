@@ -655,6 +655,110 @@ handoff material or reuse the same Accounts. Retain failure evidence privately. 
 not establish rendered/native interaction, the wider request failure matrix or the complete
 integration gate; those require their separate checks.
 
+## Independent Team Snippet client handoff
+
+Build the production server and example from the same reviewed checkout. Use another new
+private SQLite or PostgreSQL HTTPS fixture, enable Account registration and team creation
+before startup, and complete `bootstrap`. Supply a fresh, already-running owned OpenSSH
+target with the same four-field disposable ownership descriptor used above. Start the
+producer once:
+
+```text
+personal_live_bootstrap prepare-snippet-client <fixture-directory> --openssh-descriptor <owned-openssh-descriptor>
+```
+
+This terminal-driven helper does not start services, open a browser or desktop window,
+modify the SSH target or read its database. The controller owns service lifecycle,
+independent binary verification, private evidence and cleanup. Never reuse an earlier
+successful, failed or interrupted fixture.
+
+Before `published.ready`, the producer exclusively writes and closes the separate
+`snippet-client-ssh-setup.json`, bounded to 8,192 bytes. Its exact public setup fields are
+`disposable`, `origin`, `container`, `owner`, `port`, `organization_id`, `host_id`,
+`remote_user`, `ca_id`, `ca_public_key`, `ca_fingerprint` and `principal`. They bind the
+reinspected owned container/label/loopback port to the already-published Host and the
+Owner Device's current typed public CA read. The principal is exactly
+`spl:<organization-id>:h:<host-id>:smoke`. After observing `snippet-client-published.ready`,
+the controller checks that ownership/binding, installs this public CA and principal through
+its existing owned OpenSSH fixture trust/principal files, and only then starts the native
+consumer. The consumer receives only the sixteen-field Member descriptor; neither owner
+credentials nor SSH provisioning authority are supplied to it. This setup file is not a
+seventh execution phase and the producer never configures the target itself.
+
+The producer publicly registers independent Owner/Member Accounts, invites the Member,
+prepares a genuine browser family, user CA and visible Host/default Login, and creates an
+ordinary finite connect Grant separately from the Snippet View rule. It establishes a
+two-way encrypted Personal Host exchange on the Member Account using an independently
+admitted Device. Another Account's team, Host, complete view and audit remain unchanged.
+
+The same genuine Owner browser family creates exactly two Snippets in the target team:
+an executable Text/Integer/Choice definition and a separate Secret definition without any
+stored default. All typed fields, defaults, choices, tags and folder are retained. The
+executable's variables are `message`, `count` and `color`; ordinary runtime inputs are
+`native value`, `42` and `green`. The producer never executes a command or requests a
+secret value. Its one-line template prints a marker as a standalone complete output line,
+using two separate `printf` arguments so the complete marker cannot appear in PTY input
+echo. A second output line includes the three ordinary inputs; replacement adds a literal
+`replaced` suffix to that second line.
+
+The first create deliberately discards its HTTPS reply before inspecting status, headers
+or body. It retains the original origin, Account/browser family, route, id, operation key
+and typed payload, refreshes that same family and explicitly confirms that original
+request. A further refreshed confirmation preserves the response bytes, ETag, sequence,
+revision and single success audit. Another login family and the Owner's actual Device
+cannot use the original browser receipt. Missing/stale preconditions and an equal-value
+PUT are also checked without a partial or duplicate mutation.
+
+The generated existing type-7 View rule exposes both Snippets to the Member. An independent
+Member Device reads the complete current public Organization view, decodes the same K-1
+ids and fields, checks every field origin against the real browser-family UUID in the
+Owner's public audit, and ACKs that exact revision/cursor. The descriptor's family value
+alone is not this origin evidence. Browser list/get pagination and hidden-team reads use
+the existing typed Resource, Page and same-not-found boundaries.
+
+Each descriptor is strict JSON, including its final LF at most 8,192 bytes, with exactly:
+`disposable`, `phase`, `origin`, `ca_certificate`, `member_username`,
+`member_password_file`, `organization_id`, `host_id`, `profile_id`, `snippet_id`,
+`secret_snippet_id`, `writer_family_id`, `fields`, `secret_fields`, `inputs` and
+`output_marker`. Identity and marker fields stay fixed; executable `fields` change only
+at replacement. Secret fields never change. The descriptor includes no Device, vault,
+revision, ACK, token, private key or raw password. The independently built consumer must
+discover its actual Device and complete source/ACK through public Account/session/view
+flows.
+
+| Phase | Producer transition | Independent long-lived consumer check |
+| --- | --- | --- |
+| `published` | Both original browser-authored definitions become visible | Refresh the complete current view/ACK; review exact fields/inputs; send only the nonsecret definition |
+| `replaced` | Conditional browser replacement changes the same executable id | Refuse the retained old preparation, then explicitly refresh/review the current definition |
+| `view-withdrawn` | Disable that exact Snippet View policy | Reconcile unavailability and refuse retained preparation without redirected input |
+| `restored` | Explicitly enable that same public policy | Obtain a fresh complete view/ACK and review before sending again |
+| `membership-withdrawn` | Remove the Member through the public conditional membership API | Preserve the original Account store, session manager and transports; refuse retained preparation |
+| `deleted` | Owner conditionally deletes both ids | Removed Member stays unavailable; the authorized Owner separately verifies deletion history and audit |
+
+The producer checks Personal decryption and the unrelated team's complete state after
+every phase. Owner reads after deletion verify original and replacement versions, real
+family field/tombstone origins, exactly one deletion audit per id and live list/view
+absence. Removed-member history reads return 404; they must never receive tombstones.
+Suspension, scope ceilings, the 24-hour receipt boundary and changed-only notification
+failure matrices retain their separate production HTTP evidence.
+
+For each phase, wait for `snippet-client-<phase>.ready` containing exactly `ready\n` before
+reading `snippet-client-<phase>.json`. Use one long-lived consumer with its real Account
+store, original preparations, session manager and transports across all six phases. It
+must not repair producer state, create another Snippet or replace a policy/Grant/CA.
+The controller validates the independent consumer's bounded checkpoint before publishing
+`snippet-client-<phase>.complete` with exactly `passed\n`. Publish completion by exclusive
+sibling temporary-file creation, exact-byte write, flush, close, then a same-directory
+nonoverwriting atomic publication. Partial signals, overwrites and inferred success are rejected.
+
+Each phase has a four-minute deadline and the whole producer a thirty-minute deadline.
+All phase files, the Member password file and `snippet-client.started` use absent-only
+private creation. Failure abandons this fixture with private evidence retained; there is
+no automatic mutation retry or ETag/key substitution. Producer completion alone establishes
+no native execution acceptance. The controller also requires the whole independent
+consumer to exit zero with exactly one passed check, and records library HTTPS delivery,
+native preparation/real SSH and rendered interaction separately.
+
 ## Descriptor, privacy and failures
 
 After confirmed Operator setup, login, logout, eligible terminal logout confirmation and

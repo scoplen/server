@@ -197,9 +197,31 @@ fn response_limit(path: &str, method: &str, status: u16) -> usize {
         scoplen_api::certificate::MAX_CERTIFICATE_ISSUANCE_RESPONSE_BYTES
     } else if path.ends_with("/inventory/imports") {
         scoplen_api::inventory_import::MAX_INVENTORY_IMPORT_RESULT_BYTES
+    } else if let Some(resource) = snippet_route(path) {
+        if method == "GET" && !resource {
+            scoplen_api::inventory::MAX_INVENTORY_PAGE_BYTES
+        } else {
+            scoplen_api::inventory::MAX_INVENTORY_RESOURCE_BYTES
+        }
     } else {
         8_192
     }
+}
+
+fn snippet_route(path: &str) -> Option<bool> {
+    let path = path.split('?').next()?;
+    let parts: Vec<_> = path.split('/').collect();
+    if !matches!(parts.len(), 6 | 7)
+        || parts[..4] != ["", "api", "v1", "orgs"]
+        || Uuid::parse_str(parts[4]).ok()?.to_string() != parts[4]
+        || parts[5] != "snippets"
+    {
+        return None;
+    }
+    if parts.len() == 7 && Uuid::parse_str(parts[6]).ok()?.to_string() != parts[6] {
+        return None;
+    }
+    Some(parts.len() == 7)
 }
 
 fn validate_headers(headers: &HeaderMap, path: &str, status: u16) -> Result<()> {
@@ -233,6 +255,32 @@ pub(super) async fn exchange(
     extra: &[(&str, &str)],
     expected: u16,
 ) -> Result<Reply> {
+    exchange_inner(https, actor, method, path, body, extra, Some(expected))
+        .await?
+        .ok_or("audit consumer expected a complete response")
+}
+
+/// Deliberately lose a create reply before inspecting its status, headers or body.
+pub(super) async fn lose_response(
+    https: &Https,
+    actor: Actor<'_>,
+    path: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+) -> Result<()> {
+    exchange_inner(https, actor, "POST", path, body, extra, None).await?;
+    Ok(())
+}
+
+async fn exchange_inner(
+    https: &Https,
+    actor: Actor<'_>,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    extra: &[(&str, &str)],
+    expected: Option<u16>,
+) -> Result<Option<Reply>> {
     tokio::time::timeout(Duration::from_secs(15), async {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -290,6 +338,10 @@ pub(super) async fn exchange(
             )
             .await
             .map_err(|_| "audit consumer request failed; abandon this fixture")?;
+        let Some(expected) = expected else {
+            drop(response);
+            return Ok(None);
+        };
         let status = response.status().as_u16();
         if status != expected {
             eprintln!("audit consumer HTTP status: expected {expected}, received {status}");
@@ -305,7 +357,7 @@ pub(super) async fn exchange(
         if status == 204 && !bytes.is_empty() {
             return Err("audit consumer empty response has a body");
         }
-        Ok(Reply { headers: parts.headers, body: Zeroizing::new(bytes.to_vec()) })
+        Ok(Some(Reply { headers: parts.headers, body: Zeroizing::new(bytes.to_vec()) }))
     })
     .await
     .map_err(|_| "audit consumer request timed out; abandon this fixture")?
@@ -1002,6 +1054,28 @@ mod tests {
         assert_eq!(response_limit("/api/v1/orgs/x/certificates", "POST", 201), 131_072);
         assert_eq!(response_limit("/api/v1/orgs/x/grants?limit=500", "GET", 503), 4_096);
         assert_eq!(response_limit("/api/v1/orgs/x/certificates", "POST", 403), 4_096);
+    }
+
+    #[test]
+    fn snippet_transport_uses_exact_collection_resource_and_problem_bounds() {
+        let org = Uuid::now_v7();
+        let id = Uuid::now_v7();
+        let collection = format!("/api/v1/orgs/{org}/snippets");
+        let resource = format!("{collection}/{id}");
+        assert_eq!(response_limit(&format!("{collection}?limit=500"), "GET", 200), 8_388_608);
+        for (path, method) in [(&collection, "POST"), (&resource, "GET"), (&resource, "PUT")] {
+            assert_eq!(response_limit(path, method, 200), 2_097_152);
+            assert_eq!(response_limit(path, method, 404), 4_096);
+        }
+        for path in [
+            format!("{collection}/extra/path"),
+            format!("{collection}-other"),
+            format!("{resource}/versions"),
+            format!("/other{collection}"),
+            "/api/v1/orgs/invalid/snippets".into(),
+        ] {
+            assert_eq!(response_limit(&path, "GET", 200), 8_192);
+        }
     }
 
     #[test]

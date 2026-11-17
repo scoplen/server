@@ -23,12 +23,23 @@ use crate::{read_bounded, write_private};
 #[path = "requests_handoff.rs"]
 mod requests;
 
+#[path = "snippets_handoff.rs"]
+mod snippets;
+
 pub(super) async fn prepare_request_client(
     https: &Https,
     directory: &Path,
     openssh_descriptor: &Path,
 ) -> Result<()> {
     requests::prepare(https, directory, openssh_descriptor).await
+}
+
+pub(super) async fn prepare_snippet_client(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    Box::pin(snippets::prepare(https, directory, openssh_descriptor)).await
 }
 
 const PHASES: [&str; 3] = ["before", "active", "withdrawn"];
