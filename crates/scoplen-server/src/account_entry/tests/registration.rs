@@ -16,6 +16,7 @@ const REGISTER: &str = "/api/v1/auth/accounts/register";
 const JSON: &[(&str, &str)] = &[("Content-Type", "application/json")];
 
 mod admission;
+mod password_change;
 mod team;
 
 struct Registration {

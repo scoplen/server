@@ -178,6 +178,52 @@ creates `browser-accounts.started` before its first request; after any failure, 
 owned fixture instead of repeating a possibly committed registration. These Accounts and
 their initial Devices share the fixture's disposable lifecycle.
 
+## Ordinary native password-change HTTPS acceptance
+
+Build the server and example from the same current checkout. Prepare a new private fixture
+with Account registration enabled and complete `bootstrap` above. Run once, independently
+with SQLite and a new owned PostgreSQL database:
+
+```text
+personal_live_bootstrap verify-password-change <fixture-directory>
+```
+
+This terminal-driven consumer uses verified TLS 1.3 and HTTP/2, genuine public password
+registration, an independently admitted second Device and an encrypted Personal Host. A fresh
+old-password login and proofs from the original current Device authorize an ordinary change.
+The consumer opens the new wrapper locally and binds every receipt field to the original
+payload and Account signature. It compares the complete before/after bootstrap, including
+the exact signed K-4 bundle/revision, both roots, certificates/wraps, recovery material and
+Personal epochs; only password salt, wrapper and credential generation may differ.
+
+The old password and outstanding native and browser attempts from its prior salt receive the
+exact common 401 denial, and a stale prior-generation capability receives its checked conflict.
+The old browser family first completes a genuine refresh and profile read before the change;
+its rotated current access and refresh credentials then fail after the change. Both original
+Devices retain authentication, existing refresh families and reads of the same signed,
+encrypted Host at the same sequence. A fresh third Device uses the new password and ordinary
+admission, authentication, refresh and decryption to read that Host. A fresh browser login
+with the new password reads the same Account profile. A second ordinary change leaves the first operation's exact historical
+confirmation unchanged.
+
+`password-change-check.started` is created exclusively before the first request. The complete
+flow has a four-minute deadline, with each HTTPS request bounded to fifteen seconds. The
+consumer respects shared password cooldowns between denials and waits for the initial
+sixty-second username window to pass before the final login. After
+any failure or interruption, abandon the fixture; no business operation is replayed. Only
+complete success writes `password-change-acceptance.json` with exactly these fields:
+
+```json
+{"password_change_native_https_verified":true,"password_change_browser_generation_verified":true,"password_change_historical_receipt_verified":true}
+```
+
+No password, key, token, cookie or response body is printed or exported. The caller owns the
+service/database lifecycle, private diagnostics and exact resource cleanup. Required-audit
+rollback, authenticated non-successor/reused-operation conflicts, inexact/missing receipts and
+lost PostgreSQL COMMIT acknowledgements have separate HTTP/store regressions; this HTTPS
+consumer does not inject them or claim native pending-store/restart recovery, rendered
+Settings interaction, Account suspension, password recovery or root/ARK rotation.
+
 ## Organization audit acceptance
 
 Build the server and example from the same current checkout. Prepare a fresh fixture with
