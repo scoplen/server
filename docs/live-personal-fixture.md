@@ -388,7 +388,12 @@ cutoff. The client performs normal Host-key review, target validation and automa
 it does not repair team assets, policies, Grants or the CA.
 
 Only after that consumer reports one passed and zero failed checks with exit status zero may
-the controller exclusively create `grant-client-<phase>.complete` with exactly `passed\n`.
+the controller publish `grant-client-<phase>.complete` with exactly `passed\n`. Exclusively
+create a new private sibling temporary file, write those exact bytes, flush them to storage
+and close the writer. Then atomically move that closed file to the absent completion path
+in the same directory without replacement. An existing completion path must fail publication.
+On Windows, publishing the final path while its exclusive writer is still open can make the
+producer's read fail with a sharing violation; retain that failed fixture and use a new one.
 The producer waits at most four minutes for each signal, refreshes its browser family before
 creating or withdrawing the Grant, and advances only on the exact signal. The entire producer
 has a fifteen-minute deadline. Its descriptors, ready markers, passwords and
