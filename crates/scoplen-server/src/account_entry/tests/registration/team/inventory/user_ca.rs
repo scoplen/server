@@ -8,6 +8,7 @@ use scoplen_api::{
 };
 use ssh_key::{Certificate, PublicKey, certificate::CertType, private::Ed25519Keypair};
 
+mod grants;
 mod krl;
 mod tls;
 

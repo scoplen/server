@@ -24,9 +24,16 @@ import type { InvitationCrypto, JoinTarget } from "./invitation.ts";
 import { SimpleRuleEditor, type RuleGenerator } from "./rule-editor.tsx";
 import { requestFeedback } from "./feedback.ts";
 import { AuditPanel } from "./audit-view.tsx";
+import { GrantPanel } from "./grants-view.tsx";
 
 type Section =
-  CollectionKind | "members" | "invitations" | "audit" | "settings" | "join";
+  | CollectionKind
+  | "members"
+  | "invitations"
+  | "grants"
+  | "audit"
+  | "settings"
+  | "join";
 type Catalog = { [K in CollectionKind]: ResourcesByKind[K][] };
 const emptyCatalog = (): Catalog => ({
   hosts: [],
@@ -131,6 +138,7 @@ export function TeamWorkspace({
     members: t("Members", "成员"),
     invitations: t("Invitations", "邀请"),
     audit: t("Audit", "审计"),
+    grants: t("Host Grants", "主机连接授权"),
     settings: t("Team settings", "团队设置"),
     join: t("Join a team", "加入团队"),
   };
@@ -249,7 +257,13 @@ export function TeamWorkspace({
     setTeamNext(page.next_cursor);
   }
   async function load(target: Section, selected = team, append = false) {
-    if (target === "join" || target === "audit" || !selected) return;
+    if (
+      target === "join" ||
+      target === "audit" ||
+      target === "grants" ||
+      !selected
+    )
+      return;
     const cursor = append ? (next ?? undefined) : undefined;
     if (target === "settings") {
       const current = await api.organization(selected.id);
@@ -596,6 +610,7 @@ export function TeamWorkspace({
                     "invitations",
                     "groups",
                     "policies",
+                    "grants",
                     "audit",
                     "settings",
                   ] as Section[]
@@ -638,6 +653,7 @@ export function TeamWorkspace({
               {team &&
                 section !== "join" &&
                 section !== "audit" &&
+                section !== "grants" &&
                 !editor &&
                 !createTeam && (
                   <button
@@ -842,6 +858,22 @@ export function TeamWorkspace({
                 </p>
               )}
             </div>
+          ) : section === "grants" ? (
+            session.busy || session.blocked || session.expired ? (
+              <p className="notice" role="status">
+                {t(
+                  "Host Grants are unavailable while this session is ending or expired. Sign in again to continue.",
+                  "会话正在结束或已过期，主机连接授权已隐藏。请重新登录以继续。",
+                )}
+              </p>
+            ) : (
+              <GrantPanel
+                key={team.id}
+                teamApi={api}
+                organization={team.id}
+                disabled={busy || session.busy}
+              />
+            )
           ) : section === "audit" ? (
             session.busy || session.blocked || session.expired ? (
               <p className="notice" role="status">

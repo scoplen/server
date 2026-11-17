@@ -534,6 +534,7 @@ macro_rules! teams {
                 sqlx::query("UPDATE organization_memberships SET status=$1,roles_json=$2,updated_at_ms=CASE WHEN updated_at_ms>=$3 THEN updated_at_ms+1 ELSE $3 END WHERE organization_id=$4 AND id=$5")
                     .bind(status).bind(roles_json(next_roles)?).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
                 if next_status!=TeamMemberStatus::Active {Self::clear_organization_groups(&mut tx,organization,Some(id),now).await?;}
+                if next_status!=TeamMemberStatus::Active {Self::withdraw_organization_grants(&mut tx,organization,Some(id),now).await?;}
                 Self::team_revision(&mut tx,organization,now).await?;
                 Self::team_audit(&mut tx,expected,organization,if request.is_some() {"organization.member_updated"} else {"organization.member_removed"},id,now).await?;
                 Self::queue_memberships_notification(&mut tx,current.account_id.into_bytes()).await?;
@@ -584,6 +585,7 @@ macro_rules! teams {
                 sqlx::query("UPDATE organization_memberships SET status='deprovisioned',updated_at_ms=CASE WHEN updated_at_ms>=$1 THEN updated_at_ms+1 ELSE $1 END WHERE organization_id=$2 AND status<>'deprovisioned'")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::clear_organization_groups(&mut tx,organization,None,now).await?;
+                Self::withdraw_organization_grants(&mut tx,organization,None,now).await?;
                 sqlx::query("UPDATE organization_invitations SET status='revoked',updated_at_ms=$1 WHERE organization_id=$2 AND status IN ('pending','locked')")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.dissolved",organization,now).await?;

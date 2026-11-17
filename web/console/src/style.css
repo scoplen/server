@@ -799,6 +799,106 @@ fieldset {
 .pending-operation .inline-actions {
   margin-top: 12px;
 }
+.grant-choice {
+  position: relative;
+}
+.grant-choice-trigger {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  text-align: left;
+  color: var(--foreground);
+  background: var(--surface);
+  border-color: var(--border);
+}
+.grant-choice-trigger > span:first-child {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.grant-choice-arrow {
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  transform: rotate(45deg);
+  flex-shrink: 0;
+}
+.grant-choice-list {
+  position: absolute;
+  z-index: 4;
+  top: 100%;
+  inset-inline: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  max-height: 280px;
+  overflow-y: auto;
+}
+.grant-choice-list li {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  min-height: 44px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+.grant-choice-list li.active {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+.grant-choice-list [aria-selected="true"] {
+  background: var(--background);
+  color: var(--primary);
+}
+.grant-choice-list small {
+  font-size: 11px;
+  color: var(--muted-foreground);
+}
+.grant-preview {
+  display: grid;
+  gap: 8px;
+  margin-block: 12px;
+  font-size: 12px;
+}
+.grant-preview > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.3fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.grant-preview dt {
+  color: var(--muted-foreground);
+}
+.grant-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.grant-remote-user {
+  white-space: pre-wrap;
+}
+.grant-status {
+  font:
+    500 12px "Inter Variable",
+    sans-serif;
+  color: var(--muted-foreground);
+  margin-inline-start: 8px;
+}
+.grant-review-heading {
+  margin-top: 24px;
+}
+.grant-list {
+  margin-top: 28px;
+}
+@media (max-width: 390px) {
+  .grant-preview > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+}
 :lang(zh) {
   font-family:
     "Inter Variable", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC",

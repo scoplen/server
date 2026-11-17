@@ -33,6 +33,7 @@ use crate::{
 };
 
 mod audit;
+mod grants;
 mod group_policy;
 mod inventory;
 mod team;
@@ -74,6 +75,7 @@ pub(crate) fn router(
         .merge(team::routes())
         .merge(inventory::routes())
         .merge(group_policy::routes())
+        .merge(grants::routes())
         .merge(user_ca::routes())
         .merge(audit::routes())
         .with_state(OrganizationState {
@@ -411,6 +413,9 @@ fn store_problem(error: OrganizationStoreError, request_id: &Uuid) -> Response {
         }
         OrganizationStoreError::PreconditionFailed => {
             (StatusCode::PRECONDITION_FAILED, "organization.precondition_failed", false)
+        }
+        OrganizationStoreError::PreconditionRequired => {
+            (StatusCode::PRECONDITION_REQUIRED, "organization.precondition_required", false)
         }
         OrganizationStoreError::NotFound => {
             (StatusCode::NOT_FOUND, "organization.not_found", false)

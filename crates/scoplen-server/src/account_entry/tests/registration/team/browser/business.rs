@@ -55,7 +55,7 @@ fn asset(reply: &Reply, kind: InventoryType, status: u16) -> InventoryResource {
     .expect("complete shared asset")
 }
 
-async fn create_asset(
+pub(super) async fn create_asset(
     f: &Fixture,
     browser: &Browser,
     org: Uuid,

@@ -60,6 +60,9 @@ pub enum AccountEntryEndpoint {
     OrganizationUserCertificateIssue = 40,
     AccountBrowserRefresh = 41,
     AccountBrowserLogout = 42,
+    OrganizationGrantCreate = 43,
+    OrganizationGrantReplace = 44,
+    OrganizationGrantDelete = 45,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

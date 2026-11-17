@@ -511,6 +511,11 @@ by an earlier build with different migration bytes can fail with a checksum mism
 the matching build and back up its data before rebuilding the database. Do not edit historical
 SQL or recorded migration checksums to bypass the failure.
 
+Before running the checks, set `SCOPLEN_BUILD_REVISION` to the full current Git revision:
+`export SCOPLEN_BUILD_REVISION=$(git rev-parse HEAD)` in a POSIX shell, or
+`$env:SCOPLEN_BUILD_REVISION = git rev-parse HEAD` in PowerShell. The offline archive tests
+require this build identity, as do release archives; CI supplies it automatically.
+
 ```text
 cargo fmt --all -- --check
 cargo test --workspace --all-targets
@@ -835,7 +840,35 @@ tenant revision, and retains final audit and a 24-hour historical receipt. Retry
 same Account, key, body and original If-Match confirms that receipt without requiring a now
 inactive team. Personal Accounts, Devices, keys, encrypted inventory and other teams remain
 usable. Installed remote host trust needs separate removal; dissolution does not edit sshd.
-Grants retain their separate roadmap outcome.
+
+Host Grants let an administrator give one current member permission to connect to one Host
+as an exact remote user. In the Account Console, open **Host Grants**, choose **Create Grant**,
+select the member and Host with the component selectors, and enter the remote user and exact
+UTC start/end times such as `2030-01-01T09:00:00Z`. Choose **No expiry** for an open-ended Grant.
+Review the permission before saving. Host visibility remains a separate access rule; a Grant
+alone cannot make a hidden Host visible.
+
+Device and Account-browser API clients use GET/POST `grants` and GET/PUT/DELETE `grants/{id}`
+under `/api/v1/orgs/{org}`. Reads require `policies:read` and current `view_policy`; changes
+require `policies:write` and current `manage_policy`. POST is
+`{"id":"<UUIDv7>","data":{"membership":"<Membership UUIDv7>","host":"<Host UUIDv7>","remote_user":"deploy","valid_from":"2030-01-01T09:00:00Z","valid_until":null}}`
+with an original UUIDv7 `Idempotency-Key`. PUT sends the complete `data` with the current
+strong `If-Match`; DELETE sends no body with that ETag. Request and individual Resource limits
+are 4,096 bytes. List pages use ascending UUID cursors and a limit of 1..500, default 50.
+
+Future Grants wait for their start; expired Grants remain readable until withdrawn. Replacing
+equal values changes nothing. After an uncertain POST, keep the Console view open and explicitly
+confirm the original creation; switching views or signing out discards its in-memory confirmation
+data. Confirmation returns the original Resource even if a later replacement or withdrawal
+changed current state. It never recreates a Grant. A stale or unconfirmed PUT/DELETE requires
+refreshing and reviewing current values before another edit.
+
+Suspension, removal, self-leave and dissolution withdraw affected Grants atomically. Restore or
+rejoin requires a fresh Grant; an old id cannot be reused. Unwithdrawn Grants, including scheduled
+and expired ones, block deletion of their referenced Host until withdrawn or retargeted.
+Grant changes appear in the team's Audit timeline with the actual Device or browser-family actor.
+The first profile covers named Memberships and Hosts; group subjects and approval requests remain
+separate work.
 
 The initial Organization user-CA API supports POST/GET `certificate-authorities` and GET
 `certificate-authorities/{id}`. Creation requires `ca:write`, current `manage_ca` permission,
@@ -858,8 +891,15 @@ that rule to use ordinary certificate issuance. Parsed policy inspection include
 and whole-context observations; comments, string literals and non-connect policies do not
 trigger the restriction. Address-constrained certificates remain separate work.
 
-The initial certificate profile caps requested validity at 1,800 seconds, retains a shorter
-requested lifetime, and permits PTY plus the Organization extension. It adds no forwarding or
+Explicit `hosts` selectors can use current Grants for connect authority; `host_groups` selectors
+use ordinary policies alone. Applicable Grants are alternatives, and an independent ordinary
+permit keeps its ordinary lifetime. A multi-Host request takes the earliest effective Host bound.
+The initial certificate profile also caps validity at the effective Grant expiry, at 1,800 seconds,
+and at a shorter requested lifetime. Withdrawing or replacing a Grant stops future issuance
+under the removed permission. Already disclosed certificates retain their signed expiry and
+existing SSH sessions continue; member-scoped KRL behavior below remains unchanged.
+
+The initial certificate profile permits PTY plus the Organization extension. It adds no forwarding or
 plain-username principal. Returned user certificates contain only the selected scoped Host or
 HostGroup principals and the Account/Device-bound key id. Install the displayed public CA and
 the exact scoped principal mapping in the remote user's OpenSSH configuration, and validate

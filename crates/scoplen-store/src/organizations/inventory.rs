@@ -10,7 +10,10 @@ use super::{
 };
 use cedar_policy::{Context, Decision, Entities, EntityUid, PolicySet, Request};
 use scoplen_api::{
-    control_plane::{OrganizationAuthorizationContext, OrganizationAuthorizer},
+    control_plane::{
+        ConnectAuthorization, OrganizationAuthorizationContext, OrganizationAuthorizer,
+        OrganizationHostGrant,
+    },
     inventory::{
         InventoryCreateRequest, InventoryFields, InventoryPage, InventoryReplaceRequest,
         InventoryResource, InventoryType,
@@ -136,6 +139,10 @@ pub(super) struct Graph {
     connect_observes_source_ip: bool,
 }
 impl Graph {
+    pub(super) fn membership_id(&self) -> Uuid {
+        self.organization.membership.id
+    }
+
     pub(super) fn authorize(&self, action: &str, kind: &str, id: Uuid) -> Result<bool, Error> {
         let org = self.organization.id;
         let member = self.organization.membership.id;
@@ -154,9 +161,10 @@ impl Graph {
         host: Uuid,
         remote_user: &str,
         source: std::net::IpAddr,
-    ) -> Result<bool, Error> {
+        grants: Option<&[OrganizationHostGrant]>,
+    ) -> Result<ConnectAuthorization, Error> {
         if self.connect_observes_source_ip {
-            return Ok(false);
+            return Ok(ConnectAuthorization::Deny);
         }
         let context = Context::from_json_value(
             json!({"organization":entity_ref("Organization",self.organization.id),
@@ -166,7 +174,37 @@ impl Graph {
             None,
         )
         .map_err(|_| Error::StorageUnavailable)?;
-        self.authorize_context("connect", "Host", host, context)
+        let Some(grants) = grants else {
+            return self.authorize_context("connect", "Host", host, context).map(|allowed| {
+                if allowed {
+                    ConnectAuthorization::Allow { not_after: None }
+                } else {
+                    ConnectAuthorization::Deny
+                }
+            });
+        };
+        let account = self.organization.membership.account_id;
+        let trusted = OrganizationAuthorizationContext::new(
+            account,
+            self.organization.id,
+            self.organization.membership.id,
+            self.now.div_euclid(1000),
+        )
+        .map_err(|_| Error::StorageUnavailable)?;
+        let request = Request::new(
+            uid("Account", account)?,
+            "Action::\"connect\"".parse::<EntityUid>().map_err(|_| Error::StorageUnavailable)?,
+            uid("Host", host)?,
+            context,
+            None,
+        )
+        .map_err(|_| Error::StorageUnavailable)?;
+        let entities =
+            Entities::from_json_value(Json::Array(self.entities.values().cloned().collect()), None)
+                .map_err(|_| Error::StorageUnavailable)?;
+        self.authorizer
+            .authorize_connect(&trusted, &request, &entities, grants)
+            .map_err(|_| Error::StorageUnavailable)
     }
 
     fn authorize_context(
@@ -640,6 +678,9 @@ macro_rules! inventory {
                         let (object,current)=Self::inventory_object(&mut tx,org,id).await?;
                         if object.object_type!=kind.object_type() || !Self::inventory_readable(&mut tx,&mut graph,&object).await? {return Err(Error::NotFound);}
                         if current.etag!=if_match {return Err(Error::PreconditionFailed);}
+                        if kind==InventoryType::Host {
+                            Self::ensure_grant_host_deletion_allowed(&mut tx,org,id).await?;
+                        }
                         let referenced:Option<Vec<u8>>=sqlx::query_scalar("SELECT source_id FROM organization_inventory_references WHERE organization_id=$1 AND target_id=$2 LIMIT 1")
                             .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).fetch_optional(&mut *tx).await?;
                         if referenced.is_some(){return Err(Error::Conflict);}

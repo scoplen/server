@@ -56,6 +56,7 @@ fn real_user_certificate_has_exact_scoped_principals_and_initial_extensions() {
         certificate: Uuid::now_v7(),
         serial: u64::MAX,
         now_seconds: 1_800_000_000,
+        authorization_not_after: None,
     };
     let line = signer.issue(&request, &context).expect("real signing");
     let public = signer.public_key().unwrap();
@@ -152,6 +153,7 @@ fn group_certificates_preserve_selection_and_short_requested_lifetimes() {
         certificate: Uuid::now_v7(),
         serial: 1,
         now_seconds: 1_800_000_000,
+        authorization_not_after: None,
     };
     let cert = Certificate::from_openssh(&signer.issue(&request, &context).unwrap()).unwrap();
     assert_eq!(cert.valid_before(), context.now_seconds + 30);
@@ -164,4 +166,42 @@ fn group_certificates_preserve_selection_and_short_requested_lifetimes() {
     );
     context.serial = 0;
     assert!(matches!(signer.issue(&request, &context), Err(LocalUserCaError::InvalidContext)));
+}
+
+#[test]
+fn authorization_bound_caps_signed_expiry_without_changing_request_bytes() {
+    let signer = LocalUserCa::generate().unwrap();
+    let mut request = CertificateIssuanceRequest::new(
+        signer.public_key().unwrap(),
+        CertificateTargets::Hosts(vec![Uuid::now_v7()]),
+        "deploy",
+        86_400,
+    )
+    .unwrap();
+    let mut context = UserCertificateContext {
+        organization: Uuid::now_v7(),
+        account: Uuid::now_v7(),
+        device: Uuid::now_v7(),
+        certificate: Uuid::now_v7(),
+        serial: 1,
+        now_seconds: 1_800_000_000,
+        authorization_not_after: Some(1_800_000_090),
+    };
+    let original = request.to_json().unwrap();
+    let issue = |request: &CertificateIssuanceRequest, context: &UserCertificateContext| {
+        Certificate::from_openssh(&signer.issue(request, context).unwrap()).unwrap()
+    };
+    assert_eq!(issue(&request, &context).valid_before(), context.now_seconds + 90);
+    assert_eq!(request.to_json().unwrap(), original);
+    request.ttl_seconds = 30;
+    assert_eq!(issue(&request, &context).valid_before(), context.now_seconds + 30);
+    request.ttl_seconds = 86_400;
+    context.authorization_not_after = Some(context.now_seconds + 7_200);
+    assert_eq!(issue(&request, &context).valid_before(), context.now_seconds + 1_800);
+    context.authorization_not_after = None;
+    assert_eq!(issue(&request, &context).valid_before(), context.now_seconds + 1_800);
+    for bound in [0, context.now_seconds - 1, context.now_seconds] {
+        context.authorization_not_after = Some(bound);
+        assert!(matches!(signer.issue(&request, &context), Err(LocalUserCaError::InvalidContext)));
+    }
 }

@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -33,6 +34,7 @@ import {
   prepareRecoveryProbeContext,
   runTeamRestart,
 } from "./check-personal-container.mjs";
+import { inspectDatabase } from "./personal-sqlite-recovery-probe.mjs";
 
 test("archive acceptance requires command success and the matching confirmation before optional mappings", () => {
   for (const [operation, first] of [
@@ -496,6 +498,73 @@ test("recovery probe follows the latest SQLite migration and preserves its old-i
     Math.max(...versions),
     "new migrations must update the recovery consumer",
   );
+});
+
+test("actual SQLite recovery inspection preserves old rows and requires current Grant, browser and KRL tables", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scoplen-recovery-schema-"));
+  const path = join(directory, "scoplen.sqlite");
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(
+      "PRAGMA foreign_keys = ON; CREATE TABLE _sqlx_migrations (version INTEGER PRIMARY KEY, success INTEGER NOT NULL)",
+    );
+    const migrations = new URL(
+      "../crates/scoplen-store/migrations/sqlite/",
+      import.meta.url,
+    );
+    const names = (await readdir(migrations))
+      .filter((name) => /^\d{14}_.+\.sql$/.test(name))
+      .sort();
+    const old = 20261024030000;
+    async function applyMigration(name) {
+      database.exec(await readFile(new URL(name, migrations), "utf8"));
+      database
+        .prepare("INSERT INTO _sqlx_migrations VALUES (?, 1)")
+        .run(Number(name.slice(0, 14)));
+    }
+    for (const name of names.filter((name) => Number(name.slice(0, 14)) <= old))
+      await applyMigration(name);
+    database
+      .prepare(
+        "INSERT INTO organizations (id, name, created_at_ms) VALUES (?, 'Disposable recovery organization', 123)",
+      )
+      .run(Buffer.alloc(16, 0x33));
+    database
+      .prepare(
+        "INSERT INTO sync_vaults (vault_id, kind, current_seq, purge_horizon) VALUES (?, 'organization', 1, 0)",
+      )
+      .run(Buffer.alloc(16, 0x11));
+    for (const table of ["sync_objects", "sync_object_versions"])
+      database
+        .prepare(
+          `INSERT INTO ${table} (vault_id, object_id, sequence, envelope, tombstone, signer_device_id, written_at_ms, key_epoch) VALUES (?, ?, 1, ?, 0, NULL, 123, 1)`,
+        )
+        .run(
+          Buffer.alloc(16, 0x11),
+          Buffer.alloc(16, 0x22),
+          Buffer.from("disposable pre-upgrade encrypted-envelope fixture"),
+        );
+    inspectDatabase(path, false);
+    database.exec("CREATE TABLE organization_grants (id BLOB PRIMARY KEY)");
+    assert.throws(() => inspectDatabase(path, false), { code: "ERR_ASSERTION" });
+    database.exec("DROP TABLE organization_grants");
+    for (const name of names.filter((name) => Number(name.slice(0, 14)) > old))
+      await applyMigration(name);
+    inspectDatabase(path, true);
+    for (const table of [
+      "organization_grants",
+      "account_browser_families",
+      "organization_user_ca_krl_activation",
+    ]) {
+      database.exec(`ALTER TABLE ${table} RENAME TO missing_recovery_table`);
+      assert.throws(() => inspectDatabase(path, true), { code: "ERR_ASSERTION" });
+      database.exec(`ALTER TABLE missing_recovery_table RENAME TO ${table}`);
+    }
+    inspectDatabase(path, true);
+  } finally {
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("actual recovery probe reports a bounded failure before opening an invalid context", async () => {

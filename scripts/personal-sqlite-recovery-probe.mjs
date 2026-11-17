@@ -16,43 +16,48 @@ import {
   writeFileSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 let failurePhase = "context";
-process.on("uncaughtExceptionMonitor", (error) => {
-  const code = [
-    "ERR_ASSERTION",
-    "ERR_SQLITE_ERROR",
-    "EACCES",
-    "EPERM",
-    "ENOSPC",
-    "EDQUOT",
-    "ENOENT",
-    "EEXIST",
-    "EISDIR",
-  ].includes(error?.code)
-    ? error.code
-    : null;
-  const sqliteCode =
-    Number.isInteger(error?.errcode) &&
-    error.errcode >= 0 &&
-    error.errcode <= 65535
-      ? error.errcode
+const invoked =
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const [operation, run] = invoked ? process.argv.slice(2) : [];
+if (invoked) {
+  process.on("uncaughtExceptionMonitor", (error) => {
+    const code = [
+      "ERR_ASSERTION",
+      "ERR_SQLITE_ERROR",
+      "EACCES",
+      "EPERM",
+      "ENOSPC",
+      "EDQUOT",
+      "ENOENT",
+      "EEXIST",
+      "EISDIR",
+    ].includes(error?.code)
+      ? error.code
       : null;
-  console.error(
-    `Scoplen SQLite probe failure: ${JSON.stringify({ phase: failurePhase, code, sqliteCode })}`,
+    const sqliteCode =
+      Number.isInteger(error?.errcode) &&
+      error.errcode >= 0 &&
+      error.errcode <= 65535
+        ? error.errcode
+        : null;
+    console.error(
+      `Scoplen SQLite probe failure: ${JSON.stringify({ phase: failurePhase, code, sqliteCode })}`,
+    );
+  });
+  assert(
+    /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(run),
+    "invalid check identity",
   );
-});
-
-const [operation, run] = process.argv.slice(2);
-assert(
-  /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(run),
-  "invalid check identity",
-);
-assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
+  assert.equal(readFileSync("/check/.container-check-owner", "utf8"), run);
+}
 
 const oldMigration = 20261024030000;
-const newMigration = 20261109000000;
+const newMigration = 20261117000000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -163,7 +168,7 @@ function snapshot(root) {
   return path;
 }
 
-function inspectDatabase(path, current) {
+export function inspectDatabase(path, current) {
   ordinary(path);
   const database = new DatabaseSync(path, { readOnly: true });
   try {
@@ -229,6 +234,21 @@ function inspectDatabase(path, current) {
           ]
         : [],
     );
+    const grantTables = database
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'organization_grants'",
+      )
+      .all()
+      .map((row) => row.name);
+    assert.deepEqual(grantTables, current ? ["organization_grants"] : []);
+    if (current) {
+      assert.equal(
+        database.prepare("SELECT COUNT(*) AS count FROM organization_grants")
+          .get().count,
+        0,
+        "upgrade must not invent Host Grants",
+      );
+    }
     const userCaTables = database
       .prepare(
         "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_user_ca_krl_activation', 'organization_user_ca_krls', 'organization_user_ca_revocations', 'organization_user_cas', 'organization_user_certificates') ORDER BY name",
@@ -647,6 +667,6 @@ if (operation === "check-context") {
     readFileSync(join(recovery, "objects", "ci-recovery-marker")),
     readFileSync(join(source, "objects", "ci-recovery-marker")),
   );
-} else {
+} else if (invoked) {
   assert.fail("unknown recovery probe");
 }

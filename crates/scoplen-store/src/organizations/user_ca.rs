@@ -9,6 +9,7 @@ use super::{
 use crate::kms::KeyManagementService;
 use scoplen_api::{
     certificate::{CertificateIssuanceRequest, CertificateIssuanceResponse, CertificateTargets},
+    control_plane::ConnectAuthorization,
     inventory::InventoryType,
     krl::MAX_USER_CA_KRL_SERIALS,
     organization::OrganizationListQuery,
@@ -146,7 +147,7 @@ macro_rules! user_ca {
                 tx.commit().await?;Ok(page)
             }
 
-            async fn authorize_user_certificate_targets(tx:&mut Transaction<'_,$db>,graph:&mut Graph,expected:&CurrentPrincipal,org:Uuid,request:&CertificateIssuanceRequest,source:IpAddr)->Result<(),Error> {
+            async fn authorize_user_certificate_targets(tx:&mut Transaction<'_,$db>,graph:&mut Graph,expected:&CurrentPrincipal,org:Uuid,request:&CertificateIssuanceRequest,source:IpAddr)->Result<Option<u64>,Error> {
                 let mut hosts=BTreeSet::new();
                 match &request.targets {
                     CertificateTargets::Hosts(ids)=>hosts.extend(ids.iter().copied()),
@@ -161,12 +162,20 @@ macro_rules! user_ca {
                         }
                     }
                 }
+                let mut not_after:Option<u64>=None;
                 for id in hosts {
                     let (object,_)=Self::inventory_object(tx,org,id).await?;
                     if object.object_type!=InventoryType::Host.object_type() || !Self::inventory_readable(tx,graph,&object).await? {return Err(Error::NotFound);}
-                    if !graph.authorize_connect(Uuid::from_bytes(expected.device_id),id,&request.remote_user,source)? {return Err(Error::PermissionDenied);}
+                    let grants=if matches!(request.targets,CertificateTargets::Hosts(_)) {
+                        Some(Self::load_organization_host_grants(tx,org,graph.membership_id(),id).await?)
+                    } else {None};
+                    match graph.authorize_connect(Uuid::from_bytes(expected.device_id),id,&request.remote_user,source,grants.as_deref())? {
+                        ConnectAuthorization::Deny=>return Err(Error::PermissionDenied),
+                        ConnectAuthorization::Allow{not_after:Some(bound)}=>not_after=Some(not_after.map_or(bound,|current|current.min(bound))),
+                        ConnectAuthorization::Allow{not_after:None}=>{},
+                    }
                 }
-                Ok(())
+                Ok(not_after)
             }
 
             /// Issue one real D-88/D-90 certificate after current direct-path authorization.
@@ -184,7 +193,7 @@ macro_rules! user_ca {
                 let (current,_,_,_)=Self::inventory_owner(&mut tx,expected,expires_at,org,true).await?;
                 let now=now_ms()?;
                 let mut graph=Self::inventory_graph(&mut tx,current,now).await?;
-                Self::authorize_user_certificate_targets(&mut tx,&mut graph,expected,org,request,source).await?;
+                let authorization_not_after=Self::authorize_user_certificate_targets(&mut tx,&mut graph,expected,org,request,source).await?;
                 let row=sqlx::query("SELECT id,encrypted_seed,response_json,last_serial FROM organization_user_cas WHERE organization_id=$1")
                     .bind(org.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
                 let authority=super::inventory::row_uuid(&row,"id")?;
@@ -227,7 +236,7 @@ macro_rules! user_ca {
                 let signer=LocalUserCa::open(&row.try_get::<Vec<u8>,_>("encrypted_seed")?,kms.key_encryption_key(),org,authority).map_err(|_|Error::StorageUnavailable)?;
                 if signer.public_key().map_err(|_|Error::StorageUnavailable)?!=metadata.public_key {return Err(Error::StorageUnavailable);}
                 let id=Uuid::now_v7();
-                let certificate=signer.issue(request,&UserCertificateContext{organization:org,account:Uuid::from_bytes(expected.account_id),device:Uuid::from_bytes(expected.device_id),certificate:id,serial,now_seconds:u64::try_from(now.div_euclid(1000)).map_err(|_|Error::StorageUnavailable)?}).map_err(|_|Error::StorageUnavailable)?;
+                let certificate=signer.issue(request,&UserCertificateContext{organization:org,account:Uuid::from_bytes(expected.account_id),device:Uuid::from_bytes(expected.device_id),certificate:id,serial,now_seconds,authorization_not_after}).map_err(|_|Error::StorageUnavailable)?;
                 let expiry=verify_stored_user_certificate(&certificate,&metadata.public_key,org,Uuid::from_bytes(expected.account_id),Uuid::from_bytes(expected.device_id),id,serial).map_err(|_|Error::StorageUnavailable)?;
                 let mut resource=CertificateIssuanceResponse::new(id,"\"pending\"",timestamp(now)?,timestamp(now)?,certificate).map_err(|_|Error::StorageUnavailable)?;
                 resource.validate_request_subject(request).map_err(|_|Error::StorageUnavailable)?;
