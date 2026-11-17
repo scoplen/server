@@ -48,6 +48,7 @@
   {"method": "POST", "path": "/auth/refresh"},
   {"method": "GET", "path": "/orgs/{org}/hosts"},
   {"method": "POST", "path": "/orgs/{org}/hosts"},
+  {"method": "POST", "path": "/orgs/{org}/inventory/imports"},
   {"method": "GET", "path": "/orgs/{org}/hosts/{id}"},
   {"method": "PUT", "path": "/orgs/{org}/hosts/{id}"},
   {"method": "DELETE", "path": "/orgs/{org}/hosts/{id}"},

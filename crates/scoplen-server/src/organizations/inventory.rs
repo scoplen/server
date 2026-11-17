@@ -18,6 +18,7 @@ use scoplen_api::{
         InventoryCreateRequest, InventoryReplaceRequest, InventoryType,
         MAX_INVENTORY_RESOURCE_BYTES,
     },
+    inventory_import::{InventoryImportRequest, MAX_INVENTORY_IMPORT_REQUEST_BYTES},
     organization::{OrganizationListQuery, parse_organization_idempotency_key},
     sync::SyncOrganizationViewQuery,
 };
@@ -30,6 +31,7 @@ use uuid::Uuid;
 pub(super) fn routes() -> Router<OrganizationState> {
     Router::new()
         .route("/sync/v1/vaults/{vault}/view", get(view))
+        .route("/api/v1/orgs/{org}/inventory/imports", post(import))
         .route("/api/v1/orgs/{org}/hosts", get(handle))
         .route("/api/v1/orgs/{org}/hosts", post(handle))
         .route("/api/v1/orgs/{org}/hosts/{id}", get(handle))
@@ -65,6 +67,110 @@ pub(super) fn routes() -> Router<OrganizationState> {
         .route("/api/v1/orgs/{org}/gateway-networks/{id}", get(handle))
         .route("/api/v1/orgs/{org}/gateway-networks/{id}", put(handle))
         .route("/api/v1/orgs/{org}/gateway-networks/{id}", delete(handle))
+}
+
+async fn import(
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<OrganizationState>,
+    request: Request<Body>,
+) -> Response {
+    let id = Uuid::new_v4();
+    let (parts, body) = request.into_parts();
+    if parts.headers.contains_key(header::ORIGIN) && !matching_origin(&parts.headers, &state.origin)
+    {
+        return problem(StatusCode::FORBIDDEN, "policy.denied", false, &id);
+    }
+    let operation = DeviceAccessOperation::InventoryImportCreate;
+    let endpoint = team::endpoint(operation).expect("inventory import admission");
+    if let Err(response) = team::admission(&state, endpoint, peer.ip(), None, &id).await {
+        return response;
+    }
+    let (principal, expires_at) = match state
+        .account_auth
+        .authenticate_request(operation, &parts.method, &parts.uri, &parts.headers)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return problem(
+                error.status,
+                match error.status {
+                    StatusCode::FORBIDDEN => "policy.denied",
+                    StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
+                    _ => "auth.authentication_required",
+                },
+                false,
+                &id,
+            );
+        }
+    };
+    if let Err(response) = team::admission(
+        &state,
+        endpoint,
+        peer.ip(),
+        Some(Uuid::from_bytes(principal.account_id())),
+        &id,
+    )
+    .await
+    {
+        return response;
+    }
+    if parts.uri.query().is_some() || parts.headers.contains_key(header::IF_MATCH) {
+        return invalid(&id);
+    }
+    let org = parts
+        .uri
+        .path()
+        .strip_prefix("/api/v1/orgs/")
+        .and_then(|value| value.strip_suffix("/inventory/imports"))
+        .and_then(|value| parse_organization_idempotency_key(value).ok());
+    let Some(org) = org else { return invalid(&id) };
+    let key = match team::operation_key(&parts, &id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let body = match team::body(&parts, body, MAX_INVENTORY_IMPORT_REQUEST_BYTES, &id).await {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(request) = InventoryImportRequest::from_json(body.as_bytes()) else {
+        return invalid(&id);
+    };
+    let result = match &state.backend {
+        AuthBackend::Sqlite(store) => {
+            store
+                .import_organization_inventory(
+                    &principal,
+                    expires_at,
+                    &state.origin,
+                    org,
+                    key,
+                    &request,
+                )
+                .await
+        }
+        AuthBackend::Postgres(store) => {
+            store
+                .import_organization_inventory(
+                    &principal,
+                    expires_at,
+                    &state.origin,
+                    org,
+                    key,
+                    &request,
+                )
+                .await
+        }
+    };
+    match result {
+        Ok(value) => {
+            if value.changed {
+                super::notify_organization(&state, org).await;
+            }
+            team::encoded(value.result.to_json(), None, StatusCode::CREATED, &id)
+        }
+        Err(error) => store_problem(error, &id),
+    }
 }
 
 #[allow(clippy::too_many_lines)]

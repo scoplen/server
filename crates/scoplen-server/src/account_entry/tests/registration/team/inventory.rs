@@ -20,6 +20,7 @@ use scoplen_api::{
 use scoplen_model::{Object, ObjectType};
 use serde_json::json;
 
+mod csv_import;
 mod user_ca;
 
 pub(super) async fn cbor_call(

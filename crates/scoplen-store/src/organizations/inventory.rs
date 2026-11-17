@@ -19,6 +19,10 @@ use scoplen_api::{
         InventoryCreateRequest, InventoryFields, InventoryPage, InventoryReplaceRequest,
         InventoryResource, InventoryType,
     },
+    inventory_import::{
+        INVENTORY_IMPORT_RECEIPT_SECONDS, InventoryImportPair, InventoryImportRequest,
+        InventoryImportResult,
+    },
     organization::OrganizationListQuery,
     sync::{
         OrganizationVaultContext, SessionVault, SyncChange, SyncOrganizationAckRequest,
@@ -57,6 +61,81 @@ pub struct InventoryWriteResult {
     pub sequence: u64,
     pub view_revision: u64,
     pub changed: bool,
+}
+
+/// One committed import, or a current-authority confirmation of its original ids.
+pub struct InventoryImportWriteResult {
+    pub result: InventoryImportResult,
+    pub vault: Uuid,
+    pub sequence: u64,
+    pub view_revision: u64,
+    pub changed: bool,
+}
+
+struct PreparedInventoryObject {
+    object: Object,
+    encoded: Vec<u8>,
+    resource: Option<InventoryResource>,
+}
+
+fn prepare_inventory_object(
+    expected: &impl OrganizationPrincipal,
+    id: Uuid,
+    kind: InventoryType,
+    previous: Option<&(Object, InventoryResource)>,
+    fields: Option<InventoryFields>,
+    now: i64,
+) -> Result<PreparedInventoryObject, Error> {
+    let old_clock =
+        previous.and_then(|(object, _)| object.fields.values().map(|entry| entry.clock).max());
+    let clock = Hlc::tick(old_clock, number(now)?).map_err(|_| Error::StorageUnavailable)?;
+    let writer = Uuid::from_bytes(expected.writer_id());
+    let fields = fields
+        .map(|fields| {
+            if kind == InventoryType::TrustRecord {
+                fields
+                    .with_trust_attribution(
+                        number(now)?,
+                        Uuid::from_bytes(expected.account_id()),
+                        writer,
+                    )
+                    .map_err(|_| Error::InvalidRequest)
+            } else {
+                Ok(fields)
+            }
+        })
+        .transpose()?;
+    let object = if let Some(fields) = &fields {
+        fields.to_object(id, clock, writer).map_err(|_| Error::InvalidRequest)?
+    } else {
+        let mut object = previous.ok_or(Error::StorageUnavailable)?.0.clone();
+        object.tombstone =
+            Some(Tombstone::new(clock, writer).map_err(|_| Error::StorageUnavailable)?);
+        object
+    };
+    let encoded = object.encode().map_err(|_| Error::InvalidRequest)?;
+    let created_at =
+        previous.map(|(_, resource)| resource.created_at.clone()).unwrap_or(timestamp(now)?);
+    let resource = fields
+        .map(|fields| {
+            let mut value = InventoryResource {
+                id,
+                etag: "\"pending\"".into(),
+                created_at,
+                updated_at: timestamp(now)?,
+                fields,
+            };
+            let mut etag = String::from("\"sha256-");
+            for byte in Sha256::digest(&encoded) {
+                write!(etag, "{byte:02x}").expect("String write");
+            }
+            etag.push('"');
+            value.etag = etag;
+            value.to_json().map_err(|_| Error::StorageUnavailable)?;
+            Ok::<_, Error>(value)
+        })
+        .transpose()?;
+    Ok(PreparedInventoryObject { object, encoded, resource })
 }
 
 fn entity_ref(kind: &str, id: Uuid) -> Json {
@@ -673,6 +752,119 @@ macro_rules! inventory {
                 Ok(())
             }
 
+            async fn inventory_store_object(tx:&mut Transaction<'_,$db>,org:Uuid,vault:Uuid,sequence:u64,now:i64,prepared:&PreparedInventoryObject)->Result<(),Error> {
+                let object=&prepared.object;
+                let sequence_sql=sql_number(sequence).map_err(|_|Error::StorageUnavailable)?;
+                sqlx::query("UPDATE sync_vaults SET current_seq=$1 WHERE vault_id=$2")
+                    .bind(sequence_sql).bind(vault.as_bytes().as_slice()).execute(&mut **tx).await?;
+                sqlx::query("INSERT INTO sync_objects (vault_id,object_id,sequence,envelope,tombstone,signer_device_id,written_at_ms,key_epoch) VALUES ($1,$2,$3,$4,$5,NULL,$6,1) ON CONFLICT (vault_id,object_id) DO UPDATE SET sequence=excluded.sequence,envelope=excluded.envelope,tombstone=excluded.tombstone,signer_device_id=NULL,written_at_ms=excluded.written_at_ms,key_epoch=1")
+                    .bind(vault.as_bytes().as_slice()).bind(object.id.as_bytes().as_slice()).bind(sequence_sql).bind(&prepared.encoded).bind(object.tombstone.is_some()).bind(now).execute(&mut **tx).await?;
+                sqlx::query("INSERT INTO sync_object_versions (vault_id,object_id,sequence,envelope,tombstone,signer_device_id,written_at_ms,key_epoch) VALUES ($1,$2,$3,$4,$5,NULL,$6,1)")
+                    .bind(vault.as_bytes().as_slice()).bind(object.id.as_bytes().as_slice()).bind(sequence_sql).bind(&prepared.encoded).bind(object.tombstone.is_some()).bind(now).execute(&mut **tx).await?;
+                sqlx::query("DELETE FROM sync_object_versions WHERE vault_id=$1 AND object_id=$2 AND sequence NOT IN (SELECT sequence FROM sync_object_versions WHERE vault_id=$1 AND object_id=$2 ORDER BY sequence DESC LIMIT 21)")
+                    .bind(vault.as_bytes().as_slice()).bind(object.id.as_bytes().as_slice()).execute(&mut **tx).await?;
+                if let Some(resource)=&prepared.resource {
+                    sqlx::query("INSERT INTO organization_inventory_objects (organization_id,vault_id,object_id,object_type,response_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$6) ON CONFLICT (organization_id,object_id) DO UPDATE SET response_json=excluded.response_json,updated_at_ms=excluded.updated_at_ms")
+                        .bind(org.as_bytes().as_slice()).bind(vault.as_bytes().as_slice()).bind(object.id.as_bytes().as_slice())
+                        .bind(i64::try_from(object.object_type.to_wire()).map_err(|_|Error::InvalidRequest)?)
+                        .bind(resource.to_json().map_err(|_|Error::StorageUnavailable)?).bind(now).execute(&mut **tx).await?;
+                }
+                Ok(())
+            }
+
+            async fn inventory_store_references(tx:&mut Transaction<'_,$db>,org:Uuid,prepared:&PreparedInventoryObject)->Result<(),Error> {
+                sqlx::query("DELETE FROM organization_inventory_references WHERE organization_id=$1 AND source_id=$2")
+                    .bind(org.as_bytes().as_slice()).bind(prepared.object.id.as_bytes().as_slice()).execute(&mut **tx).await?;
+                if let Some(resource)=&prepared.resource {
+                    let mut inserted=BTreeSet::new();
+                    for reference in resource.fields.references().map_err(|_|Error::StorageUnavailable)? {
+                        if !inserted.insert(reference.id){continue;}
+                        sqlx::query("INSERT INTO organization_inventory_references (organization_id,source_id,target_id) VALUES ($1,$2,$3)")
+                            .bind(org.as_bytes().as_slice()).bind(prepared.object.id.as_bytes().as_slice()).bind(reference.id.as_bytes().as_slice()).execute(&mut **tx).await?;
+                    }
+                }
+                Ok(())
+            }
+
+            /// Create a complete prospective set of Host/default-Login pairs in one transaction.
+            /// # Errors
+            /// Rechecks current authority and rejects invalid/colliding ids, quota or atomic
+            /// storage/audit failures. An unacknowledged business COMMIT retains exact confirmation.
+            pub async fn import_organization_inventory(&self,expected:&impl OrganizationPrincipal,expires_at:u64,origin:&str,org:Uuid,key:Uuid,request:&InventoryImportRequest)->Result<InventoryImportWriteResult,Error> {
+                scoplen_model::validate_uuid_v7(key).map_err(|_|Error::InvalidRequest)?;
+                let canonical=request.to_json().map_err(|_|Error::InvalidRequest)?;
+                let mut hash=Sha256::new();
+                let path=format!("/api/v1/orgs/{org}/inventory/imports");
+                for part in [b"spl-organization-inventory-import-v1".as_slice(),origin.as_bytes(),expected.account_id().as_slice(),expected.receipt_writer_kind().unwrap_or(b"device"),expected.writer_id().as_slice(),b"POST",path.as_bytes()] {
+                    hash.update(part);hash.update([0]);
+                }
+                hash.update(&canonical);
+                let digest:[u8;32]=hash.finalize().into();
+                let mut tx=self.pool.begin_with($begin).await?;
+                let (current,vault,view_revision,current_seq)=Self::inventory_owner(&mut tx,expected,expires_at,org,true).await?;
+                let now=now_ms()?;
+                let mut graph=Self::inventory_graph(&mut tx,current,now).await?;
+                if !graph.authorize("manage_inventory","Organization",org)? {return Err(Error::PermissionDenied);}
+                let row=sqlx::query("SELECT request_digest,response_json FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms>$3")
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?;
+                if let Some(row)=row {
+                    if row.try_get::<Vec<u8>,_>("request_digest")?.as_slice()!=digest {return Err(Error::Conflict);}
+                    let result=InventoryImportResult::from_json(&row.try_get::<Vec<u8>,_>("response_json")?).map_err(|_|Error::StorageUnavailable)?;
+                    result.validate_for_request(request).map_err(|_|Error::StorageUnavailable)?;
+                    $actor(&mut tx,expected,expires_at).await?;
+                    tx.commit().await?;
+                    return Ok(InventoryImportWriteResult{result,vault,sequence:current_seq,view_revision,changed:false});
+                }
+                let result=InventoryImportResult{items:request.rows.iter().map(|row|InventoryImportPair{host_id:row.host_id,access_profile_id:row.access_profile_id}).collect()};
+                let response=result.to_json().map_err(|_|Error::InvalidRequest)?;
+                let mut objects=Vec::with_capacity(request.rows.len()*2);
+                for row in &request.rows {
+                    let (host,login)=row.inventory_creates().map_err(|_|Error::InvalidRequest)?;
+                    for request in [host,login] {
+                        let used:Option<Vec<u8>>=sqlx::query_scalar("SELECT object_id FROM organization_inventory_objects WHERE organization_id=$1 AND object_id=$2")
+                            .bind(org.as_bytes().as_slice()).bind(request.id.as_bytes().as_slice()).fetch_optional(&mut *tx).await?;
+                        if used.is_some(){return Err(Error::Conflict);}
+                        let kind=request.fields.kind();
+                        let object=prepare_inventory_object(expected,request.id,kind,None,Some(request.fields),now)?;
+                        graph.entities.insert((object.object.object_type.to_string(),object.object.id),object_entity(&object.object,org)?);
+                        objects.push(object);
+                    }
+                }
+                let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM sync_objects WHERE vault_id=$1")
+                    .bind(vault.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
+                let added=u64::try_from(objects.len()).map_err(|_|Error::InvalidRequest)?;
+                if number(count)?.checked_add(added).ok_or(Error::StorageUnavailable)?>self.sync_cardinality_limits.max_objects_per_vault {return Err(Error::Conflict);}
+                for object in &objects {
+                    let fields=&object.resource.as_ref().ok_or(Error::StorageUnavailable)?.fields;
+                    for reference in fields.references().map_err(|_|Error::InvalidRequest)? {
+                        let kind=reference.kind.object_type().to_string();
+                        if !graph.entities.contains_key(&(kind.clone(),reference.id)) || !graph.authorize("view_inventory",&kind,reference.id)? {return Err(Error::NotFound);}
+                    }
+                }
+                let sequence=current_seq.checked_add(added).ok_or(Error::StorageUnavailable)?;
+                sql_number(sequence).map_err(|_|Error::StorageUnavailable)?;
+                let next_revision=view_revision.checked_add(1).ok_or(Error::StorageUnavailable)?;
+                for (index,object) in objects.iter().enumerate() {
+                    let offset=u64::try_from(index).map_err(|_|Error::StorageUnavailable)?+1;
+                    Self::inventory_store_object(&mut tx,org,vault,current_seq+offset,now,object).await?;
+                }
+                for object in &objects {Self::inventory_store_references(&mut tx,org,object).await?;}
+                Self::team_revision(&mut tx,org,now).await?;
+                for (index,object) in objects.iter().enumerate() {
+                    let offset=u64::try_from(index).map_err(|_|Error::StorageUnavailable)?+1;
+                    let event=actor_audit(expected,json!({"action":"organization.inventory_created","account_id":Uuid::from_bytes(expected.account_id()),"organization_id":org,"object_id":object.object.id,"object_type":object.object.object_type.to_wire(),"sequence":current_seq+offset,"view_revision":next_revision}))?;
+                    $audit(&mut tx,org.into_bytes(),&event,now).await.map_err(|_|Error::StorageUnavailable)?;
+                }
+                sqlx::query("DELETE FROM organization_inventory_receipts WHERE account_id=$1 AND idempotency_key=$2 AND expires_at_ms<=$3")
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(now).execute(&mut *tx).await?;
+                sqlx::query("INSERT INTO organization_inventory_receipts (account_id,idempotency_key,organization_id,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+                    .bind(expected.account_id().as_slice()).bind(key.as_bytes().as_slice()).bind(org.as_bytes().as_slice()).bind(digest.as_slice()).bind(response)
+                    .bind(now).bind(now.checked_add(i64::try_from(INVENTORY_IMPORT_RECEIPT_SECONDS*1000).map_err(|_|Error::StorageUnavailable)?).ok_or(Error::StorageUnavailable)?).execute(&mut *tx).await?;
+                $actor(&mut tx,expected,expires_at).await?;
+                tx.commit().await.map_err(|_|Error::CommitOutcomeUnknown)?;
+                Ok(InventoryImportWriteResult{result,vault,sequence,view_revision:next_revision,changed:true})
+            }
+
             /// Author one typed object, sequence, revision, audit and original-create receipt
             /// in the same currently authorized tenant transaction.
             /// # Errors
@@ -751,54 +943,11 @@ macro_rules! inventory {
                         (Some((object,current)),None,true)
                     }
                 };
-                let old_clock=previous.as_ref().and_then(|(object,_)|object.fields.values().map(|entry|entry.clock).max());
-                let clock=Hlc::tick(old_clock,number(now)?).map_err(|_|Error::StorageUnavailable)?;
-                let writer=Uuid::from_bytes(expected.writer_id());
-                let fields=fields.map(|fields| if kind==InventoryType::TrustRecord {
-                    fields.with_trust_attribution(number(now)?,Uuid::from_bytes(expected.account_id()),writer).map_err(|_|Error::InvalidRequest)
-                } else {Ok(fields)}).transpose()?;
-                let object=if let Some(fields)=&fields {
-                    fields.to_object(id,clock,writer).map_err(|_|Error::InvalidRequest)?
-                } else {
-                    let mut object=previous.as_ref().ok_or(Error::StorageUnavailable)?.0.clone();
-                    object.tombstone=Some(Tombstone::new(clock,writer).map_err(|_|Error::StorageUnavailable)?);
-                    object
-                };
-                let encoded=object.encode().map_err(|_|Error::InvalidRequest)?;
-                let created_at=previous.as_ref().map(|(_,resource)|resource.created_at.clone()).unwrap_or(timestamp(now)?);
-                let resource=fields.map(|fields| {
-                    let mut value=InventoryResource{id,etag:"\"pending\"".into(),created_at,updated_at:timestamp(now)?,fields};
-                    let hash=Sha256::digest(&encoded);
-                    let mut etag=String::from("\"sha256-");
-                    for byte in hash {write!(etag,"{byte:02x}").expect("String write");}etag.push('"');
-                    value.etag=etag;value.to_json().map_err(|_|Error::StorageUnavailable)?;Ok::<_,Error>(value)
-                }).transpose()?;
+                let prepared=prepare_inventory_object(expected,id,kind,previous.as_ref(),fields,now)?;
                 let sequence=current_seq.checked_add(1).ok_or(Error::StorageUnavailable)?;
-                let sequence_sql=sql_number(sequence).map_err(|_|Error::StorageUnavailable)?;
-                sqlx::query("UPDATE sync_vaults SET current_seq=$1 WHERE vault_id=$2")
-                    .bind(sequence_sql).bind(vault.as_bytes().as_slice()).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO sync_objects (vault_id,object_id,sequence,envelope,tombstone,signer_device_id,written_at_ms,key_epoch) VALUES ($1,$2,$3,$4,$5,NULL,$6,1) ON CONFLICT (vault_id,object_id) DO UPDATE SET sequence=excluded.sequence,envelope=excluded.envelope,tombstone=excluded.tombstone,signer_device_id=NULL,written_at_ms=excluded.written_at_ms,key_epoch=1")
-                    .bind(vault.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(sequence_sql).bind(&encoded).bind(deleting).bind(now).execute(&mut *tx).await?;
-                sqlx::query("INSERT INTO sync_object_versions (vault_id,object_id,sequence,envelope,tombstone,signer_device_id,written_at_ms,key_epoch) VALUES ($1,$2,$3,$4,$5,NULL,$6,1)")
-                    .bind(vault.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(sequence_sql).bind(&encoded).bind(deleting).bind(now).execute(&mut *tx).await?;
-                sqlx::query("DELETE FROM sync_object_versions WHERE vault_id=$1 AND object_id=$2 AND sequence NOT IN (SELECT sequence FROM sync_object_versions WHERE vault_id=$1 AND object_id=$2 ORDER BY sequence DESC LIMIT 21)")
-                    .bind(vault.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                if let Some(resource)=&resource {
-                    sqlx::query("INSERT INTO organization_inventory_objects (organization_id,vault_id,object_id,object_type,response_json,created_at_ms,updated_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$6) ON CONFLICT (organization_id,object_id) DO UPDATE SET response_json=excluded.response_json,updated_at_ms=excluded.updated_at_ms")
-                        .bind(org.as_bytes().as_slice()).bind(vault.as_bytes().as_slice()).bind(id.as_bytes().as_slice())
-                        .bind(i64::try_from(kind.object_type().to_wire()).map_err(|_|Error::InvalidRequest)?)
-                        .bind(resource.to_json().map_err(|_|Error::StorageUnavailable)?).bind(now).execute(&mut *tx).await?;
-                }
-                sqlx::query("DELETE FROM organization_inventory_references WHERE organization_id=$1 AND source_id=$2")
-                    .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                if let Some(resource)=&resource {
-                    let mut inserted=BTreeSet::new();
-                    for reference in resource.fields.references().map_err(|_|Error::StorageUnavailable)? {
-                        if !inserted.insert(reference.id){continue;}
-                        sqlx::query("INSERT INTO organization_inventory_references (organization_id,source_id,target_id) VALUES ($1,$2,$3)")
-                            .bind(org.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).bind(reference.id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                    }
-                }
+                Self::inventory_store_object(&mut tx,org,vault,sequence,now,&prepared).await?;
+                Self::inventory_store_references(&mut tx,org,&prepared).await?;
+                let resource=prepared.resource;
                 Self::team_revision(&mut tx,org,now).await?;
                 let next_revision=view_revision.checked_add(1).ok_or(Error::StorageUnavailable)?;
                 let action=if deleting {"organization.inventory_deleted"}else if create_receipt.is_some(){"organization.inventory_created"}else{"organization.inventory_updated"};
