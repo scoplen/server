@@ -3,7 +3,10 @@
 
 use std::{net::Ipv4Addr, time::SystemTime};
 
-use axum::{body::Bytes, http::Request};
+use axum::{
+    body::Bytes,
+    http::{HeaderMap, Request},
+};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::ServerName;
@@ -180,13 +183,9 @@ fn unchanged(
 }
 
 fn problem(bytes: &[u8], status: u16, code: &str) -> Result<()> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|_| "Password-change problem JSON invalid")?;
-    if value["status"] != status
-        || value["code"] != code
-        || value["changed"] != false
-        || value["retryable"] != false
-    {
+    let value = scoplen_api::ProblemDetails::from_json(bytes, 4_096)
+        .map_err(|_| "Password-change problem JSON or request instance invalid")?;
+    if value.status != status || value.code.as_str() != code || value.changed || value.retryable {
         return Err("Password-change denial has incorrect code or outcome flags");
     }
     Ok(())
@@ -343,6 +342,25 @@ impl Browser {
     }
 }
 
+fn validate_headers(headers: &HeaderMap, path: &str, status: u16) -> Result<bool> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let cookie_allowed = status == 200 && matches!(path, BROWSER_LOGIN | BROWSER_REFRESH);
+    let request_id_required =
+        matches!(path, BROWSER_OPTIONS | BROWSER_LOGIN | BROWSER_REFRESH | PROFILE);
+    if header("cache-control") != Some("no-store")
+        || header("pragma") != Some("no-cache")
+        || (request_id_required && header("x-request-id").is_none_or(str::is_empty))
+        || header("content-type")
+            != Some(if status >= 400 { "application/problem+json" } else { "application/json" })
+        || (!cookie_allowed && headers.contains_key("set-cookie"))
+        || headers.contains_key("access-control-allow-origin")
+        || headers.contains_key("access-control-allow-credentials")
+    {
+        return Err("Password-change HTTPS response metadata invalid");
+    }
+    Ok(cookie_allowed)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn exchange(
     https: &Https,
@@ -421,22 +439,13 @@ async fn exchange(
                 "Password-change public API returned an unexpected status; abandon fixture",
             );
         }
-        let header =
-            |name: &str| response.headers().get(name).and_then(|value| value.to_str().ok());
-        let cookie_allowed = status == 200 && matches!(path, BROWSER_LOGIN | BROWSER_REFRESH);
-        if header("cache-control") != Some("no-store")
-            || header("pragma") != Some("no-cache")
-            || header("x-request-id").is_none_or(str::is_empty)
-            || header("content-type")
-                != Some(if status >= 400 { "application/problem+json" } else { "application/json" })
-            || (!cookie_allowed && response.headers().contains_key("set-cookie"))
-            || response.headers().contains_key("access-control-allow-origin")
-            || response.headers().contains_key("access-control-allow-credentials")
-        {
-            return Err("Password-change HTTPS response metadata invalid");
-        }
+        let cookie_allowed = validate_headers(response.headers(), path, status)?;
         let cookie = if cookie_allowed {
-            let cookie = header("set-cookie").ok_or("Browser refresh cookie missing")?;
+            let cookie = response
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .ok_or("Browser refresh cookie missing")?;
             if response.headers().get_all("set-cookie").iter().count() != 1
                 || !cookie.starts_with("__Secure-spl-account-refresh=ar1_")
                 || !cookie.contains("; Path=/api/v1/auth/accounts/browser/refresh;")
@@ -740,4 +749,55 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
         return Err("Later password change changed the ARK");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers() -> HeaderMap {
+        HeaderMap::from_iter([
+            (axum::http::header::CACHE_CONTROL, "no-store".parse().unwrap()),
+            (axum::http::header::PRAGMA, "no-cache".parse().unwrap()),
+            (axum::http::header::CONTENT_TYPE, "application/json".parse().unwrap()),
+        ])
+    }
+
+    #[test]
+    fn native_metadata_does_not_require_a_browser_request_id_header() {
+        let mut headers = headers();
+        for (path, status) in [(CHALLENGE, 200), (CHANGE, 201), (CHANGE, 200)] {
+            assert_eq!(validate_headers(&headers, path, status), Ok(false));
+        }
+        for path in [BROWSER_OPTIONS, BROWSER_LOGIN, BROWSER_REFRESH, PROFILE] {
+            assert!(validate_headers(&headers, path, 200).is_err());
+        }
+        headers.insert("x-request-id", "fixture-request".parse().unwrap());
+        assert_eq!(validate_headers(&headers, BROWSER_REFRESH, 200), Ok(true));
+        headers.remove("pragma");
+        assert!(validate_headers(&headers, CHANGE, 201).is_err());
+    }
+
+    #[test]
+    fn native_problems_require_the_bounded_unique_request_instance_body() {
+        let value = serde_json::json!({
+            "type": "about:blank", "title": "Denied", "status": 401,
+            "detail": "Authenticate again.", "instance": "fixture-request",
+            "code": "auth.authentication_required", "changed": false, "retryable": false,
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        assert_eq!(problem(&bytes, 401, "auth.authentication_required"), Ok(()));
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove("instance");
+        assert!(
+            problem(&serde_json::to_vec(&missing).unwrap(), 401, "auth.authentication_required")
+                .is_err()
+        );
+        let mut empty = value;
+        empty["instance"] = "".into();
+        assert!(
+            problem(&serde_json::to_vec(&empty).unwrap(), 401, "auth.authentication_required")
+                .is_err()
+        );
+    }
 }
