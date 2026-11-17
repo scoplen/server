@@ -28,11 +28,14 @@ replace only a pending entitlement; completed setup requires an identity-preserv
 procedure before its origin can change.
 
 The Rust protocol consumers and generated console API types use the published
-`proto@2ccaaa7` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
+`proto@18422e7` revision. This workspace consumes `scoplen-api`, `scoplen-crypto` and
 `scoplen-model`, with the reviewed `ssh-key` scalar-decoding fix pinned to the same revision.
 This revision includes Account password, Device admission and Organization inventory contracts,
 plus bounded immutable Organization audit queries, range verification and typed named-member
-Host Grants. The Console accepts the closed Audit `grant` kind. It removes retired
+Host Grants. D-150 adds shared single-Host access-request codecs, exact Device/browser scopes,
+the request-access rule generator and the Audit `access_request` kind. Production storage,
+HTTP routes, worker expiry and Console wiring remain separate consumer implementation work.
+The Console accepts the closed Audit `grant` kind. It removes retired
 Personal invitation/enrollment and pairing formats. Consuming these
 contracts alone grants no authority; the native Account-entry adapters mount all five endpoints.
 
