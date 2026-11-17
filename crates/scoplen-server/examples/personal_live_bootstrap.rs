@@ -49,6 +49,7 @@ const SETUP_FINISH: &str = "/api/v1/auth/operator/setup/finish";
 const LOGIN_OPTIONS: &str = "/api/v1/auth/operator/login/options";
 const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
 const LOGOUT: &str = "/api/v1/auth/operator/logout";
+const GRANTS_ACCEPTANCE: &str = "{\"grant_device_browser_https_verified\":true,\"grant_certificate_expiry_verified\":true,\"grant_lifecycle_tenant_verified\":true,\"grant_personal_sync_preserved\":true}";
 
 #[derive(Parser)]
 #[command(about = "Disposable loopback HTTPS fixture; never use a real deployment or passkey")]
@@ -95,6 +96,8 @@ enum Command {
     },
     /// Once only: verify Organization audit reads with genuine Device and browser sessions.
     VerifyAudit { directory: PathBuf },
+    /// Once only: verify Host Grant management and certificate bounds through real HTTPS.
+    VerifyGrants { directory: PathBuf },
 }
 
 #[derive(Deserialize)]
@@ -218,7 +221,29 @@ async fn run(command: Command) -> Result<()> {
             )?;
             println!("public Device and Account-browser audit check passed");
         }
+        Command::VerifyGrants { directory } => verify_grants(&directory).await?,
     }
+    Ok(())
+}
+
+async fn verify_grants(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("grants-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(360), Box::pin(account::verify_grants(&https)))
+            .await
+            .map_err(|_| "Grant check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Grant check task failed; abandon this fixture")??;
+    write_private(&directory.join("grants-acceptance.json"), GRANTS_ACCEPTANCE)?;
+    println!("public Device and Account-browser Grant HTTPS check passed");
     Ok(())
 }
 
@@ -1015,5 +1040,34 @@ mod tests {
         let mut keys: Vec<_> = value.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["ca_certificate", "disposable", "operator_lifecycle_verified", "origin"]);
+    }
+
+    #[test]
+    fn grant_acceptance_has_only_fixed_https_evidence_fields() {
+        let value: serde_json::Value = serde_json::from_str(GRANTS_ACCEPTANCE).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 4);
+        for name in [
+            "grant_device_browser_https_verified",
+            "grant_certificate_expiry_verified",
+            "grant_lifecycle_tenant_verified",
+            "grant_personal_sync_preserved",
+        ] {
+            assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
+        }
+        assert!(Cli::try_parse_from(["consumer", "verify-grants", "unused"]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_grant_check_publishes_nothing_and_refuses_replay() {
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        assert!(run(Command::VerifyGrants { directory: scratch.0.clone() }).await.is_err());
+        assert!(scratch.0.join("grants-check.started").is_file());
+        assert!(!scratch.0.join("grants-acceptance.json").exists());
+        assert_eq!(
+            run(Command::VerifyGrants { directory: scratch.0.clone() }).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
     }
 }

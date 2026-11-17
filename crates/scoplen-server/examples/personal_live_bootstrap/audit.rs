@@ -50,27 +50,27 @@ const LOGIN: &str = "/api/v1/auth/accounts/browser/password/login";
 const REFRESH: &str = "/api/v1/auth/accounts/browser/refresh";
 
 #[derive(Clone, Copy)]
-struct Actor<'a> {
+pub(super) struct Actor<'a> {
     key: &'a P256SigningKey,
     access: Option<&'a str>,
 }
 
-fn native<'a>(account: &'a Registration, token: &'a AuthTokenResponse) -> Actor<'a> {
+pub(super) fn native<'a>(account: &'a Registration, token: &'a AuthTokenResponse) -> Actor<'a> {
     Actor { key: &account.device.keys.signing, access: Some(&token.access_token) }
 }
 
-struct Browser {
+pub(super) struct Browser {
     key: P256SigningKey,
     access: Zeroizing<String>,
     cookie: Zeroizing<String>,
 }
 
 impl Browser {
-    fn actor(&self) -> Actor<'_> {
+    pub(super) fn actor(&self) -> Actor<'_> {
         Actor { key: &self.key, access: Some(&self.access) }
     }
 
-    async fn login(https: &Https, account: &Registration) -> Result<Self> {
+    pub(super) async fn login(https: &Https, account: &Registration) -> Result<Self> {
         let key = generate_p256_signing_key().map_err(|_| "browser proof key generation failed")?;
         let actor = Actor { key: &key, access: None };
         let body = AccountBrowserPasswordOptionsRequest(AccountPasswordOptionsRequest {
@@ -104,7 +104,7 @@ impl Browser {
         Ok(Self { key, access, cookie })
     }
 
-    async fn refresh(&mut self, https: &Https) -> Result<()> {
+    pub(super) async fn refresh(&mut self, https: &Https) -> Result<()> {
         let reply = exchange(
             https,
             Actor { key: &self.key, access: None },
@@ -125,13 +125,13 @@ impl Browser {
     }
 }
 
-struct Reply {
+pub(super) struct Reply {
     headers: HeaderMap,
-    body: Zeroizing<Vec<u8>>,
+    pub(super) body: Zeroizing<Vec<u8>>,
 }
 
 impl Reply {
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(super) fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(name).and_then(|value| value.to_str().ok())
     }
 }
@@ -176,13 +176,21 @@ fn browser_session(reply: &Reply, initial: bool) -> Result<(Zeroizing<String>, Z
     ))
 }
 
-fn response_limit(path: &str, status: u16) -> usize {
+fn response_limit(path: &str, method: &str, status: u16) -> usize {
     if status >= 400 {
         MAX_AUDIT_PROBLEM_BYTES
     } else if path.split('?').next().is_some_and(|path| path.ends_with("/audit-events/verify")) {
         MAX_AUDIT_VERIFICATION_BYTES
     } else if path.split('?').next().is_some_and(|path| path.ends_with("/audit-events")) {
         MAX_AUDIT_PAGE_BYTES
+    } else if path.split('?').next().is_some_and(|path| path.ends_with("/grants"))
+        && method == "GET"
+    {
+        scoplen_api::grant::MAX_GRANT_PAGE_BYTES
+    } else if path.contains("/grants") {
+        scoplen_api::grant::MAX_GRANT_BYTES
+    } else if path.ends_with("/certificates") {
+        scoplen_api::certificate::MAX_CERTIFICATE_ISSUANCE_RESPONSE_BYTES
     } else {
         8_192
     }
@@ -210,7 +218,7 @@ fn validate_headers(headers: &HeaderMap, path: &str, status: u16) -> Result<()> 
     Ok(())
 }
 
-async fn exchange(
+pub(super) async fn exchange(
     https: &Https,
     actor: Actor<'_>,
     method: &str,
@@ -283,7 +291,7 @@ async fn exchange(
         }
         validate_headers(response.headers(), path, status)?;
         let (parts, body) = response.into_parts();
-        let bytes = Limited::new(body, response_limit(path, status))
+        let bytes = Limited::new(body, response_limit(path, method, status))
             .collect()
             .await
             .map_err(|_| "audit consumer response exceeds its bound or is incomplete")?
@@ -307,7 +315,7 @@ fn organization(reply: &Reply) -> Result<OrganizationResource> {
     .map_err(|_| "audit fixture Organization Resource invalid")
 }
 
-async fn create_team(https: &Https, actor: Actor<'_>) -> Result<OrganizationResource> {
+pub(super) async fn create_team(https: &Https, actor: Actor<'_>) -> Result<OrganizationResource> {
     let body = OrganizationCreateRequest::new("Disposable audit HTTPS team")
         .and_then(|value| value.to_json())
         .map_err(|_| "audit fixture team request invalid")?;
@@ -333,7 +341,7 @@ async fn rename_team(https: &Https, actor: Actor<'_>, org: Uuid, name: &str) -> 
     Ok(())
 }
 
-async fn invite(
+pub(super) async fn invite(
     https: &Https,
     owner: Actor<'_>,
     recipient: Actor<'_>,
@@ -396,7 +404,7 @@ async fn invite(
     Ok(receipt.membership_id)
 }
 
-async fn member(
+pub(super) async fn member(
     https: &Https,
     owner: Actor<'_>,
     org: Uuid,
@@ -419,7 +427,7 @@ async fn member(
     Ok(value)
 }
 
-async fn update_member(
+pub(super) async fn update_member(
     https: &Https,
     owner: Actor<'_>,
     org: Uuid,
@@ -970,13 +978,24 @@ mod tests {
 
     #[test]
     fn audit_transport_keeps_page_range_and_problem_bounds_separate() {
-        assert_eq!(response_limit("/api/v1/orgs/x/audit-events?limit=500", 200), 1_048_576);
+        assert_eq!(response_limit("/api/v1/orgs/x/audit-events?limit=500", "GET", 200), 1_048_576);
         assert_eq!(
-            response_limit("/api/v1/orgs/x/audit-events/verify?from_sequence=1", 200),
+            response_limit("/api/v1/orgs/x/audit-events/verify?from_sequence=1", "GET", 200),
             4_096
         );
-        assert_eq!(response_limit("/api/v1/orgs/x/audit-events", 503), 4_096);
-        assert_eq!(response_limit(LOGIN, 200), 8_192);
+        assert_eq!(response_limit("/api/v1/orgs/x/audit-events", "GET", 503), 4_096);
+        assert_eq!(response_limit(LOGIN, "POST", 200), 8_192);
+    }
+
+    #[test]
+    fn grant_transport_separates_pages_resources_certificates_and_problems() {
+        assert_eq!(response_limit("/api/v1/orgs/x/grants?limit=500", "GET", 200), 2_097_152);
+        assert_eq!(response_limit("/api/v1/orgs/x/grants", "POST", 201), 4_096);
+        assert_eq!(response_limit("/api/v1/orgs/x/grants/id", "GET", 200), 4_096);
+        assert_eq!(response_limit("/api/v1/orgs/x/grants/id", "PUT", 200), 4_096);
+        assert_eq!(response_limit("/api/v1/orgs/x/certificates", "POST", 201), 131_072);
+        assert_eq!(response_limit("/api/v1/orgs/x/grants?limit=500", "GET", 503), 4_096);
+        assert_eq!(response_limit("/api/v1/orgs/x/certificates", "POST", 403), 4_096);
     }
 
     #[test]

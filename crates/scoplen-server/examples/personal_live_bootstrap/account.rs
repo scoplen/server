@@ -54,9 +54,15 @@ const ADMIT: &str = "/api/v1/auth/accounts/device-admissions";
 
 #[path = "audit.rs"]
 mod audit;
+#[path = "grants.rs"]
+mod grants;
 
 pub(super) async fn verify_audit(https: &Https) -> Result<()> {
     audit::verify(https).await
+}
+
+pub(super) async fn verify_grants(https: &Https) -> Result<()> {
+    grants::verify(https).await
 }
 
 struct Device {

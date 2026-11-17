@@ -233,6 +233,63 @@ or exported. The command does not start/stop services, create/drop databases, in
 trust roots or change the original integration descriptor. Its caller retains responsibility
 for the existing private diagnostics and exact owned-resource cleanup.
 
+## Named-member Host Grant HTTPS acceptance
+
+Build the server and example from the same current checkout. Prepare a new private fixture
+with only the default `api` role, set `[organizations] allow_creation = true` before startup,
+and complete `bootstrap`. Against the running owned server, execute once:
+
+```text
+personal_live_bootstrap verify-grants <fixture-directory>
+```
+
+Run independently on SQLite and a new disposable PostgreSQL database. Three random password
+Accounts register through public HTTPS and authenticate/refresh genuine Devices; separate
+Account-browser families use independently generated proof keys. Two teams, named invitations,
+Host/HostGroup inventory, visibility policies and local user CAs are created through public APIs.
+The driver does not seed SQL, forge tokens, reset admission debt or retry mutations. Its twenty
+certificate requests and bounded per-Account management attempts retain production rate limits.
+
+The first member can independently read a Host but initially cannot connect. Browser Grant
+management enables Device certificate issuance. The consumer verifies the subject, signature,
+exact trusted CA, Account/Device key id, scoped principals, current validity and effective
+expiry: a ten-minute Grant, the later of two
+applicable Grants, and the earliest cap across two Hosts. Host Grants deny HostGroup issuance.
+Exact certificate confirmation retains original bytes. Ordinary policy permission retains
+the normal thirty-minute lifetime while finite Grants remain active; an explicit forbid
+also denies receipt confirmation. Those test policies are then removed before checking
+that Grant withdrawal denies issuance.
+
+Device and browser Grant reads agree, including ascending cursor pagination. Browser refresh
+preserves creation-receipt ownership; another login family cannot confirm it. Replacement,
+equal-field no-op, stale ETags, current authority before protected preconditions, withdrawal
+and historical creation confirmation are checked. Confirmation after withdrawal preserves
+the original response while current GET/list remain absent and issuance is denied.
+
+The second team checks future, expired, nonexpiring and replaced finite intervals, exact
+remote-user denial, foreign reads/references and cross-team used-id rejection. After removing
+the independent policy reference, current, future and expired unwithdrawn Grants each block
+Host deletion; withdrawal permits deletion and historical confirmation cannot restore it.
+Membership suspension and removal withdraw Grants. Restore does not revive them; a fresh
+Grant is required. Original Device credentials remain in use throughout, and both independent
+encrypted Personal Host uploads still verify and decrypt after these team transitions.
+
+`grants-check.started` is created exclusively before the first request. Any failure or
+interruption abandons the fixture rather than repeating possibly committed business. The
+complete flow has a six-minute deadline; each HTTPS request retains its fifteen-second bound.
+Only full success creates `grants-acceptance.json` with exactly these content-free fields:
+
+```json
+{"grant_device_browser_https_verified":true,"grant_certificate_expiry_verified":true,"grant_lifecycle_tenant_verified":true,"grant_personal_sync_preserved":true}
+```
+
+No password, private key, token, cookie, identifier or certificate is exported by this check.
+The command neither starts/stops services nor changes the original consumer descriptor.
+This is HTTPS evidence only: an independent existing client must still complete actual SSH
+and binary SFTP against an owned target. Rendered/native interaction, immediate withdrawal
+of disclosed certificates, existing-session termination and the complete integration gate
+remain independent acceptance work.
+
 ## Descriptor, privacy and failures
 
 After confirmed Operator setup, login, logout, eligible terminal logout confirmation and
