@@ -65,6 +65,14 @@ pub(super) async fn verify_grants(https: &Https) -> Result<()> {
     grants::verify(https).await
 }
 
+pub(super) async fn prepare_grant_client(
+    https: &Https,
+    directory: &Path,
+    openssh_descriptor: &Path,
+) -> Result<()> {
+    grants::prepare_client(https, directory, openssh_descriptor).await
+}
+
 struct Device {
     id: Uuid,
     keys: DeviceKeys,
