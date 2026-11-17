@@ -75,15 +75,18 @@ pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     grants::verify_requests(https).await
 }
 
-pub(super) async fn verify_inventory_import(https: &Https) -> Result<()> {
-    grants::verify_inventory_import(https).await
+pub(super) async fn verify_inventory_import(
+    https: &Https,
+    source: crate::InventoryImportSource,
+) -> Result<()> {
+    grants::verify_inventory_import(https, source).await
 }
 
 pub(super) async fn prepare_grant_client(
     https: &Https,
     directory: &Path,
     openssh_descriptor: &Path,
-    import_inventory: bool,
+    import_inventory: Option<crate::InventoryImportSource>,
 ) -> Result<()> {
     grants::prepare_client(https, directory, openssh_descriptor, import_inventory).await
 }

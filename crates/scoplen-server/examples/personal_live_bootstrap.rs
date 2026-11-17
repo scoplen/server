@@ -14,7 +14,7 @@ use std::{
 
 use axum::{body::Bytes, http::Request};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use http_body_util::{BodyExt as _, Full, Limited};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
@@ -106,11 +106,15 @@ enum Command {
     /// Once only: verify request denials, routing and original confirmation through real HTTPS.
     VerifyRequests { directory: PathBuf },
     /// Once only: verify atomic inventory imports with genuine Device and browser writers.
-    VerifyInventoryImport { directory: PathBuf },
+    VerifyInventoryImport {
+        directory: PathBuf,
+        #[arg(long, value_enum, default_value = "csv")]
+        source: InventoryImportSource,
+    },
     /// Once only: prepare three private phases for independent Grant SSH/SFTP acceptance.
     PrepareGrantClient(GrantClientArguments),
     /// Once only: use imported default Logins for independent Grant SSH/SFTP acceptance.
-    PrepareInventoryImportClient(GrantClientArguments),
+    PrepareInventoryImportClient(InventoryImportClientArguments),
     /// Once only: hand off a real member request, independent approval and SSH/SFTP use.
     PrepareRequestClient(GrantClientArguments),
 }
@@ -121,6 +125,21 @@ struct GrantClientArguments {
     /// Existing owned OpenSSH fixture descriptor; no target is created or changed here.
     #[arg(long)]
     openssh_descriptor: PathBuf,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum InventoryImportSource {
+    Csv,
+    #[value(name = "openssh")]
+    OpenSsh,
+}
+
+#[derive(Args)]
+struct InventoryImportClientArguments {
+    #[command(flatten)]
+    target: GrantClientArguments,
+    #[arg(long, value_enum, default_value = "csv")]
+    source: InventoryImportSource,
 }
 
 #[derive(Deserialize)]
@@ -246,10 +265,12 @@ async fn run(command: Command) -> Result<()> {
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
         Command::VerifyPasswordChange { directory } => verify_password_change(&directory).await?,
         Command::VerifyRequests { directory } => verify_requests(&directory).await?,
-        Command::VerifyInventoryImport { directory } => verify_inventory_import(&directory).await?,
-        Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments, false).await?,
+        Command::VerifyInventoryImport { directory, source } => {
+            verify_inventory_import(&directory, source).await?;
+        }
+        Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments, None).await?,
         Command::PrepareInventoryImportClient(arguments) => {
-            prepare_grant_client(arguments, true).await?;
+            prepare_grant_client(arguments.target, Some(arguments.source)).await?;
         }
         Command::PrepareRequestClient(arguments) => prepare_request_client(arguments).await?,
     }
@@ -258,7 +279,7 @@ async fn run(command: Command) -> Result<()> {
 
 async fn prepare_grant_client(
     arguments: GrantClientArguments,
-    import_inventory: bool,
+    import_inventory: Option<InventoryImportSource>,
 ) -> Result<()> {
     let directory = canonical_fixture_directory(&arguments.directory)?;
     let openssh_descriptor = arguments.openssh_descriptor;
@@ -378,29 +399,38 @@ async fn verify_requests(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn verify_inventory_import(directory: &Path) -> Result<()> {
+async fn verify_inventory_import(directory: &Path, source: InventoryImportSource) -> Result<()> {
     let directory = canonical_fixture_directory(directory)?;
     let config = fixture_config(&directory)?;
     let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
     let https = Https::new(&directory, config.server.listen_port, origin)?;
+    let (started, acceptance_file, acceptance) = match source {
+        InventoryImportSource::Csv => (
+            "inventory-import-check.started",
+            "inventory-import-acceptance.json",
+            "{\"inventory_import_device_browser_https_verified\":true,\"inventory_import_original_confirmation_verified\":true,\"inventory_import_tenant_view_audit_verified\":true}",
+        ),
+        InventoryImportSource::OpenSsh => (
+            "openssh-import-check.started",
+            "openssh-import-acceptance.json",
+            "{\"openssh_import_device_browser_https_verified\":true,\"openssh_import_original_confirmation_verified\":true,\"openssh_import_current_policy_verified\":true,\"openssh_import_tenant_view_audit_verified\":true}",
+        ),
+    };
     write_private(
-        &directory.join("inventory-import-check.started"),
+        &directory.join(started),
         "One attempt only; discard this fixture after any failure.",
     )?;
     tokio::spawn(async move {
         tokio::time::timeout(
             Duration::from_mins(5),
-            Box::pin(account::verify_inventory_import(&https)),
+            Box::pin(account::verify_inventory_import(&https, source)),
         )
         .await
         .map_err(|_| "Inventory import check exceeded its deadline; abandon this fixture")?
     })
     .await
     .map_err(|_| "Inventory import check task failed; abandon this fixture")??;
-    write_private(
-        &directory.join("inventory-import-acceptance.json"),
-        "{\"inventory_import_device_browser_https_verified\":true,\"inventory_import_original_confirmation_verified\":true,\"inventory_import_tenant_view_audit_verified\":true}",
-    )?;
+    write_private(&directory.join(acceptance_file), acceptance)?;
     println!("public Device and Account-browser inventory import HTTPS check passed");
     Ok(())
 }
@@ -1287,16 +1317,41 @@ mod tests {
     #[tokio::test]
     async fn inventory_import_failure_never_publishes_acceptance_or_repeats_business() {
         assert!(Cli::try_parse_from(["consumer", "verify-inventory-import", "unused"]).is_ok());
-        let scratch = Scratch::new();
-        prepare(&scratch.0, None, None).expect("prepare");
-        let command = || Command::VerifyInventoryImport { directory: scratch.0.clone() };
-        assert!(run(command()).await.is_err());
-        assert!(scratch.0.join("inventory-import-check.started").is_file());
-        assert!(!scratch.0.join("inventory-import-acceptance.json").exists());
-        assert_eq!(
-            run(command()).await.unwrap_err(),
-            "could not exclusively write private fixture material"
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "verify-inventory-import",
+                "unused",
+                "--source",
+                "openssh",
+            ])
+            .is_ok()
         );
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "verify-inventory-import",
+                "unused",
+                "--source",
+                "other",
+            ])
+            .is_err()
+        );
+        for (source, prefix) in
+            [(InventoryImportSource::Csv, "inventory"), (InventoryImportSource::OpenSsh, "openssh")]
+        {
+            let scratch = Scratch::new();
+            prepare(&scratch.0, None, None).expect("prepare");
+            let command =
+                || Command::VerifyInventoryImport { directory: scratch.0.clone(), source };
+            assert!(run(command()).await.is_err());
+            assert!(scratch.0.join(format!("{prefix}-import-check.started")).is_file());
+            assert!(!scratch.0.join(format!("{prefix}-import-acceptance.json")).exists());
+            assert_eq!(
+                run(command()).await.unwrap_err(),
+                "could not exclusively write private fixture material"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1314,25 +1369,49 @@ mod tests {
             );
             assert!(Cli::try_parse_from(["consumer", command, "unused"]).is_err());
         }
-        let scratch = Scratch::new();
-        prepare(&scratch.0, None, None).expect("prepare");
-        let command = || {
-            Command::PrepareGrantClient(GrantClientArguments {
-                directory: scratch.0.clone(),
-                openssh_descriptor: scratch.0.join("absent-openssh.json"),
-            })
-        };
-        assert!(run(command()).await.is_err());
-        assert!(scratch.0.join("grant-client.started").is_file());
-        for phase in ["before", "active", "withdrawn"] {
-            assert!(!scratch.0.join(format!("grant-client-{phase}.json")).exists());
-            assert!(!scratch.0.join(format!("grant-client-{phase}.ready")).exists());
-        }
-        assert!(!scratch.0.join("grant-client-owner-password.txt").exists());
-        assert_eq!(
-            run(command()).await.unwrap_err(),
-            "could not exclusively write private fixture material"
+        assert!(
+            Cli::try_parse_from([
+                "consumer",
+                "prepare-inventory-import-client",
+                "unused",
+                "--openssh-descriptor",
+                "unused.json",
+                "--source",
+                "openssh",
+            ])
+            .is_ok()
         );
+        for source in [None, Some(InventoryImportSource::Csv), Some(InventoryImportSource::OpenSsh)]
+        {
+            let scratch = Scratch::new();
+            prepare(&scratch.0, None, None).expect("prepare");
+            let command = || {
+                let target = GrantClientArguments {
+                    directory: scratch.0.clone(),
+                    openssh_descriptor: scratch.0.join("absent-openssh.json"),
+                };
+                match source {
+                    Some(source) => {
+                        Command::PrepareInventoryImportClient(InventoryImportClientArguments {
+                            target,
+                            source,
+                        })
+                    }
+                    None => Command::PrepareGrantClient(target),
+                }
+            };
+            assert!(run(command()).await.is_err());
+            assert!(scratch.0.join("grant-client.started").is_file());
+            for phase in ["before", "active", "withdrawn"] {
+                assert!(!scratch.0.join(format!("grant-client-{phase}.json")).exists());
+                assert!(!scratch.0.join(format!("grant-client-{phase}.ready")).exists());
+            }
+            assert!(!scratch.0.join("grant-client-owner-password.txt").exists());
+            assert_eq!(
+                run(command()).await.unwrap_err(),
+                "could not exclusively write private fixture material"
+            );
+        }
     }
 
     #[tokio::test]
