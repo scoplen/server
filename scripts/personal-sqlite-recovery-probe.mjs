@@ -593,9 +593,13 @@ if (operation === "check-context") {
   chownSync(passphrase, 65532, 65532);
   chmodSync(passphrase, 0o600);
   assert(!existsSync(join(root, "restored")), "restore target must be absent");
-} else if (operation === "check-archive-restore") {
+} else if (
+  operation === "check-archive-restore" ||
+  operation === "check-online-archive-restore"
+) {
   failurePhase = "archive-restore";
-  const source = "/source";
+  const online = operation === "check-online-archive-restore";
+  const source = online ? "/source-parent/restored" : "/source";
   const restored = "/recovery/restored";
   const metadata = ordinary(restored, true);
   assert.equal(metadata.uid, 65532);
@@ -613,27 +617,50 @@ if (operation === "check-context") {
   }
   assert(
     readFileSync(join(restored, "kms.key")).equals(
-      readFileSync(join(source, "deployment.key")),
+      readFileSync(join(source, online ? "kms.key" : "deployment.key")),
     ),
     "archive changed the configured KMS key",
   );
-  const sourceDatabase = join(source, "scoplen.sqlite");
-  ordinary(sourceDatabase);
-  assert(
-    !existsSync(`${sourceDatabase}-wal`),
-    "source WAL must be checkpointed before state comparison",
-  );
-  // A WAL-mode header still needs writable sidecar storage when read-only.
-  const temporary = "/tmp/archive-source-checkpointed.sqlite";
-  copyFileSync(sourceDatabase, temporary, constants.COPYFILE_EXCL);
-  try {
+  if (online) {
+    const database = new DatabaseSync(join(restored, "scoplen.sqlite"), {
+      readOnly: true,
+    });
+    try {
+      assert.equal(
+        database.prepare("PRAGMA integrity_check").get().integrity_check,
+        "ok",
+      );
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      assert.equal(
+        database
+          .prepare(
+            "SELECT MAX(version) AS version FROM _sqlx_migrations WHERE success = 1",
+          )
+          .get().version,
+        newMigration,
+      );
+    } finally {
+      database.close();
+    }
+  } else {
+    const sourceDatabase = join(source, "scoplen.sqlite");
+    ordinary(sourceDatabase);
     assert(
-      databaseState(temporary) ===
-        databaseState(join(restored, "scoplen.sqlite")),
-      "archive changed retained database, audit or Account state",
+      !existsSync(`${sourceDatabase}-wal`),
+      "source WAL must be checkpointed before state comparison",
     );
-  } finally {
-    unlinkSync(temporary);
+    // A WAL-mode header still needs writable sidecar storage when read-only.
+    const temporary = "/tmp/archive-source-checkpointed.sqlite";
+    copyFileSync(sourceDatabase, temporary, constants.COPYFILE_EXCL);
+    try {
+      assert(
+        databaseState(temporary) ===
+          databaseState(join(restored, "scoplen.sqlite")),
+        "archive changed retained database, audit or Account state",
+      );
+    } finally {
+      unlinkSync(temporary);
+    }
   }
   compareObjects(join(source, "objects"), join(restored, "objects"));
   for (const name of [

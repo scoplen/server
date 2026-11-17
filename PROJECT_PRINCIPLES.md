@@ -43,9 +43,12 @@ self-hosted server, host agent, administration CLI, and web console.
 - Before upgrading an existing SQLite schema, startup preserves a verified standalone recovery
   snapshot including committed WAL pages and retains three private completed recovery points.
   Snapshot failure stops upgrade; explicit offline recovery still requires the matching server
-  version, deployment keys and local objects. The [offline archive procedure](docs/operations.md)
+  version, deployment keys and local objects. The [archive procedure](docs/operations.md)
   includes those local dependencies and restores only to an absent directory using the matching
-  build and original public origin. Scheduling, PostgreSQL and S3 archives remain roadmap gaps.
+  build and original public origin. Explicit online SQLite creation uses shared admission for
+  stable local files and plain/files TLS, rejects ACME and every managed cache path, and preserves
+  default exclusive offline creation. Operators exclude external file writers and provide the
+  same build/effective configuration. Scheduling, PostgreSQL and S3 archives remain roadmap gaps.
 - The repository is Exploration maturity until the roadmap evidence is complete. The baseline
   listener is useful for local development and reverse-proxy integration; it is not a complete
   production server.

@@ -462,6 +462,9 @@ It also exercises the encrypted offline archive through create, verify and fresh
 preserving original keys, objects, Account/Device authority and encrypted state across another
 persistent restart. See [backup and restore](docs/operations.md) for the supported SQLite/local
 filesystem profile and its matching-build, original-origin and external-TLS requirements.
+The separate online check keeps submitting encrypted public Device writes during capture,
+restores a consistent pre/post-marker state onto another fresh volume, and checks original
+Device authentication, decryption and team isolation across a further actual restart.
 The same check runs native `splctl doctor` against the container's configured public HTTPS
 origin, verifies fixed successful findings, stopped-service failure and restart recovery,
 and checks that the diagnostic inputs and absent local deployment state remain unchanged.
@@ -1236,6 +1239,10 @@ links are private deployment material; keep the data directory out of source con
 backups. Copying only `scoplen.sqlite` while the server is running is not a consistent backup in WAL
 mode. Upgrade snapshots contain database material and need the same protection. They do not
 include object files, deployment/CA/audit keys, external key paths, or certificates. Preserve a
-consistent complete deployment backup before upgrading. Use [the offline `splctl backup`
-procedure](docs/operations.md) for encrypted SQLite/local-filesystem archives. Scheduled backups,
+consistent complete deployment backup before upgrading. Use [the `splctl backup`
+procedure](docs/operations.md) for encrypted SQLite/local-filesystem archives. Default creation
+is offline; explicit `backup create --online` supports stable local files with plain/static-files
+TLS while database requests continue. ACME and any managed cache path are refused online.
+Both profiles use the matching build, complete age archive and explicit fresh-directory restore.
+Scheduled backups,
 PostgreSQL archives and S3 archive storage remain roadmap work.

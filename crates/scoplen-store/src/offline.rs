@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Existing-only SQLite snapshots and verification for offline deployment archives.
+//! Existing-only SQLite snapshots and verification for deployment archives.
 
 use std::{fs::File, path::Path, sync::Arc};
 

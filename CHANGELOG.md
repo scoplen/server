@@ -4,6 +4,12 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add explicit `splctl backup create --online` for SQLite with stable local objects/keys and
+  plain or static-files TLS. Keep default exclusive offline creation, reject ACME and any
+  managed cache path online, and reuse the complete age archive and explicit fresh-directory
+  restore. Exercise continuous public encrypted writes and original Devices/team isolation
+  after online restoration and another restart, independently of the offline comparison.
+
 - Add Account-browser Snippet library management on SQLite and PostgreSQL and in the Account
   Console. Reuse the five typed inventory operations, current permissions, original-family
   receipts, conditional edits and the native complete-view/ACK contract. Edit Text, Integer,

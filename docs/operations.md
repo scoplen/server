@@ -2,7 +2,7 @@
 
 ## Current scope
 
-`splctl backup` creates a password-encrypted offline archive for a SQLite deployment with
+`splctl backup` creates a password-encrypted archive for a SQLite deployment with
 filesystem object storage and local key files. It includes a standalone database snapshot,
 the required deployment, KMS, audit and internal-CA keys, and every local object. Committed
 SQLite WAL pages are included in the snapshot; WAL and SHM files, deployment leases,
@@ -58,6 +58,39 @@ Verification checks authenticated decryption, the strict manifest and payload di
 integrity and foreign keys, available audit-chain proof, and required key material. Verification
 does not start a service or apply migrations. External TLS material and other external
 requirements are recorded for recovery; supply them separately when restarting.
+
+## Create while the server runs
+
+For SQLite with filesystem objects, local KMS and `tls.mode = "plain"` or `"files"`, add
+`--online` to capture a live standalone database snapshot while ordinary requests continue:
+
+```sh
+splctl backup create --online --config server.toml --output backup.age --passphrase-file backup-passphrase.txt
+splctl backup verify --archive backup.age --passphrase-file backup-passphrase.txt
+```
+
+Use the same build and effective TOML/environment settings as the running deployment. All
+required state must already exist. Prevent external processes from changing captured key,
+object or managed static-TLS files during the operation. Current server business writes keep
+these files stable; Account, token-key and team-CA changes are captured in SQL. Online creation
+rejects ACME mode and any `acme-cache` path, including an empty directory, file or link, or a
+path whose absence cannot be established safely. It never omits that state or falls back to
+offline creation. External KMS, S3 and PostgreSQL are unsupported.
+
+Online creation holds a shared deployment lease for its entire lifetime and is refused while
+an exclusive local operation is running. The default command still requires every deployment
+process to stop and obtains exclusive admission. Neither command initializes or migrates the
+source. A snapshot is a consistent point during capture, so writes completed later need not
+appear in the archive. Copying, validation and encryption consume I/O and CPU; a live read
+snapshot can retain WAL pages. There is no fixed latency or storage guarantee.
+
+For Personal Compose, run the matching image's `/app/splctl` as UID 65532 with the same data
+volume, configuration, TLS mount and environment overrides as the service. Mount a separate
+private backup directory and passphrase file; the archive output and passphrase must remain
+outside the source data and object roots. Override the image entry point explicitly and keep
+the existing service running. Provision access for UID 65532 without widening source or secret
+permissions. Verification and the explicit fresh-volume restore below use the unchanged age
+archive and matching build; stop the original service before starting the restored service.
 
 ## Restore to a new directory
 
@@ -129,4 +162,7 @@ service once more and repeat those checks before retiring the original volume.
 The repository's `scripts/check-personal-container.mjs` exercises this workflow with disposable
 volumes, the public CLI, trusted HTTPS, existing in-memory Device credentials, encrypted Personal
 Hosts and team state. It also retains the separate ordinary restart and matching old-version
-migration-snapshot recovery checks.
+migration-snapshot recovery checks. Its separate online workflow continuously submits encrypted
+public Device writes during capture, checks pre-capture and post-completion markers, restores
+onto a fresh volume and verifies original Devices, decryption and team isolation across another
+actual restart. Online restoration is not compared for full equality with a newer source.

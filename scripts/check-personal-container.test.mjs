@@ -33,8 +33,138 @@ import {
   describeWalHolderFailure,
   prepareRecoveryProbeContext,
   runTeamRestart,
+  runOnlineBackup,
 } from "./check-personal-container.mjs";
 import { inspectDatabase } from "./personal-sqlite-recovery-probe.mjs";
+
+async function onlineTestDriver(fixture, signal, outsideInterval = false) {
+  const wait = async (name) => {
+    for (;;) {
+      if (signal.aborted) throw new Error("online test driver aborted");
+      try {
+        const contents = await readFile(
+          join(fixture, `online-backup.${name}`),
+          "utf8",
+        );
+        assert("continue\n".startsWith(contents));
+        if (contents === "continue\n") return;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      await new Promise((accept) => setTimeout(accept, 5));
+    }
+  };
+  const ready = async (name) => {
+    const path = join(fixture, `online-backup.${name}`);
+    await writeFile(path, "rea", { flag: "wx" });
+    await new Promise((accept) => setTimeout(accept, 60));
+    await writeFile(path, "dy\n", { flag: "a" });
+  };
+  await ready("ready");
+  await wait("start");
+  const written = outsideInterval ? 0 : Date.now();
+  await wait("complete");
+  await writeFile(
+    join(fixture, "online-backup-writes.json"),
+    JSON.stringify([written]),
+  );
+  await ready("post");
+  await wait("resume");
+  await ready("restored");
+  await wait("restart");
+  await writeFile(
+    join(fixture, "online-backup-acceptance.json"),
+    JSON.stringify({
+      online_public_writes_verified: true,
+      online_restored_device_team_verified: true,
+      online_restored_restart_verified: true,
+    }),
+  );
+}
+
+test("online archive controller requires writes before restoring and retains the driver across restart", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-online-archive-test-"));
+  const phases = [];
+  try {
+    await runOnlineBackup({
+      fixture,
+      run: (signal) => onlineTestDriver(fixture, signal),
+      capture: async () => {
+        phases.push("capture");
+        await new Promise((accept) => setTimeout(accept, 100));
+      },
+      restore: async () => {
+        phases.push("restore");
+        await assert.rejects(readFile(join(fixture, "online-backup.resume")), {
+          code: "ENOENT",
+        });
+      },
+      restart: async () => {
+        phases.push("restart");
+        await assert.rejects(readFile(join(fixture, "online-backup.restart")), {
+          code: "ENOENT",
+        });
+      },
+    });
+    assert.deepEqual(phases, ["capture", "restore", "restart"]);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("online archive controller refuses write receipts outside capture without restoring", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-online-archive-test-"));
+  let restored = false;
+  try {
+    await assert.rejects(
+      runOnlineBackup({
+        fixture,
+        run: (signal) => onlineTestDriver(fixture, signal, true),
+        capture: async () => {
+          await new Promise((accept) => setTimeout(accept, 100));
+        },
+        restore: async () => {
+          restored = true;
+        },
+        restart: async () => {},
+      }),
+      /no confirmed public write/,
+    );
+    assert.equal(restored, false);
+    await assert.rejects(readFile(join(fixture, "online-backup.resume")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("failed online capture aborts its driver without restoration or a completion signal", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-online-archive-test-"));
+  let restored = false;
+  try {
+    await assert.rejects(
+      runOnlineBackup({
+        fixture,
+        run: (signal) => onlineTestDriver(fixture, signal),
+        capture: async () => {
+          throw new Error("capture failed");
+        },
+        restore: async () => {
+          restored = true;
+        },
+        restart: async () => {},
+      }),
+      /capture failed/,
+    );
+    assert.equal(restored, false);
+    await assert.rejects(readFile(join(fixture, "online-backup.complete")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
 
 test("archive acceptance requires command success and the matching confirmation before optional mappings", () => {
   for (const [operation, first] of [

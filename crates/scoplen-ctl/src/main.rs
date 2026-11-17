@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create, verify or restore an encrypted offline deployment archive.
+    /// Create, verify or restore an encrypted deployment archive.
     Backup {
         #[command(subcommand)]
         command: backup::Command,

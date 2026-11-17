@@ -46,8 +46,21 @@ impl Fixture {
     }
 
     fn create(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_splctl"))
-            .args(["backup", "create", "--config"])
+        self.capture(false)
+    }
+
+    fn create_online(&self) -> Output {
+        self.capture(true)
+    }
+
+    fn capture(&self, online: bool) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_splctl"));
+        command.args(["backup", "create"]);
+        if online {
+            command.arg("--online");
+        }
+        command
+            .arg("--config")
             .arg(&self.config)
             .arg("--output")
             .arg(&self.archive)
@@ -78,6 +91,161 @@ impl Fixture {
             .output()
             .expect("public backup restore")
     }
+}
+
+#[tokio::test]
+async fn online_shared_admission_never_authorizes_the_offline_library_entry() {
+    let fixture = Fixture::new();
+    let config = Config::load(&fixture.config).expect("existing source config");
+    let shared = DeploymentLease::try_shared(&fixture.data).expect("running deployment lease");
+    assert!(
+        scoplen_server::backup::create(&config, &fixture.archive, &fixture.passphrase, &shared,)
+            .await
+            .is_err()
+    );
+    assert!(!fixture.archive.exists());
+    failure(&fixture.create());
+    success(&fixture.create_online(), "Backup created.");
+    success(&Fixture::verify(&fixture.archive, &fixture.passphrase), "Backup verified.");
+    let restored = fixture.directory.join("online-restored");
+    success(
+        &Fixture::restore(&fixture.archive, &restored, &fixture.passphrase),
+        "Backup restored.",
+    );
+    assert_eq!(
+        fs::read(restored.join("objects/nested/binary-object")).expect("retained object"),
+        OBJECT
+    );
+    drop(shared);
+    fs::remove_file(&fixture.archive).expect("remove owned archive");
+    let exclusive = DeploymentLease::try_exclusive(&fixture.data).expect("offline operation lease");
+    failure(&fixture.create_online());
+    assert!(!fixture.archive.exists());
+    drop(exclusive);
+}
+
+#[test]
+fn online_refuses_every_managed_cache_path_and_missing_keys_without_repair() {
+    let fixture = Fixture::new();
+    let cache = fixture.data.join("acme-cache");
+    fs::create_dir(&cache).expect("empty managed cache");
+    failure(&fixture.create_online());
+    assert!(cache.is_dir());
+    fs::remove_dir(&cache).expect("remove owned cache");
+    private_write(&cache, b"not a directory");
+    failure(&fixture.create_online());
+    fs::remove_file(&cache).expect("remove owned cache file");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(fixture.data.join("absent-cache"), &cache)
+            .expect("dangling cache link");
+        failure(&fixture.create_online());
+        fs::remove_file(&cache).expect("remove owned cache link");
+    }
+    let key = fixture.data.join("audit-signing.key");
+    fs::remove_file(&key).expect("remove owned required key");
+    failure(&fixture.create_online());
+    assert!(!key.exists());
+    assert!(!fixture.archive.exists());
+}
+
+#[test]
+fn online_refuses_valid_unsupported_profiles_and_source_overlap() {
+    let fixture = Fixture::new();
+    for (extra, phase) in [
+        (
+            "[tls]\nmode = 'acme'\nacme_email = 'operator@example.com'\n",
+            "online backup does not support ACME",
+        ),
+        (
+            "[storage]\nbackend = 'postgres'\ndatabase_url = 'postgres://localhost/scoplen'\n",
+            "this backup profile supports only SQLite",
+        ),
+        (
+            "[storage.object]\nbackend = 's3'\ns3_bucket = 'scoplen-synthetic-backup-test'\n",
+            "this backup profile requires local filesystem objects",
+        ),
+    ] {
+        fs::write(&fixture.config, format!("{}\n{extra}", configuration(&fixture.data)))
+            .expect("unsupported config");
+        let config = Config::load(&fixture.config).expect("valid deployment configuration");
+        config
+            .validate_for_roles(&[scoplen_server::Role::Api])
+            .expect("valid API-role configuration");
+        let output = fixture.create_online();
+        failure(&output);
+        assert_eq!(
+            std::str::from_utf8(&output.stderr).unwrap(),
+            format!("splctl: backup failed: {phase}\n")
+        );
+        assert!(!fixture.archive.exists());
+    }
+    fs::write(&fixture.config, configuration(&fixture.data)).expect("restore owned config");
+    let output = fixture.data.join("forbidden.age");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_splctl"))
+        .args(["backup", "create", "--online", "--config"])
+        .arg(&fixture.config)
+        .arg("--output")
+        .arg(&output)
+        .arg("--passphrase-file")
+        .arg(&fixture.passphrase)
+        .output()
+        .expect("overlap rejection");
+    failure(&rejected);
+    assert!(!output.exists());
+}
+
+#[test]
+fn online_refuses_kms_configuration_unsupported_by_the_server_baseline() {
+    let fixture = Fixture::new();
+    fs::write(
+        &fixture.config,
+        format!("{}\n[storage.kms]\nbackend = 'external'\n", configuration(&fixture.data)),
+    )
+    .expect("unsupported baseline KMS config");
+    let config = Config::load(&fixture.config).expect("syntactically valid KMS configuration");
+    assert!(config.validate_for_roles(&[scoplen_server::Role::Api]).is_err());
+    failure(&fixture.create_online());
+    assert!(!fixture.archive.exists());
+}
+
+#[test]
+fn online_static_tls_preserves_managed_files_and_existing_output() {
+    let fixture = Fixture::new();
+    let certificate = fixture.data.join("internal-ca.pem");
+    let key = fixture.data.join("internal-ca-key.pem");
+    fs::write(
+        &fixture.config,
+        format!(
+            "{}\n[tls]\nmode = 'files'\ncert_file = '{}'\nkey_file = '{}'\n",
+            configuration(&fixture.data),
+            certificate.display().to_string().replace('\\', "/"),
+            key.display().to_string().replace('\\', "/"),
+        ),
+    )
+    .expect("managed static TLS config");
+    success(&fixture.create_online(), "Backup created.");
+    let archive = fs::read(&fixture.archive).expect("completed online archive");
+    failure(&fixture.create_online());
+    assert!(
+        fs::read(&fixture.archive).expect("preserved archive") == archive,
+        "existing online archive must be preserved"
+    );
+    let restored = fixture.directory.join("static-tls-restored");
+    success(
+        &Fixture::restore(&fixture.archive, &restored, &fixture.passphrase),
+        "Backup restored.",
+    );
+    assert!(
+        fs::read(restored.join("tls/certificate.pem")).expect("restored cert")
+            == fs::read(certificate).expect("original cert"),
+        "managed certificate bytes must be retained"
+    );
+    assert!(
+        fs::read(restored.join("tls/private-key.pem")).expect("restored key")
+            == fs::read(key).expect("original key"),
+        "managed private-key bytes must be retained"
+    );
 }
 
 impl Drop for Fixture {

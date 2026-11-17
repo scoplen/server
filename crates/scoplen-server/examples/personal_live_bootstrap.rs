@@ -90,6 +90,8 @@ enum Command {
         #[arg(long, requires = "with_team")]
         across_restart: bool,
     },
+    /// Once only: retain independent Devices across a live archive and restored restart.
+    VerifyOnlineBackup { directory: PathBuf },
     /// Once only: verify ordinary password change, existing Devices and Personal continuity.
     VerifyPasswordChange { directory: PathBuf },
     /// Once only: register two password Accounts for independent browser team acceptance.
@@ -219,6 +221,24 @@ async fn run(command: Command) -> Result<()> {
                 )?;
             }
             println!("public Account password and encrypted sync check passed");
+        }
+        Command::VerifyOnlineBackup { directory } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            write_private(&directory.join("online-backup.started"), "One attempt only.")?;
+            tokio::time::timeout(
+                Duration::from_secs(300),
+                Box::pin(account::verify_online_backup(&https, &directory)),
+            )
+            .await
+            .map_err(|_| "online backup check exceeded its deadline; abandon this fixture")??;
+            write_private(
+                &directory.join("online-backup-acceptance.json"),
+                "{\"online_public_writes_verified\":true,\"online_restored_device_team_verified\":true,\"online_restored_restart_verified\":true}",
+            )?;
+            println!("public online archive and restored Device check passed");
         }
         Command::PrepareBrowserAccounts { directory, server_pid } => {
             let directory = canonical_fixture_directory(&directory)?;
