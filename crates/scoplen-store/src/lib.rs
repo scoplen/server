@@ -6,12 +6,14 @@
 pub mod account_admission_capabilities;
 pub mod account_bootstrap;
 pub mod account_browser_sessions;
+mod account_credential_generation;
 pub mod account_device_admission;
 pub mod account_devices;
 pub mod account_entry_admission;
 pub mod account_key_publication;
 pub mod account_keys;
 mod account_operation_receipts;
+pub mod account_password_change;
 pub mod account_password_login;
 pub mod account_probe_key;
 pub mod account_profile;

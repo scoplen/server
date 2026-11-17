@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/cb93ede22d51272c24c7fd1f64bd09a46d96b08f/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/75907c42de02185af0a1eb22f0bc9586b3073a0d/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -169,6 +169,8 @@ export interface components {
     AccountBrowserLogoutResponse: AccountBrowserLogoutResponse;
     AccountRegistrationRequest: AccountRegistrationRequest;
     AccountDeviceAdmissionRequest: AccountDeviceAdmissionRequest;
+    AccountPasswordChangeRequest: AccountPasswordChangeRequest;
+    AccountPasswordChangeConfirmation: AccountPasswordChangeConfirmation;
     AccountCommittedConfirmation: AccountCommittedConfirmation;
     AccountEntryInvalidRequestProblem: AccountEntryInvalidRequestProblem;
     AccountEntryAuthenticationRequiredProblem: AccountEntryAuthenticationRequiredProblem;
@@ -589,7 +591,7 @@ export type OperatorLogoutStorageFailureProblem = AuthStorageUnavailableProblem 
 
 // BEGIN GENERATED AccountAdmission
 export interface AccountRequestChallengeRequest {
-  kind: "register" | "admit";
+  kind: "register" | "admit" | "password_change";
   intent: "submit" | "confirm";
   operation_id: string;
   device_id: string;
@@ -647,6 +649,18 @@ export interface AccountDeviceAdmissionFields {
   device_proof: string;
 }
 
+export type AccountPasswordChangeRequest =
+  | (AccountPasswordChangeFields & { intent: "submit"; admission_token: string })
+  | (AccountPasswordChangeFields & { intent: "confirm"; admission_token: null });
+
+export interface AccountPasswordChangeFields {
+  payload: string;
+  account_signature: string;
+  attempt_id: string;
+  nonce: string;
+  device_proof: string;
+}
+
 export interface AccountCommittedConfirmation {
   outcome: "committed";
   kind: "register" | "admit";
@@ -656,6 +670,18 @@ export interface AccountCommittedConfirmation {
   personal_vault_id: string;
   device_id: string;
   admitted_key_revision: string;
+  [extension: string]: unknown;
+}
+
+export interface AccountPasswordChangeConfirmation {
+  outcome: "committed";
+  kind: "password_change";
+  operation_id: string;
+  request_digest: string;
+  account_id: string;
+  personal_vault_id: string;
+  device_id: string;
+  credential_generation: string;
   [extension: string]: unknown;
 }
 

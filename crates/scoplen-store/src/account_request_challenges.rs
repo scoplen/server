@@ -92,6 +92,7 @@ fn binding(
     let kind = match request.kind {
         AccountRequestKind::Register => 1,
         AccountRequestKind::Admit => 2,
+        AccountRequestKind::PasswordChange => 3,
     };
     let intent = match request.intent {
         AccountRequestIntent::Submit => 1,
@@ -187,7 +188,7 @@ macro_rules! challenge_store {
                 return Err(AccountEntryStateError::Integrity);
             }
             if retained_origin.len()!=32 || operation.len()!=16 || device.len()!=16
-                || !(1..=2).contains(&retained_kind) || !(1..=2).contains(&retained_intent) {
+                || !(1..=3).contains(&retained_kind) || !(1..=2).contains(&retained_intent) {
                 return Err(AccountEntryStateError::Integrity);
             }
             if now<issued || now>=expires{return Ok(None);}
@@ -198,7 +199,7 @@ macro_rules! challenge_store {
             if sqlx::query("UPDATE account_entry_state SET challenge_rows=challenge_rows-1 WHERE singleton=1")
                 .execute(&mut **tx).await?.rows_affected()!=1 {return Err(AccountEntryStateError::Integrity);}
             Ok(Some(ClaimedAccountRequestChallenge{
-                kind:if retained_kind==1 {AccountRequestKind::Register}else{AccountRequestKind::Admit},
+                kind:match retained_kind {1=>AccountRequestKind::Register,2=>AccountRequestKind::Admit,_=>AccountRequestKind::PasswordChange},
                 intent:if retained_intent==1 {AccountRequestIntent::Submit}else{AccountRequestIntent::Confirm},
                 expires_at_ms:expires,nonce_matches:retained==supplied,
                 bindings_match:retained_origin.as_slice()==origin.as_slice() && retained_kind==kind && retained_intent==intent
@@ -229,7 +230,7 @@ macro_rules! challenge_store {
             }
             if outcome!=AccountRequestChallengeOutcome::TerminalConfirmation {
                 let mut event=b"spl-account-request-outcome-v1".to_vec();
-                event.extend_from_slice(&[match claim.kind {AccountRequestKind::Register=>1,AccountRequestKind::Admit=>2},
+                event.extend_from_slice(&[match claim.kind {AccountRequestKind::Register=>1,AccountRequestKind::Admit=>2,AccountRequestKind::PasswordChange=>3},
                     match claim.intent {AccountRequestIntent::Submit=>1,AccountRequestIntent::Confirm=>2},
                     u8::from(outcome==AccountRequestChallengeOutcome::Committed)]);
                 event.extend_from_slice(&now.to_be_bytes());

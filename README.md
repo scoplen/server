@@ -122,13 +122,13 @@ remains available. Restart and ordinary token-key rotation preserve Kprobe.
 API startup initializes Kprobe before serving Account entry. Intentional Kprobe replacement is not exposed.
 
 Account-entry admission and request-challenge storage is independent of Device and Operator
-authentication. Its five endpoint windows, cooldowns, bounded capacity and monotonic database
+authentication. Its independent endpoint windows, cooldowns, bounded capacity and monotonic database
 time survive restart and are shared by replicas. Challenges retain only digests, expire after
 two minutes and can be consumed with business state and deployment audit in one transaction.
 Bounded indexed maintenance removes expired transient state without discarding live debt.
-The API mounts native request-challenge, registration, password options/login and Device-admission
-routes. Each charges source before collecting the body and rejects browser credentials, queries
-and untrusted Origin. Registration, password login and Device admission share 16 concurrent proof
+The API mounts native request-challenge, registration, password options/login, Device-admission
+and ordinary password-change routes. Each charges source before collecting the body and rejects browser credentials, queries
+and untrusted Origin. Registration, password login, Device admission and password change share 16 concurrent proof
 jobs without a waiting queue, bound body/precommit preparation, and never deadline-cancel an
 attempted business COMMIT. A confirmed
 submit returns 201; explicit exact confirmation returns 200 without granting session authority.
@@ -169,11 +169,12 @@ The initial password Account storage helper creates a new Account, active Device
 Personal epoch-one key, exact accepted K-4 PUT and generation-one credential in the caller's
 SQLite/PostgreSQL transaction. Only the fixed verifier and public/encrypted bootstrap state are
 stored. A creation-only ownership marker distinguishes legacy Accounts from damaged password
-Accounts; missing credentials fail closed. Database guards prevent ownership conversion,
-credential replacement and standalone deletion, while parent Account deletion cascades its
+Accounts; missing credentials fail closed. Database guards prevent ownership conversion and
+standalone deletion, and require credential generations to advance. Parent Account deletion cascades its
 credential. The bounded current-snapshot reader validates complete signatures and recipients,
 accepted evidence, root/ownership anchors and the supported Personal state. Other epochs,
-pending rotation and credential/root changes are unsupported. Password Account key publication
+pending rotation and root changes are unsupported. Only D-152's dedicated coordinator may
+replace the password credential; current positive credential generations remain readable. Password Account key publication
 preserves protected artifacts and existing wraps; lower-level new PUTs, independent statement
 replacement and Personal recreation are rejected. Authorized exact publication replay remains
 available. These helpers never commit, authorize an operation or issue a session/capability.
@@ -222,8 +223,37 @@ codes and change/retry flags preserve the coordinator's outcome, including unkno
 COMMIT results. Full inactive Account enforcement and complete V3 acceptance remain separate
 work. The current schema does not represent active/suspended Account state.
 
+Native `POST /api/v1/auth/accounts/password-changes` changes a known current password from an
+existing enrolled Device. Obtain a fresh capability through the ordinary native password login,
+then sign the exact D-152 payload with the current Account root and that same active, admitted,
+unrevoked Device. The Account transaction rechecks the complete snapshot and exact successor
+generation. It atomically replaces only the password salt, verifier, encrypted password ARK
+wrapper and generation, with one immutable receipt and deployment success audit. Account roots,
+K-4 bundle/revision, Device certificates/wraps, recovery material, Personal objects/epochs and
+Organization state remain unchanged. Both capability consumers serialize the same one-use claim.
+
+Existing native Device sessions and synchronization remain eligible. Older Account-browser
+access and refresh credentials fail their existing current-generation check; sign in again with
+the new password. This operation does not remove a Device or rotate the ARK, and a copied old
+wrapper is not made cryptographically unusable. Recovery and browser password-change UI remain
+separate work. The schema still has no Account-wide active/suspended state.
+
+The new route shares strict native metadata, the 16-job proof bound and 15-second preparation
+budget. Its encoded request is at most 16,384 bytes, protected CBOR 8,192 bytes and success JSON
+1,024 bytes. Confirmed new changes return 201; fresh-proof, null-capability `confirm` returns 200
+only for the original receipt. Retain the exact payload/signature after `auth.commit_outcome_unknown`;
+a new password login or matching generation cannot confirm that operation. Historical confirmation
+survives later password changes or Device revocation, grants no present authority and adds no
+success audit. Account deletion removes the receipt.
+
+The forward migrations preserve populated credentials, capabilities, challenges, rate debt,
+original receipts and browser-family/token children. Credential generations use fixed-width
+unsigned storage on both backends; initial registration remains generation one. Stop old writers
+before upgrading, retain the matching deployment backup, and use the existing SQLite migration
+snapshot/offline recovery procedure if an upgrade fails. Mixed-version writers are unsupported.
+
 Receipts retain the exact request digest, original ids, canonical original Device public points,
-Account signing root, revision and trusted time: 275 application bytes each, at most 65,536
+Account signing root, committed key revision or credential generation and trusted time: 275 application bytes each, at most 65,536
 per Account, deleted with that Account. No encrypted bundle, verifier or bearer is copied into
 them. Deployment-wide Device freshness covers retained receipts and all current certificates,
 revocations and admission rows, including legacy Accounts and cross-role SEC1 equivalence.
@@ -264,7 +294,7 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@cb93ede`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@75907c4`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 D-151 supplies shared CSV preparation, typed atomic import messages and the thin browser export.
 D-150 adds the six shared single-Host access-request operations, exact Device/browser scopes,
@@ -273,7 +303,7 @@ on SQLite and PostgreSQL, including atomic finite-Grant approval and independent
 The Account Console provides My requests, Approvals and ordinary request-access rules.
 D-148 corrects composed SSH transport loss in `scoplen-ssh`, which this workspace does not
 consume. This pin adds no server SSH reconnect behavior.
-All five published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
+All six published native Account-entry endpoints are mounted on SQLite and PostgreSQL.
 The sync service retains encrypted object envelopes without reading their Credential fields.
 Server-hosted SSH and agent execution remain separate roadmap work.
 

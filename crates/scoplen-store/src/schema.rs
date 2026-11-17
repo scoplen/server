@@ -2259,7 +2259,7 @@ const ACCOUNT_PASSWORD_BOOTSTRAP: TableSpec = TableSpec {
         },
         ColumnSpec {
             name: "credential_generation",
-            kind: LogicalType::Integer,
+            kind: LogicalType::Bytes,
             nullable: false,
             primary_key: false,
         },
@@ -2374,7 +2374,13 @@ const ACCOUNT_OPERATION_RECEIPTS: TableSpec = TableSpec {
         ColumnSpec {
             name: "admitted_key_revision",
             kind: LogicalType::Integer,
-            nullable: false,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential_generation",
+            kind: LogicalType::Bytes,
+            nullable: true,
             primary_key: false,
         },
         ColumnSpec {
@@ -2620,7 +2626,7 @@ const ACCOUNT_BROWSER_FAMILIES: TableSpec = TableSpec {
         },
         ColumnSpec {
             name: "credential_generation",
-            kind: LogicalType::Integer,
+            kind: LogicalType::Bytes,
             nullable: false,
             primary_key: false,
         },
@@ -2824,7 +2830,7 @@ const ACCOUNT_ADMISSION_CAPABILITIES: TableSpec = TableSpec {
         },
         ColumnSpec {
             name: "credential_generation",
-            kind: LogicalType::Integer,
+            kind: LogicalType::Bytes,
             nullable: false,
             primary_key: false,
         },
@@ -4265,6 +4271,11 @@ mod tests {
     const POSTGRES_ACCESS_REQUESTS: &str =
         include_str!("../migrations/postgres/20261117010000_access_requests.sql");
 
+    const SQLITE_PASSWORD_CHANGE: &str =
+        include_str!("../migrations/sqlite/20261117020000_account_password_change.sql");
+    const POSTGRES_PASSWORD_CHANGE: &str =
+        include_str!("../migrations/postgres/20261117020000_account_password_change.sql");
+
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).expect("create isolated test directory");
@@ -4323,6 +4334,7 @@ mod tests {
             SQLITE_USER_CA_KRL,
             SQLITE_HOST_GRANTS,
             SQLITE_ACCESS_REQUESTS,
+            SQLITE_PASSWORD_CHANGE,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4362,6 +4374,7 @@ mod tests {
             POSTGRES_USER_CA_KRL,
             POSTGRES_HOST_GRANTS,
             POSTGRES_ACCESS_REQUESTS,
+            POSTGRES_PASSWORD_CHANGE,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

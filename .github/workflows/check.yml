@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: scoplen/proto
-          ref: cb93ede22d51272c24c7fd1f64bd09a46d96b08f
+          ref: 75907c42de02185af0a1eb22f0bc9586b3073a0d
           path: proto
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -169,6 +169,10 @@ jobs:
         run: cargo test --locked -p scoplen-store --test account_password_login --features postgres-integration -- --test-threads=1
       - name: Check independent Device admission and exact historical confirmation
         run: cargo test --locked -p scoplen-store --test account_device_admission --features postgres-integration -- --test-threads=1
+      - name: Check known-password changes and populated credential migrations
+        run: >-
+          cargo test --locked -p scoplen-store --features postgres-integration
+          --test account_password_change --test account_password_change_migrations -- --test-threads=1
       - name: Check native Account entry, team lifecycle HTTP and startup on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2

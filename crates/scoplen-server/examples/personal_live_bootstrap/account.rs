@@ -56,6 +56,12 @@ const ADMIT: &str = "/api/v1/auth/accounts/device-admissions";
 mod audit;
 #[path = "grants.rs"]
 mod grants;
+#[path = "password_change.rs"]
+mod password_change;
+
+pub(super) async fn verify_password_change(https: &Https) -> Result<()> {
+    password_change::verify(https).await
+}
 
 pub(super) async fn verify_audit(https: &Https) -> Result<()> {
     audit::verify(https).await

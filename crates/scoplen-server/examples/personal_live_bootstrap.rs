@@ -52,6 +52,7 @@ const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
 const LOGOUT: &str = "/api/v1/auth/operator/logout";
 const GRANTS_ACCEPTANCE: &str = "{\"grant_device_browser_https_verified\":true,\"grant_certificate_expiry_verified\":true,\"grant_lifecycle_tenant_verified\":true,\"grant_personal_sync_preserved\":true}";
 const REQUESTS_ACCEPTANCE: &str = "{\"request_device_browser_https_verified\":true,\"request_current_routing_tenant_verified\":true,\"request_original_confirmation_verified\":true,\"request_personal_sync_preserved\":true}";
+const PASSWORD_CHANGE_ACCEPTANCE: &str = "{\"password_change_native_https_verified\":true,\"password_change_browser_generation_verified\":true,\"password_change_historical_receipt_verified\":true}";
 
 #[derive(Parser)]
 #[command(about = "Disposable loopback HTTPS fixture; never use a real deployment or passkey")]
@@ -89,6 +90,8 @@ enum Command {
         #[arg(long, requires = "with_team")]
         across_restart: bool,
     },
+    /// Once only: verify ordinary password change, existing Devices and Personal continuity.
+    VerifyPasswordChange { directory: PathBuf },
     /// Once only: register two password Accounts for independent browser team acceptance.
     PrepareBrowserAccounts {
         directory: PathBuf,
@@ -241,6 +244,7 @@ async fn run(command: Command) -> Result<()> {
             println!("public Device and Account-browser audit check passed");
         }
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
+        Command::VerifyPasswordChange { directory } => verify_password_change(&directory).await?,
         Command::VerifyRequests { directory } => verify_requests(&directory).await?,
         Command::VerifyInventoryImport { directory } => verify_inventory_import(&directory).await?,
         Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments, false).await?,
@@ -326,6 +330,30 @@ async fn verify_grants(directory: &Path) -> Result<()> {
     .map_err(|_| "Grant check task failed; abandon this fixture")??;
     write_private(&directory.join("grants-acceptance.json"), GRANTS_ACCEPTANCE)?;
     println!("public Device and Account-browser Grant HTTPS check passed");
+    Ok(())
+}
+
+async fn verify_password_change(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("password-change-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(240),
+            Box::pin(account::verify_password_change(&https)),
+        )
+        .await
+        .map_err(|_| "Password-change check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Password-change check task failed; abandon this fixture")??;
+    write_private(&directory.join("password-change-acceptance.json"), PASSWORD_CHANGE_ACCEPTANCE)?;
+    println!("public password-change, Device and Personal continuity HTTPS check passed");
     Ok(())
 }
 
@@ -1197,6 +1225,31 @@ mod tests {
         assert!(!scratch.0.join("grants-acceptance.json").exists());
         assert_eq!(
             run(Command::VerifyGrants { directory: scratch.0.clone() }).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
+    }
+
+    #[tokio::test]
+    async fn password_change_failure_publishes_nothing_and_refuses_replay() {
+        assert!(Cli::try_parse_from(["consumer", "verify-password-change", "unused"]).is_ok());
+        let value: serde_json::Value = serde_json::from_str(PASSWORD_CHANGE_ACCEPTANCE).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 3);
+        for name in [
+            "password_change_native_https_verified",
+            "password_change_browser_generation_verified",
+            "password_change_historical_receipt_verified",
+        ] {
+            assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
+        }
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || Command::VerifyPasswordChange { directory: scratch.0.clone() };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("password-change-check.started").is_file());
+        assert!(!scratch.0.join("password-change-acceptance.json").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
             "could not exclusively write private fixture material"
         );
     }

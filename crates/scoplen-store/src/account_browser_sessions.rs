@@ -99,7 +99,7 @@ pub struct CurrentAccountBrowserSession {
     pub expires_at_ms: i64,
     access_digest: [u8; 32],
     origin: String,
-    credential_generation: i64,
+    credential_generation: u64,
 }
 impl fmt::Debug for CurrentAccountBrowserSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -235,7 +235,7 @@ macro_rules! browser_store {
             let query=concat!("SELECT f.account_id,f.family_id,f.dpop_jkt,f.scope,f.credential_generation,f.trusted_origin,f.created_at_ms,f.expires_at_ms AS family_expires,f.revoked_at_ms,t.issued_at_ms,t.expires_at_ms,b.credential_generation AS current_generation,b.origin AS credential_origin,b.password_profile AS current_profile,a.password_owned FROM account_browser_access_tokens t JOIN account_browser_families f ON f.family_id=t.family_id JOIN account_password_bootstrap b ON b.account_id=f.account_id JOIN identity_accounts a ON a.account_id=f.account_id WHERE t.token_digest=$1",$share);
             let Some(row)=sqlx::query(query).bind(digest.as_slice()).fetch_optional(&mut **tx).await? else {return Ok(None)};
             let now=now_ms()?;
-            let generation:i64=row.try_get("credential_generation")?;
+            let generation=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountBrowserSessionError::StorageUnavailable)?;
             let expires:i64=row.try_get("expires_at_ms")?;
             let scope:String=row.try_get("scope")?;
             if row.try_get::<String,_>("trusted_origin")?!=origin
@@ -243,7 +243,7 @@ macro_rules! browser_store {
                 || row.try_get::<i64,_>("current_profile")?!=1
                 || !valid_scope_ceiling(&scope)
                 || !row.try_get::<bool,_>("password_owned")?
-                || generation<=0 || generation!=row.try_get::<i64,_>("current_generation")?
+                || Some(generation)!=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("current_generation")?)
                 || now<row.try_get::<i64,_>("issued_at_ms")? || now>=expires
                 || now<row.try_get::<i64,_>("created_at_ms")? || now>=row.try_get::<i64,_>("family_expires")?
                 || (!allow_revoked && row.try_get::<Option<i64>,_>("revoked_at_ms")?.is_some()) {
@@ -344,7 +344,7 @@ macro_rules! browser_store {
                     }
                     let row=credential.ok_or(AccountBrowserSessionError::StorageUnavailable)?;
                     let account:[u8;16]=row.try_get::<Vec<u8>,_>("account_id")?.try_into().map_err(|_|AccountBrowserSessionError::StorageUnavailable)?;
-                    let generation:i64=row.try_get("credential_generation")?;
+                    let generation=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountBrowserSessionError::StorageUnavailable)?;
                     let established=AccountEntryPrivateBucket::EstablishedAccount(VerifiedAccountBucket::after_authentication(Uuid::from_bytes(account))?);
                     if let AccountEntryAdmissionDecision::RateLimited(wait)=$admit(&mut tx,endpoint,established).await? {
                         $audit(&mut tx,endpoint,source,AccountEntryFailureReason::RateLimited,&[]).await?;
@@ -360,7 +360,7 @@ macro_rules! browser_store {
                     let family_expires=now.checked_add(i64::try_from(ACCOUNT_BROWSER_FAMILY_SECONDS).map_err(|_|AccountBrowserSessionError::StorageUnavailable)?*1000).ok_or(AccountBrowserSessionError::StorageUnavailable)?;
                     let issued=issue_session(now,family_expires,true)?;
                     sqlx::query("INSERT INTO account_browser_families (family_id,account_id,credential_generation,dpop_jkt,trusted_origin,scope,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)")
-                        .bind(family.as_bytes().as_slice()).bind(account.as_slice()).bind(generation).bind(jkt).bind(origin).bind(INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE).bind(now).bind(family_expires).execute(&mut *tx).await?;
+                        .bind(family.as_bytes().as_slice()).bind(account.as_slice()).bind(generation.to_be_bytes().as_slice()).bind(jkt).bind(origin).bind(INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE).bind(now).bind(family_expires).execute(&mut *tx).await?;
                     Self::insert_account_browser_tokens(&mut tx,family.as_bytes(),now,&issued).await?;
                     sqlx::query("DELETE FROM account_password_attempts WHERE attempt_digest=$1").bind(digest.as_slice()).execute(&mut *tx).await?;
                     $outcome(&mut tx,endpoint,source,&[private,established],true).await?;
@@ -439,12 +439,12 @@ macro_rules! browser_store {
                     let now=$now(&mut tx).await?;
                     let account:[u8;16]=row.try_get::<Vec<u8>,_>("account_id")?.try_into().map_err(|_|AccountBrowserSessionError::StorageUnavailable)?;
                     let family:[u8;16]=row.try_get::<Vec<u8>,_>("family_id")?.try_into().map_err(|_|AccountBrowserSessionError::StorageUnavailable)?;
-                    let generation:i64=row.try_get("credential_generation")?;
+                    let generation=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountBrowserSessionError::StorageUnavailable)?;
                     let family_expires:i64=row.try_get("expires_at_ms")?;
                     if row.try_get::<String,_>("dpop_jkt")?!=jkt || row.try_get::<String,_>("trusted_origin")?!=origin
                         || row.try_get::<String,_>("credential_origin")?!=origin || row.try_get::<i64,_>("current_profile")?!=1
                         || !valid_scope_ceiling(&row.try_get::<String,_>("scope")?)
-                        || !row.try_get::<bool,_>("password_owned")? || generation<=0 || generation!=row.try_get::<i64,_>("current_generation")?
+                        || !row.try_get::<bool,_>("password_owned")? || Some(generation)!=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("current_generation")?)
                         || row.try_get::<Option<i64>,_>("revoked_at_ms")?.is_some()
                         || now<row.try_get::<i64,_>("created_at_ms")? || family_expires.saturating_sub(now)<1000 {
                         $audit(&mut tx,endpoint,source,AccountEntryFailureReason::AuthenticationDenied,&[]).await?;

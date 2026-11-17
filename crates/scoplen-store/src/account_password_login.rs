@@ -333,8 +333,7 @@ macro_rules! password_store {
                         let id=Uuid::from_slice(&id).map_err(|_|AccountPasswordLoginError::StorageUnavailable)?;
                         valid_id(id)?;
                         account=Some(id);
-                        generation=row.try_get::<i64,_>("credential_generation")?;
-                        if generation<=0 {return Err(AccountPasswordLoginError::StorageUnavailable);}
+                        generation=crate::account_credential_generation::decode(&row.try_get::<Vec<u8>,_>("credential_generation")?).ok_or(AccountPasswordLoginError::StorageUnavailable)?;
                         if row.try_get::<i64,_>("password_profile")?==1 {
                             current_salt=Some(row.try_get::<Vec<u8>,_>("salt").map_err(|_|AccountPasswordLoginError::StorageUnavailable)?);
                         }
@@ -387,7 +386,7 @@ macro_rules! password_store {
                     drop(locked_verifier);
                     let locked_salt:Vec<u8>=locked.try_get("salt").map_err(|_|AccountPasswordLoginError::StorageUnavailable)?;
                     if !locked.try_get::<bool,_>("password_owned")? {return Err(AccountPasswordLoginError::StorageUnavailable);}
-                    if !current_proof || locked.try_get::<i64,_>("credential_generation")?!=generation
+                    if !current_proof || crate::account_credential_generation::decode(&locked.try_get::<Vec<u8>,_>("credential_generation")?)!=Some(generation)
                         || locked.try_get::<i64,_>("password_profile")?!=1 || locked_salt.as_slice()!=salt.as_slice() {
                         sqlx::query("DELETE FROM account_password_attempts WHERE attempt_digest=$1").bind(digest.as_slice()).execute(&mut *tx).await?;
                         $audit(&mut tx,endpoint,source,AccountEntryFailureReason::AuthenticationDenied,&[private,established]).await?;
@@ -415,7 +414,7 @@ macro_rules! password_store {
                         expires_at_ms:u64::try_from(capability_expires).map_err(|_|AccountPasswordLoginError::StorageUnavailable)?};
                     let _encoded=Zeroizing::new(response.to_json().map_err(|_|AccountPasswordLoginError::StorageUnavailable)?);
                     sqlx::query("INSERT INTO account_admission_capabilities (token_digest,account_id,credential_generation,snapshot_digest,issued_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6)")
-                        .bind(token_digest.as_slice()).bind(account.as_bytes().as_slice()).bind(generation)
+                        .bind(token_digest.as_slice()).bind(account.as_bytes().as_slice()).bind(generation.to_be_bytes().as_slice())
                         .bind(snapshot_digest.as_slice()).bind(now).bind(capability_expires).execute(&mut *tx).await?;
                     sqlx::query("DELETE FROM account_password_attempts WHERE attempt_digest=$1").bind(digest.as_slice()).execute(&mut *tx).await?;
                     $outcome(&mut tx,endpoint,source,&[private,established],true).await?;
