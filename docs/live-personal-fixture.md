@@ -308,8 +308,10 @@ Before registering Accounts or creating assets, the producer inspects the existi
 a fifteen-second deadline, captures bounded output and does not print it.
 
 Two random password Accounts register through public HTTPS and sign in as genuine
-Account-browser families. Through those public APIs the producer creates one team, named
-Member invitation, local user CA, loopback Host and Login. The Login uses `smoke`, direct
+Account-browser families. Through public APIs the producer creates one team, named Member
+invitation, local user CA, loopback Host and Login. CA setup uses the owner's genuinely
+authenticated Device, as required by that endpoint; team assets and Grants use browser
+authority. The Login uses `smoke`, direct
 route `0` and the Host's `default_profile`. One view policy permits the member to read both
 Host and Login. No ordinary connect policy is created and no certificate is pre-issued.
 The prepared Host and Login are read back unchanged through the member's browser session.

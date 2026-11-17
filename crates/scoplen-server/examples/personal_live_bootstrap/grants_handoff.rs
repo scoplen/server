@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     Browser, GrantFields, Https, InventoryType, ObjectType, Registration, Result, SimpleRule,
     SimpleRuleSelector, Uuid, asset, ca, create, create_team, exchange, inventory, invite, json,
-    rule, withdraw,
+    native, rule, withdraw,
 };
 use crate::{read_bounded, write_private};
 
@@ -256,7 +256,8 @@ pub(super) async fn prepare(
     let org = create_team(https, owner_browser.actor()).await?.id;
     let membership =
         invite(https, owner_browser.actor(), member_browser.actor(), &member, org).await?;
-    ca(https, owner_browser.actor(), org).await?;
+    let owner_token = owner.device.authenticate(https).await?;
+    ca(https, native(&owner, &owner_token), org).await?;
     let host_fields = json!({
         "name":"Owned Grant SSH target", "address":"127.0.0.1", "port":ssh.port,
     });
