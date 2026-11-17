@@ -78,7 +78,7 @@ fn executable(marker: &str, replaced: bool) -> Result<InventoryFields> {
     fields(&json!({
         "name": if replaced { "Team command revised" } else { "Team command" },
         "template": format!(
-            "printf '%s%s\\n' '{first}' '{second}'; printf '{format}\\n' '{{{{message}}}}' '{{{{count}}}}' '{{{{color}}}}'"
+            "printf '\\n%s%s\\n' '{first}' '{second}'; printf '{format}\\n' '{{{{message}}}}' '{{{{count}}}}' '{{{{color}}}}'"
         ),
         "variables": {
             "message": {"kind":1,"default":if replaced {"revised text"} else {"stored text"}},
