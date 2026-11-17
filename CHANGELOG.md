@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Align the Personal SQLite upgrade and recovery check with the password-change migration,
+  preserving the matching historical-image recovery anchor.
+
 - Add atomic CSV-prepared team inventory imports on SQLite and PostgreSQL. Create new Direct
   Hosts with usable default Logins, preserving reviewed order and permitted duplicate names
   and endpoints. Reuse current inventory permissions, quota, audit and original-writer
