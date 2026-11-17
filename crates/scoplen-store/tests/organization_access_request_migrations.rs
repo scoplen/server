@@ -96,13 +96,32 @@ macro_rules! constraints {
         assert!(sqlx::query(insert).bind(organization.as_bytes().as_slice()).bind(request.as_bytes().as_slice()).bind(&account)
             .bind(membership.as_bytes().as_slice()).bind(host.as_bytes().as_slice()).bind("pending").bind(b"{}".as_slice()).bind(86_400_123_i64)
             .execute($pool).await.is_err(),"terminal history retains its used identifier");
-        for endpoint in 46_i64..=49 {
+        for endpoint in 46_i64..=50 {
             sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES ($1,1,$2,1000,1,0,1001,601001)")
                 .bind(endpoint).bind([127_u8,0,0,1].as_slice()).execute($pool).await.unwrap();
         }
-        assert!(sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (50,1,$1,1000,1,0,1001,601001)")
-            .bind([127_u8,0,0,1].as_slice()).execute($pool).await.is_err());
+        for endpoint in [0_i64,51] {
+            let rejected=sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES ($1,1,$2,1000,1,0,1001,601001)")
+                .bind(endpoint).bind([127_u8,0,0,1].as_slice()).execute($pool).await.expect_err("latest endpoint bounds");
+            assert!(rejected.as_database_error().is_some_and(|error|error.is_check_violation()),"closed endpoint range remains enforced");
+        }
         request
+    }};
+}
+
+macro_rules! historical_admission_bound {
+    ($pool:expr) => {{
+        let rejected=sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (50,1,$1,1000,1,0,1001,601001)")
+            .bind([127_u8,0,0,1].as_slice()).execute($pool).await.expect_err("password-change endpoint requires its later migration");
+        assert!(rejected.as_database_error().is_some_and(|error|error.is_check_violation()),"access-request migration retains its historical endpoint bound");
+    }};
+}
+
+macro_rules! password_change_admission_retained {
+    ($pool:expr) => {{
+        let debt:(i64,i64,i64,Option<i64>,Option<i64>,i64,i64)=sqlx::query_as("SELECT window_start_ms,attempts,failure_streak,last_failure_ms,cooldown_until_ms,last_admitted_ms,retire_at_ms FROM account_entry_admission WHERE endpoint=50 AND kind=1 AND bucket_key=$1")
+            .bind([127_u8,0,0,1].as_slice()).fetch_one($pool).await.expect("retained password-change endpoint debt");
+        assert_eq!(debt,(1000,1,0,None,None,1001,601001));
     }};
 }
 
@@ -126,6 +145,10 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     old.migrations.to_mut().retain(|migration| migration.version < MIGRATION);
     old.run(&pool).await.unwrap();
     let ids = populate!(&pool);
+    let mut request_migration = sqlx::migrate!("./migrations/sqlite");
+    request_migration.migrations.to_mut().retain(|migration| migration.version <= MIGRATION);
+    request_migration.run(&pool).await.expect("published access-request migration");
+    historical_admission_bound!(&pool);
     pool.close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
@@ -133,6 +156,7 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
+    password_change_admission_retained!(store.pool());
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )
@@ -160,6 +184,10 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     old.migrations.to_mut().retain(|migration| migration.version < MIGRATION);
     old.run(&pool).await.unwrap();
     let ids = populate!(&pool);
+    let mut request_migration = sqlx::migrate!("./migrations/postgres");
+    request_migration.migrations.to_mut().retain(|migration| migration.version <= MIGRATION);
+    request_migration.run(&pool).await.expect("published access-request migration");
+    historical_admission_bound!(&pool);
     pool.close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
@@ -167,6 +195,7 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     store.pool().close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
+    password_change_admission_retained!(store.pool());
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )
