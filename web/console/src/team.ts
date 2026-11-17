@@ -20,12 +20,15 @@ import type {
   InventoryAccessProfileResource,
   InventoryRouteResource,
   InventoryHostGroupResource,
+  InventorySnippetFields,
+  InventorySnippetResource,
   GroupFields,
   GroupResource,
   PolicyFields,
   PolicyResource,
 } from "./generated/api.ts";
 import { object, text, timestamp, uuid } from "./wire.ts";
+import { snippetFields } from "./snippet-fields.ts";
 
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export interface RequestOptions {
@@ -75,13 +78,14 @@ export class RequestFailure extends Error {
 }
 
 export type InventoryKind =
-  "hosts" | "access-profiles" | "routes" | "host-groups";
+  "hosts" | "access-profiles" | "routes" | "host-groups" | "snippets";
 export type CollectionKind = InventoryKind | "groups" | "policies";
 export interface FieldsByKind {
   hosts: InventoryHostFields;
   "access-profiles": InventoryAccessProfileFields;
   routes: InventoryRouteFields;
   "host-groups": InventoryHostGroupFields;
+  snippets: InventorySnippetFields;
   groups: GroupFields;
   policies: PolicyFields;
 }
@@ -90,6 +94,7 @@ export interface ResourcesByKind {
   "access-profiles": InventoryAccessProfileResource;
   routes: InventoryRouteResource;
   "host-groups": InventoryHostGroupResource;
+  snippets: InventorySnippetResource;
   groups: GroupResource;
   policies: PolicyResource;
 }
@@ -328,6 +333,7 @@ export function parseFields<K extends InventoryKind>(
   kind: K,
   value: unknown,
 ): FieldsByKind[K] {
+  if (kind === "snippets") return snippetFields(value) as FieldsByKind[K];
   const input = object(value);
   const allowed: Record<InventoryKind, string[]> = {
     hosts: [
@@ -353,6 +359,7 @@ export function parseFields<K extends InventoryKind>(
     ],
     routes: ["name", "kind", "hops", "proxy", "command", "gateway_network"],
     "host-groups": ["name", "parent", "color", "defaults"],
+    snippets: ["name", "template", "variables", "tags", "folder"],
   };
   if (Object.keys(input).some((key) => !allowed[kind].includes(key)))
     throw new Error("Unsupported inventory field.");

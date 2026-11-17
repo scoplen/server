@@ -947,6 +947,49 @@ fieldset {
 .grant-list {
   margin-top: 28px;
 }
+.snippet-panel > .inline-actions {
+  margin-block: 20px;
+}
+.snippet-variable {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin-block: 20px;
+  padding: 16px 0;
+  min-width: 0;
+}
+.snippet-variable-heading,
+.snippet-choice-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 1fr);
+  gap: 16px;
+  align-items: end;
+  margin-block: 12px;
+}
+.snippet-choice-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.snippet-template {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    14px/1.6 "JetBrains Mono Variable",
+    monospace;
+  padding-block: 16px;
+  border-block: 1px solid var(--border);
+}
+.snippet-detail {
+  margin-block: 24px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 540px) {
+  .snippet-variable-heading,
+  .snippet-choice-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .snippet-choice-row > button {
+    justify-self: start;
+  }
+}
 @media (max-width: 390px) {
   .grant-preview > div {
     grid-template-columns: minmax(0, 1fr);

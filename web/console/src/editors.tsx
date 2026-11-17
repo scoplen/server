@@ -208,6 +208,7 @@ export function ResourceEditor({
           source: String(data.get("source")),
           enabled: data.has("enabled"),
         };
+      else if (kind === "snippets") throw new Error("Use the Snippet editor.");
       else fields = fieldsFromForm(kind, data);
     } catch {
       setError(true);

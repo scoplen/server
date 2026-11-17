@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/e868b230ef01879ab9ac35c0afa4d227607fb06b/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/b0bc92267422f352645266c1244ddf3e49410e6c/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -1337,6 +1337,46 @@ export const accountBrowserOperations = [
     "path": "/api/v1/orgs/{org}/grants/{id}",
     "scopes": [
       "policies:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/snippets",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/snippets/{id}",
+    "scopes": [
+      "inventory:read"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/snippets",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "PUT",
+    "path": "/api/v1/orgs/{org}/snippets/{id}",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/snippets/{id}",
+    "scopes": [
+      "inventory:write"
     ],
     "writerReceipt": false
   },

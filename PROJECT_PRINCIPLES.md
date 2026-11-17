@@ -9,7 +9,14 @@ self-hosted server, host agent, administration CLI, and web console.
 - The server owns durable service behavior, role supervision, operator configuration, and the
   web console. It does not own client source or shared wire contracts.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
-  use published `proto@e868b23`. D-151 supplies shared CSV preparation, typed atomic import
+  use published `proto@b0bc922`. D-155 admits the five existing Snippet library operations for
+  genuine Account-browser families, with current scope/tenant/Cedar checks, original-family
+  creation receipts and unchanged native views. The Console edits typed definitions using its
+  existing custom selector, preserves secret variables without defaults, and requires explicit
+  review after stale or uncertain replacements/deletions. Library management grants no execution
+  or session authority. Rendered interaction and independent HTTPS/native consumption remain
+  separately tracked acceptance.
+  D-151 supplies shared CSV preparation, typed atomic import
   messages and the thin browser export. D-153 adds shared Direct OpenSSH preparation with a
   complete Ready/Blocked preview and explicit Ready selection in source order. Both stores
   atomically create imported Host/default Login pairs with current authority, original-writer

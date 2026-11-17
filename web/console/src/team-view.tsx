@@ -25,6 +25,7 @@ import { SimpleRuleEditor, type RuleGenerator } from "./rule-editor.tsx";
 import { requestFeedback } from "./feedback.ts";
 import { AuditPanel } from "./audit-view.tsx";
 import { GrantPanel } from "./grants-view.tsx";
+import { SnippetPanel, type SnippetHandle } from "./snippets-view.tsx";
 import { AccessRequestPanel } from "./access-requests-view.tsx";
 import {
   InventoryImportPanel,
@@ -48,6 +49,7 @@ const emptyCatalog = (): Catalog => ({
   "access-profiles": [],
   routes: [],
   "host-groups": [],
+  snippets: [],
   groups: [],
   policies: [],
 });
@@ -56,6 +58,7 @@ const kinds: CollectionKind[] = [
   "host-groups",
   "access-profiles",
   "routes",
+  "snippets",
   "groups",
   "policies",
 ];
@@ -132,6 +135,7 @@ export function TeamWorkspace({
   const [inviteForm, setInviteForm] = useState(false);
   const [csvImport, setCsvImport] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
+  const [snippetBusy, setSnippetBusy] = useState(false);
   const [importReviewRequired, setImportReviewRequired] = useState(false);
   const [pendingVersion, setPendingVersion] = useState(0);
   const [dependencyWarning, setDependencyWarning] = useState(false);
@@ -140,16 +144,19 @@ export function TeamWorkspace({
   >({});
   const invitationHandle = useRef<InvitationHandle | null>(null);
   const importHandle = useRef<InventoryImportHandle | null>(null);
+  const snippetHandle = useRef<SnippetHandle | null>(null);
   const pending = useRef<PendingReceipt | undefined>(undefined);
   const mounted = useRef(true);
   const running = useRef(false);
   const heading = useRef<HTMLHeadingElement>(null);
-  const disabled = busy || importBusy || session.busy || session.blocked;
+  const disabled =
+    busy || importBusy || snippetBusy || session.busy || session.blocked;
   const labels: Record<Section, string> = {
     hosts: t("Hosts", "主机"),
     "host-groups": t("Host groups", "主机分组"),
     "access-profiles": t("Logins", "登录配置"),
     routes: t("Routes", "路由"),
+    snippets: t("Snippets", "片段"),
     groups: t("Member groups", "成员组"),
     policies: t("Access rules", "访问规则"),
     members: t("Members", "成员"),
@@ -207,11 +214,17 @@ export function TeamWorkspace({
       mounted.current = false;
       invitationHandle.current?.dispose();
       importHandle.current?.dispose();
+      snippetHandle.current?.dispose();
     };
   }, [api]);
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (pending.current || importHandle.current?.hasPending()) {
+      if (
+        pending.current ||
+        importHandle.current?.hasPending() ||
+        snippetHandle.current?.hasPending() ||
+        snippetHandle.current?.hasDraft()
+      ) {
         event.preventDefault();
         event.returnValue = "";
       }
@@ -240,6 +253,17 @@ export function TeamWorkspace({
     }
   }
   async function guardLeave(): Promise<boolean> {
+    if (
+      (snippetHandle.current?.hasPending() ||
+        snippetHandle.current?.hasDraft()) &&
+      !(await confirm(
+        t(
+          "Leaving clears this Snippet draft and any original creation confirmation. Creation may already have completed; after leaving, review current Snippets before another edit. Continue?",
+          "离开将清除片段草稿及原创建操作确认数据。创建可能已经完成；离开后请审阅当前片段，再进行编辑。要继续吗？",
+        ),
+      ))
+    )
+      return false;
     if (
       importHandle.current?.hasPending() &&
       !(await confirm(
@@ -278,6 +302,7 @@ export function TeamWorkspace({
       ))
     )
       return;
+    snippetHandle.current?.dispose();
     await action();
   }
   async function discover(append = false) {
@@ -294,6 +319,7 @@ export function TeamWorkspace({
       target === "audit" ||
       target === "grants" ||
       target === "requests" ||
+      target === "snippets" ||
       !selected
     )
       return;
@@ -525,6 +551,7 @@ export function TeamWorkspace({
             "access-profiles": 2,
             routes: 4,
             "host-groups": 5,
+            snippets: 7,
             groups: 5,
             policies: 5,
           } as const
@@ -640,6 +667,7 @@ export function TeamWorkspace({
                     "host-groups",
                     "access-profiles",
                     "routes",
+                    "snippets",
                     "members",
                     "invitations",
                     "groups",
@@ -690,6 +718,7 @@ export function TeamWorkspace({
                 section !== "audit" &&
                 section !== "grants" &&
                 section !== "requests" &&
+                section !== "snippets" &&
                 !editor &&
                 !csvImport &&
                 !createTeam && (
@@ -703,6 +732,7 @@ export function TeamWorkspace({
                 )}
               {team &&
                 kinds.includes(section as CollectionKind) &&
+                section !== "snippets" &&
                 !editor &&
                 !csvImport &&
                 !createTeam && (
@@ -927,6 +957,25 @@ export function TeamWorkspace({
                 </p>
               )}
             </div>
+          ) : section === "snippets" ? (
+            session.blocked || session.expired || !profile ? (
+              <p className="notice" role="status">
+                {t(
+                  "Snippets are unavailable while this session is ending or expired. Sign in again to continue.",
+                  "会话正在结束或已过期，片段已隐藏。请重新登录以继续。",
+                )}
+              </p>
+            ) : (
+              <SnippetPanel
+                key={`${team.id}:${profile.id}`}
+                teamApi={api}
+                organization={team.id}
+                account={profile.id}
+                disabled={busy || session.busy || Boolean(pending.current)}
+                handle={snippetHandle}
+                onBusy={setSnippetBusy}
+              />
+            )
           ) : section === "grants" ? (
             session.busy || session.blocked || session.expired ? (
               <p className="notice" role="status">
@@ -1599,6 +1648,7 @@ export function TeamWorkspace({
             section !== "join" &&
             section !== "audit" &&
             section !== "requests" &&
+            section !== "snippets" &&
             section !== "settings" && (
               <button
                 className="secondary load-more"

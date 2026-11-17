@@ -61,6 +61,7 @@ export function SimpleRuleEditor({
     hosts: t("Host", "主机"),
     "access-profiles": t("Login", "登录配置"),
     routes: t("Route", "路由"),
+    snippets: t("Snippet", "片段"),
     "host-groups": t("Host group", "主机分组"),
   };
   const choices = assets.filter(
