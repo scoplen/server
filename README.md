@@ -264,8 +264,9 @@ Device and grants no login or sync authority. The separate registration/password
 handlers compose their own protocol coordinators.
 
 All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@18422e7`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+`proto@cb93ede`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
+D-151 supplies shared CSV preparation, typed atomic import messages and the thin browser export.
 D-150 adds the six shared single-Host access-request operations, exact Device/browser scopes,
 bounded codecs and request-access rule generation. The API mounts the complete request workflow
 on SQLite and PostgreSQL, including atomic finite-Grant approval and independent worker expiry.

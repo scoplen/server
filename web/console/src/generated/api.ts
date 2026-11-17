@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/18422e700c8a4a454248fae4323ace9e3c3b06d5/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/cb93ede22d51272c24c7fd1f64bd09a46d96b08f/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -26,6 +26,11 @@ export interface components {
     SimpleRuleConnect: SimpleRuleConnect;
     SimpleRuleInput: SimpleRuleInput;
     GroupPolicyBodyTooLargeProblem: GroupPolicyBodyTooLargeProblem;
+    InventoryImportFields: InventoryImportFields;
+    InventoryImportRow: InventoryImportRow;
+    InventoryImportRequest: InventoryImportRequest;
+    InventoryImportPair: InventoryImportPair;
+    InventoryImportResult: InventoryImportResult;
     InventorySnippetVariable: InventorySnippetVariable;
     InventoryBodyTooLargeProblem: InventoryBodyTooLargeProblem;
     InventoryHostFields: InventoryHostFields;
@@ -179,7 +184,6 @@ export interface components {
     Organization: Resource;
     IdentityProvider: Resource;
     ServicePrincipal: Resource;
-    InventoryImport: Resource;
     Role: Resource;
     GrantFields: GrantFields;
     GrantCreateRequest: GrantCreateRequest;
@@ -865,6 +869,12 @@ export interface InventoryGatewayNetworkCreateRequest { id: string; data: { fiel
 export interface InventoryGatewayNetworkReplaceRequest { data: { fields: InventoryGatewayNetworkFields }; }
 export interface InventoryGatewayNetworkResource { id: string; etag: string; created_at: string; updated_at: string; data: { schema: 1; fields: InventoryGatewayNetworkReadFields; [extension: string]: unknown }; [extension: string]: unknown; }
 export interface InventoryGatewayNetworkPage { items: InventoryGatewayNetworkResource[]; next_cursor: string | null; [extension: string]: unknown; }
+
+export interface InventoryImportFields { name: string; address: string; port: number; username: string; login_name?: string; }
+export interface InventoryImportRow extends InventoryImportFields { host_id: string; access_profile_id: string; }
+export interface InventoryImportRequest { rows: InventoryImportRow[]; }
+export interface InventoryImportPair { host_id: string; access_profile_id: string; [extension: string]: unknown; }
+export interface InventoryImportResult { items: InventoryImportPair[]; [extension: string]: unknown; }
 // END GENERATED OrganizationInventory
 
 // BEGIN GENERATED AccountBrowser
@@ -885,6 +895,14 @@ export const accountBrowserOperations = [
       "account:read"
     ],
     "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/inventory/imports",
+    "scopes": [
+      "inventory:write"
+    ],
+    "writerReceipt": true
   },
   {
     "method": "GET",

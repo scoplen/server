@@ -9,7 +9,8 @@ self-hosted server, host agent, administration CLI, and web console.
 - The server owns durable service behavior, role supervision, operator configuration, and the
   web console. It does not own client source or shared wire contracts.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
-  use published `proto@18422e7`. D-150 adds shared single-Host access-request contracts,
+  use published `proto@cb93ede`. D-151 supplies shared CSV preparation, typed atomic import
+  messages and the thin browser export. D-150 adds shared single-Host access-request contracts,
   scopes and rule generation. Both stores and the six genuine Device/browser routes implement
   request checks, own/routed history, atomic finite-Grant approval and worker expiry. Original
   writer-bound confirmation never restores a withdrawn Grant. Console My requests, Approvals

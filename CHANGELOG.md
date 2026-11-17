@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Update protocol consumers and generated Console bindings to the published atomic CSV import
+  contracts, including the archived-source shared browser parser.
+
 - Accept Access Request audit events and resource filters in the Account Console, preserving
   the published resource kind through timeline decoding and further-page loading.
 
