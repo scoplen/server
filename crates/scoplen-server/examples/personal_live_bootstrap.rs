@@ -51,6 +51,7 @@ const LOGIN_OPTIONS: &str = "/api/v1/auth/operator/login/options";
 const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
 const LOGOUT: &str = "/api/v1/auth/operator/logout";
 const GRANTS_ACCEPTANCE: &str = "{\"grant_device_browser_https_verified\":true,\"grant_certificate_expiry_verified\":true,\"grant_lifecycle_tenant_verified\":true,\"grant_personal_sync_preserved\":true}";
+const REQUESTS_ACCEPTANCE: &str = "{\"request_device_browser_https_verified\":true,\"request_current_routing_tenant_verified\":true,\"request_original_confirmation_verified\":true,\"request_personal_sync_preserved\":true}";
 
 #[derive(Parser)]
 #[command(about = "Disposable loopback HTTPS fixture; never use a real deployment or passkey")]
@@ -99,6 +100,8 @@ enum Command {
     VerifyAudit { directory: PathBuf },
     /// Once only: verify Host Grant management and certificate bounds through real HTTPS.
     VerifyGrants { directory: PathBuf },
+    /// Once only: verify request denials, routing and original confirmation through real HTTPS.
+    VerifyRequests { directory: PathBuf },
     /// Once only: prepare three private phases for independent Grant SSH/SFTP acceptance.
     PrepareGrantClient(GrantClientArguments),
     /// Once only: hand off a real member request, independent approval and SSH/SFTP use.
@@ -138,6 +141,7 @@ async fn main() -> ExitCode {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(command: Command) -> Result<()> {
     if vars_os().any(|(name, _)| name.to_string_lossy().to_ascii_uppercase().starts_with("SPL_")) {
         return Err("unset SPL_* overrides before preparing or using a disposable fixture");
@@ -233,6 +237,7 @@ async fn run(command: Command) -> Result<()> {
             println!("public Device and Account-browser audit check passed");
         }
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
+        Command::VerifyRequests { directory } => verify_requests(&directory).await?,
         Command::PrepareGrantClient(arguments) => prepare_grant_client(arguments).await?,
         Command::PrepareRequestClient(arguments) => prepare_request_client(arguments).await?,
     }
@@ -305,6 +310,27 @@ async fn verify_grants(directory: &Path) -> Result<()> {
     .map_err(|_| "Grant check task failed; abandon this fixture")??;
     write_private(&directory.join("grants-acceptance.json"), GRANTS_ACCEPTANCE)?;
     println!("public Device and Account-browser Grant HTTPS check passed");
+    Ok(())
+}
+
+async fn verify_requests(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("requests-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(360), Box::pin(account::verify_requests(&https)))
+            .await
+            .map_err(|_| "Request check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Request check task failed; abandon this fixture")??;
+    write_private(&directory.join("requests-acceptance.json"), REQUESTS_ACCEPTANCE)?;
+    println!("public Device and Account-browser request HTTPS check passed");
     Ok(())
 }
 
@@ -1128,6 +1154,36 @@ mod tests {
         assert!(!scratch.0.join("grants-acceptance.json").exists());
         assert_eq!(
             run(Command::VerifyGrants { directory: scratch.0.clone() }).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
+    }
+
+    #[test]
+    fn request_acceptance_keeps_deadline_and_ssh_claims_separate() {
+        let value: serde_json::Value = serde_json::from_str(REQUESTS_ACCEPTANCE).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 4);
+        for name in [
+            "request_device_browser_https_verified",
+            "request_current_routing_tenant_verified",
+            "request_original_confirmation_verified",
+            "request_personal_sync_preserved",
+        ] {
+            assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
+        }
+        assert!(Cli::try_parse_from(["consumer", "verify-requests", "unused"]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_request_check_publishes_nothing_and_refuses_replay() {
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || Command::VerifyRequests { directory: scratch.0.clone() };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("requests-check.started").is_file());
+        assert!(!scratch.0.join("requests-acceptance.json").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
             "could not exclusively write private fixture material"
         );
     }

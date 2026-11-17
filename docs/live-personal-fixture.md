@@ -351,6 +351,69 @@ the fixture; never replay it or overwrite its files. No credential, identifier o
 is printed, and completion does not claim rendered/native acceptance or completion of the
 integration gate. The caller owns all services, private diagnostics and exact resource cleanup.
 
+## Access-request HTTPS failure acceptance
+
+Build the server and example from the same checkout. Prepare a new private fixture with only
+the `api` role, enable Account registration and team creation before startup, and complete
+`bootstrap`. Run independently with SQLite and a new owned PostgreSQL database:
+
+```text
+personal_live_bootstrap verify-requests <fixture-directory>
+```
+
+The command reuses the verified TLS 1.3/HTTP/2 consumer and genuine public registration,
+Device authentication/refresh, independent Account-browser proof keys and refresh. Two random
+password Accounts retain their original credentials across current team transitions. They
+create separate teams; a named invitation establishes the requester's original Membership.
+The named member receives ordinary single-Host View and RequestAccess rules, with no connect
+permit or independently created Grant. There are no database seeds, time changes, forged
+tokens, admission resets, service controllers or SSH target changes in this command.
+
+Both Device and browser profiles exercise check, create, own/routed paginated reads, explicit
+deny/cancel/approve and original confirmation. Checks, failed operations and confirmations
+must leave the public audit timeline, current Grant list and sync view revision unchanged.
+Deny/cancel each add exactly one attributable request event without a Grant or view change;
+approval adds the original finite Grant and attributable request/Grant pair with one revision.
+The exact reason bytes, original Account/Membership/Host/user and approved interval are bound
+through the published codecs. Missing/weak/stale preconditions, self-approval even for Owner,
+changed payload/If-Match and another Device/browser profile or browser family cannot replace
+the original writer or operation. Browser refresh retains its original receipt ownership.
+The two profiles are separated by a real 61-second admission window; production limits are
+retained, and a rejected business operation is never retried automatically.
+
+Public policy changes independently remove approve routing, approver Host visibility,
+request permission and requester Host visibility. Existing credentials observe those current
+changes; requester suspension/reactivation is also checked before a decision. Own opaque
+history and cancellation remain available after requester Host visibility is removed.
+Historical approval confirmation requires current routing and never restores its withdrawn
+Grant. A separate Host with no policy references proves pending-request deletion protection
+and successful deletion after cancellation, while terminal history remains readable.
+
+Absent and foreign requests/Hosts use the common bounded problem. The independent team's
+Host remains readable and unchanged, and both Accounts' encrypted Personal Host uploads still
+download and decrypt after the team transitions. This flow makes no certificate or SSH claim;
+the independent client handoff below verifies those surfaces separately.
+
+The Resource codec checks the exact fractional-second 24-hour deadline on received HTTPS
+responses. That fixed deadline is not accelerated or waited out here. Post-deadline denial
+while the worker is stopped, bounded expiry and shutdown remain the separate storage/worker
+evidence until independently observed over HTTPS. Missing coarse
+scopes retain the route-test evidence; this helper does not manufacture a reduced-scope token.
+It also does not establish response-loss injection, rendered/native interaction or the full
+cross-repository integration gate.
+
+`requests-check.started` is created exclusively before the first request. The complete flow
+has a six-minute deadline; each HTTPS request retains its fifteen-second bound. Any failure
+or interruption abandons the fixture rather than replaying potentially committed business.
+Only complete success writes `requests-acceptance.json` with exactly these content-free fields:
+
+```json
+{"request_device_browser_https_verified":true,"request_current_routing_tenant_verified":true,"request_original_confirmation_verified":true,"request_personal_sync_preserved":true}
+```
+
+No Account password, key, token, cookie, request reason or response body is exported or printed.
+The caller owns service/database lifecycle, private diagnostics and exact resource cleanup.
+
 ## Independent access-request client handoff
 
 Build the production server and example from the same current checkout. Prepare another new

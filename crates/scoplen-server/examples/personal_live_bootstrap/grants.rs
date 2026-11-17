@@ -31,6 +31,12 @@ use crate::{Https, Result};
 
 #[path = "grants_handoff.rs"]
 mod handoff;
+#[path = "requests.rs"]
+mod requests;
+
+pub(super) async fn verify_requests(https: &Https) -> Result<()> {
+    requests::verify(https).await
+}
 
 pub(super) async fn prepare_client(
     https: &Https,

@@ -65,6 +65,10 @@ pub(super) async fn verify_grants(https: &Https) -> Result<()> {
     grants::verify(https).await
 }
 
+pub(super) async fn verify_requests(https: &Https) -> Result<()> {
+    grants::verify_requests(https).await
+}
+
 pub(super) async fn prepare_grant_client(
     https: &Https,
     directory: &Path,
