@@ -79,7 +79,8 @@ pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryE
         DeviceAccessOperation::TeamMemberUpdate => AccountEntryEndpoint::TeamMemberUpdate,
         DeviceAccessOperation::TeamMemberRemove => AccountEntryEndpoint::TeamMemberRemove,
         DeviceAccessOperation::TeamDissolve => AccountEntryEndpoint::TeamDissolve,
-        DeviceAccessOperation::InventoryHostCreate => AccountEntryEndpoint::InventoryHostCreate,
+        DeviceAccessOperation::InventoryHostCreate
+        | DeviceAccessOperation::InventoryImportCreate => AccountEntryEndpoint::InventoryHostCreate,
         DeviceAccessOperation::InventoryHostReplace => AccountEntryEndpoint::InventoryHostReplace,
         DeviceAccessOperation::InventoryHostDelete => AccountEntryEndpoint::InventoryHostDelete,
         DeviceAccessOperation::InventoryAccessProfileCreate => {
