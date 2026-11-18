@@ -380,6 +380,11 @@ pub async fn create_online(
     passphrase_file: &Path,
     lease: &DeploymentLease,
 ) -> Result<BackupReport> {
+    validate_online_profile(config)?;
+    create_archive(config, output, passphrase_file, lease).await
+}
+
+fn validate_online_profile(config: &Config) -> Result<()> {
     if config.tls.mode == TlsMode::Acme {
         return Err(fail("online backup does not support ACME"));
     }
@@ -387,10 +392,78 @@ pub async fn create_online(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         _ => return Err(fail("online backup requires an absent managed ACME cache path")),
     }
-    create_archive(config, output, passphrase_file, lease).await
+    Ok(())
+}
+
+pub(crate) fn validate_schedule(config: &Config) -> Result<()> {
+    validate_online_profile(config)?;
+    if !config.storage.backend.trim().eq_ignore_ascii_case("sqlite")
+        || !config.storage.kms.backend.trim().eq_ignore_ascii_case("local")
+    {
+        return Err(fail("scheduled backup requires SQLite and local KMS"));
+    }
+    let ObjectStorageConfig::Filesystem { root } = config
+        .storage
+        .object_storage_config(&config.server.data_dir)
+        .map_err(|_| fail("scheduled backup requires local objects"))?
+    else {
+        return Err(fail("scheduled backup requires local objects"));
+    };
+    let directory = files::existing(
+        config
+            .backup
+            .directory
+            .as_deref()
+            .ok_or_else(|| fail("scheduled backup directory is required"))?,
+        true,
+    )?;
+    #[cfg(windows)]
+    crate::windows_private_directory::prepare_directory(&directory, &[])
+        .map_err(|_| fail("private scheduled backup directory permissions"))?;
+    let password = files::existing(
+        config
+            .backup
+            .passphrase_file
+            .as_deref()
+            .ok_or_else(|| fail("scheduled backup passphrase file is required"))?,
+        false,
+    )?;
+    for root in [&config.server.data_dir, &root] {
+        let root = match fs::symlink_metadata(root) {
+            Ok(_) => files::existing(root, true)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                std::path::absolute(root).map_err(io_error("resolve scheduled source root"))?
+            }
+            Err(_) => return Err(fail("read scheduled source root")),
+        };
+        if directory.starts_with(&root) || password.starts_with(&root) {
+            return Err(fail("scheduled output and passphrase must be outside source roots"));
+        }
+    }
+    Ok(())
 }
 
 async fn create_archive(
+    config: &Config,
+    output: &Path,
+    passphrase_file: &Path,
+    lease: &DeploymentLease,
+) -> Result<BackupReport> {
+    let runtime = tokio::runtime::Handle::current();
+    let config = config.clone();
+    let output = output.to_path_buf();
+    let passphrase_file = passphrase_file.to_path_buf();
+    let lease = lease.clone();
+    // Hashing and age encryption are synchronous. The operation owns admission even when
+    // its awaiting task is cancelled during the common runtime shutdown deadline.
+    tokio::task::spawn_blocking(move || {
+        runtime.block_on(create_archive_inner(&config, &output, &passphrase_file, &lease))
+    })
+    .await
+    .map_err(|_| fail("archive capture task stopped"))?
+}
+
+async fn create_archive_inner(
     config: &Config,
     output: &Path,
     passphrase_file: &Path,

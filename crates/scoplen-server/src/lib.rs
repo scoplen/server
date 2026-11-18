@@ -8,6 +8,7 @@ mod account_devices;
 mod account_entry;
 mod account_profile;
 pub mod backup;
+mod backup_schedule;
 mod config;
 mod console;
 pub mod deployment_lease;
@@ -41,8 +42,8 @@ mod test_pool_close;
 mod test_support;
 
 pub use config::{
-    AccountSettings, Config, ConfigError, ConsoleSettings, KmsSettings, ObjectStorageSettings,
-    OrganizationSettings, SecretValue, StorageSettings, TlsMode,
+    AccountSettings, BackupSettings, Config, ConfigError, ConsoleSettings, KmsSettings,
+    ObjectStorageSettings, OrganizationSettings, SecretValue, StorageSettings, TlsMode,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};

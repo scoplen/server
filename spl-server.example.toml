@@ -35,6 +35,14 @@ used_account_id_limit = 1048576
 # Explicitly enable Account self-service team creation. Existing team discovery stays available.
 allow_creation = false
 
+[backup]
+# Worker-only scheduling; UTC HH:MM, with configuration changes applied after restart.
+enabled = false
+daily_utc = "03:00"
+# Both paths are required when enabled, outside the source data and object roots.
+# directory = "/var/backups/scoplen"
+# passphrase_file = "/run/secrets/scoplen-backup-passphrase"
+
 [sync]
 # Positive platform-representable write bounds may be raised or lowered from these defaults.
 max_envelope_bytes = 266240

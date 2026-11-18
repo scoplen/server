@@ -4,6 +4,13 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add disabled-by-default Worker scheduling for daily encrypted local SQLite archives, using
+  the loaded deployment configuration and existing online archive. Persist current-UTC-day
+  claims, retry at five minutes up to three times and renew ownership during blocking capture
+  without stopping maintenance or requests. Preserve existing output and report unconfirmed
+  publication separately from success. Keep the common shutdown deadline and explicitly exit
+  the CLI on its fatal timeout. Document configuration, operation and matching-build recovery.
+
 - Add explicit `splctl backup create --online` for SQLite with stable local objects/keys and
   plain or static-files TLS. Keep default exclusive offline creation, reject ACME and any
   managed cache path online, and reuse the complete age archive and explicit fresh-directory

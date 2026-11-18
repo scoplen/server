@@ -1244,5 +1244,9 @@ procedure](docs/operations.md) for encrypted SQLite/local-filesystem archives. D
 is offline; explicit `backup create --online` supports stable local files with plain/static-files
 TLS while database requests continue. ACME and any managed cache path are refused online.
 Both profiles use the matching build, complete age archive and explicit fresh-directory restore.
-Scheduled backups,
-PostgreSQL archives and S3 archive storage remain roadmap work.
+Worker can schedule daily local archives with disabled-by-default `[backup]` settings:
+UTC `daily_utc`, a private `directory` and `passphrase_file`. It persists one current-day job,
+renews ownership during capture and limits each date to three claims with five-minute failed-
+attempt delays. See [daily backup operation and recovery](docs/operations.md#schedule-daily-local-archives)
+for enable/restart behavior, fixed status events and unconfirmed publication. PostgreSQL
+archives and S3 archive storage remain roadmap work.

@@ -531,6 +531,20 @@ async fn run_roles_inner(
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let notifications = NotificationHub::default();
     let mut tasks = tokio::task::JoinSet::new();
+    if !config.backup.enabled {
+        info!(target: "backup.daily", event = "disabled", "scheduled backup status");
+    } else if !roles.contains(&Role::Worker) {
+        warn!(target: "backup.daily", event = "enabled", reason = "worker_required",
+            "scheduled backups require a Worker process");
+    } else {
+        info!(target: "backup.daily", event = "enabled", "scheduled backup status");
+        tasks.spawn(crate::backup_schedule::run(
+            config.clone(),
+            store.as_ref().ok_or(ServerError::MissingStore)?.clone(),
+            deployment_lease.clone().ok_or(ServerError::MissingDeploymentLease)?,
+            shutdown_receiver.clone(),
+        ));
+    }
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
         let database = if postgres {
             ListenerDatabase::Postgres(
@@ -671,7 +685,7 @@ async fn run_periodic_role(
     }
 }
 
-async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
+pub(crate) async fn shutdown_requested(shutdown: &mut watch::Receiver<bool>) {
     if !*shutdown.borrow() {
         let _ = shutdown.changed().await;
     }
