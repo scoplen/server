@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Runs only in the pinned Node check image against disposable Docker volumes.
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chownSync,
   chmodSync,
+  closeSync,
   constants,
   copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join, resolve } from "node:path";
@@ -452,6 +455,48 @@ function compareObjects(source, restored) {
   }
 }
 
+export function inspectDailyJobs(path) {
+  ordinary(path);
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    return database
+      .prepare(
+        "SELECT id, payload, available_at_ms, attempts, lease_owner, lease_until_ms, created_at_ms, finished_at_ms, last_error FROM jobs WHERE kind = 'backup.daily' ORDER BY created_at_ms, id",
+      )
+      .all()
+      .map((row) => {
+        const slot = Buffer.from(row.payload).toString("utf8");
+        assert(/^\d{4}-\d{2}-\d{2}$/.test(slot), "invalid daily slot payload");
+        const day = Date.parse(`${slot}T00:00:00Z`) / 86_400_000;
+        assert(Number.isSafeInteger(day), "invalid daily slot day");
+        assert.equal(
+          new Date(day * 86_400_000).toISOString().slice(0, 10),
+          slot,
+        );
+        const encoded = Buffer.alloc(8);
+        encoded.writeBigInt64BE(BigInt(day));
+        const id = createHash("sha256")
+          .update("scoplen.backup.daily.v1\0")
+          .update(encoded)
+          .digest()
+          .subarray(0, 16);
+        assert(Buffer.from(row.id).equals(id), "invalid daily slot identity");
+        return {
+          slot,
+          attempts: row.attempts,
+          owner: row.lease_owner,
+          leaseUntil: row.lease_until_ms,
+          availableAt: row.available_at_ms,
+          createdAt: row.created_at_ms,
+          finishedAt: row.finished_at_ms,
+          lastError: row.last_error,
+        };
+      });
+  } finally {
+    database.close();
+  }
+}
+
 if (operation === "check-context") {
   assert.equal(process.getuid(), 65532);
   assert.equal(process.getgid(), 65532);
@@ -574,7 +619,11 @@ if (operation === "check-context") {
     source.close();
     unlinkSync(barePath);
   }
-} else if (operation === "prepare-archive-parent") {
+} else if (
+  operation === "prepare-archive-parent" ||
+  operation === "prepare-daily-parent" ||
+  operation === "prepare-daily-collision"
+) {
   failurePhase = "archive-parent";
   const root = "/recovery";
   ordinary(root, true);
@@ -593,6 +642,103 @@ if (operation === "check-context") {
   chownSync(passphrase, 65532, 65532);
   chmodSync(passphrase, 0o600);
   assert(!existsSync(join(root, "restored")), "restore target must be absent");
+  if (operation !== "prepare-archive-parent") {
+    const archives = join(root, "archives");
+    mkdirSync(archives, { mode: 0o700 });
+    chownSync(archives, 65532, 65532);
+    if (operation === "prepare-daily-collision") {
+      const slot = new Date().toISOString().slice(0, 10);
+      const collision = join(archives, `scoplen-${slot}.age`);
+      writeFileSync(
+        collision,
+        "Owned daily collision; preserve these bytes.\n",
+        {
+          flag: "wx",
+          mode: 0o600,
+        },
+      );
+      chownSync(collision, 65532, 65532);
+    }
+  }
+} else if (operation === "prepare-daily-source") {
+  failurePhase = "daily-source";
+  const root = "/source-parent/restored";
+  assert.deepEqual(inspectDailyJobs(join(root, "scoplen.sqlite")), []);
+  const objects = join(root, "objects");
+  ordinary(objects, true);
+  const descriptor = openSync(
+    join(objects, "ci-daily-capture-buffer"),
+    "wx",
+    0o600,
+  );
+  try {
+    const chunk = randomBytes(1024 * 1024);
+    for (let index = 0; index < 64; index++) {
+      let offset = 0;
+      while (offset < chunk.length)
+        offset += writeSync(descriptor, chunk, offset);
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+} else if (operation === "daily-state") {
+  failurePhase = "daily-state";
+  const archives = "/recovery/archives";
+  ordinary(archives, true);
+  const entries = readdirSync(archives).sort();
+  const files = entries.filter((name) =>
+    /^scoplen-\d{4}-\d{2}-\d{2}\.age$/.test(name),
+  );
+  console.log(
+    JSON.stringify({
+      observedAt: Date.now(),
+      jobs: inspectDailyJobs("/source-parent/restored/scoplen.sqlite"),
+      archives: files.map((name) => ({
+        name,
+        size: ordinary(join(archives, name)).size,
+        sha256: createHash("sha256")
+          .update(readFileSync(join(archives, name)))
+          .digest("hex"),
+      })),
+      staging: entries.filter((name) => !files.includes(name)).length,
+    }),
+  );
+} else if (operation === "deny-daily-completion") {
+  failurePhase = "daily-completion-denial";
+  const path = "/source-parent/restored/scoplen.sqlite";
+  const jobs = inspectDailyJobs(path);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].attempts, 1);
+  assert.equal(jobs[0].finishedAt, null);
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(
+      "CREATE TRIGGER ci_deny_daily_completion BEFORE UPDATE OF finished_at_ms ON jobs WHEN NEW.kind = 'backup.daily' AND OLD.finished_at_ms IS NULL AND NEW.finished_at_ms IS NOT NULL BEGIN SELECT RAISE(ABORT, 'owned completion denial'); END",
+    );
+  } finally {
+    database.close();
+  }
+  assert.deepEqual(
+    inspectDailyJobs(path),
+    jobs,
+    "completion denial changed job rows",
+  );
+} else if (operation === "empty-daily-passphrase") {
+  failurePhase = "daily-empty-passphrase";
+  const path = "/recovery/passphrase.txt";
+  const metadata = ordinary(path);
+  assert.equal(metadata.uid, 65532);
+  assert.equal(metadata.mode & 0o7777, 0o600);
+  assert(metadata.size > 0);
+  writeFileSync(path, Buffer.alloc(0));
+} else if (operation === "check-daily-collision") {
+  const slot = new Date().toISOString().slice(0, 10);
+  const archives = "/recovery/archives";
+  assert.deepEqual(readdirSync(archives), [`scoplen-${slot}.age`]);
+  assert.equal(
+    readFileSync(join(archives, `scoplen-${slot}.age`), "utf8"),
+    "Owned daily collision; preserve these bytes.\n",
+  );
 } else if (
   operation === "check-archive-restore" ||
   operation === "check-online-archive-restore"

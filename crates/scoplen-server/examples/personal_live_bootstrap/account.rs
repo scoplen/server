@@ -62,7 +62,11 @@ mod online_backup;
 mod password_change;
 
 pub(super) async fn verify_online_backup(https: &Https, directory: &Path) -> Result<()> {
-    online_backup::verify(https, directory).await
+    online_backup::verify(https, directory, false).await
+}
+
+pub(super) async fn verify_daily_backup(https: &Https, directory: &Path) -> Result<()> {
+    online_backup::verify(https, directory, true).await
 }
 
 pub(super) async fn verify_password_change(https: &Https) -> Result<()> {

@@ -50,6 +50,11 @@ impl CliRole {
 async fn main() -> ExitCode {
     if let Err(error) = run().await {
         eprintln!("spl-server: {error}");
+        if matches!(error, ServerError::ShutdownTimedOut) {
+            // The fatal drain already retained deployment admission. Tokio teardown would
+            // otherwise wait for an unfinished blocking capture beyond that deadline.
+            std::process::exit(1);
+        }
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

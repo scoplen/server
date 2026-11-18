@@ -92,6 +92,15 @@ enum Command {
     },
     /// Once only: retain independent Devices across a live archive and restored restart.
     VerifyOnlineBackup { directory: PathBuf },
+    /// Verify Worker-triggered capture and restoration, retaining original Device keys.
+    VerifyDailyBackup { directory: PathBuf },
+    /// Once only: prove public Account entry and encrypted sync after daily capture failure.
+    VerifyDailyBackupAvailable {
+        directory: PathBuf,
+        /// Use the separate one-attempt receipt for an empty passphrase failure.
+        #[arg(long)]
+        passphrase_failure: bool,
+    },
     /// Once only: verify ordinary password change, existing Devices and Personal continuity.
     VerifyPasswordChange { directory: PathBuf },
     /// Once only: register two password Accounts for independent browser team acceptance.
@@ -239,6 +248,44 @@ async fn run(command: Command) -> Result<()> {
                 "{\"online_public_writes_verified\":true,\"online_restored_device_team_verified\":true,\"online_restored_restart_verified\":true}",
             )?;
             println!("public online archive and restored Device check passed");
+        }
+        Command::VerifyDailyBackup { directory } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            write_private(&directory.join("daily-backup.started"), "One attempt only.")?;
+            tokio::time::timeout(
+                Duration::from_secs(600),
+                Box::pin(account::verify_daily_backup(&https, &directory)),
+            )
+            .await
+            .map_err(|_| "daily backup check exceeded its deadline; abandon this fixture")??;
+            write_private(
+                &directory.join("daily-backup-acceptance.json"),
+                "{\"daily_public_writes_verified\":true,\"daily_restored_device_team_verified\":true,\"daily_restored_restart_verified\":true}",
+            )?;
+            println!("public daily archive and restored Device check passed");
+        }
+        Command::VerifyDailyBackupAvailable { directory, passphrase_failure } => {
+            let directory = canonical_fixture_directory(&directory)?;
+            let config = fixture_config(&directory)?;
+            let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+            let https = Https::new(&directory, config.server.listen_port, origin)?;
+            let prefix =
+                if passphrase_failure { "daily-passphrase-failure" } else { "daily-failure" };
+            write_private(&directory.join(format!("{prefix}.started")), "One attempt only.")?;
+            tokio::time::timeout(
+                Duration::from_secs(120),
+                Box::pin(account::verify(&https, false, None)),
+            )
+            .await
+            .map_err(|_| "daily failure check exceeded its deadline; abandon this fixture")??;
+            write_private(
+                &directory.join(format!("{prefix}-acceptance.json")),
+                "{\"daily_failure_public_sync_verified\":true}",
+            )?;
+            println!("public Account and encrypted sync remain available after daily failure");
         }
         Command::PrepareBrowserAccounts { directory, server_pid } => {
             let directory = canonical_fixture_directory(&directory)?;

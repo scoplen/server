@@ -10,8 +10,9 @@ migration snapshots and unrelated files are excluded.
 
 The archive is binary age v1. Keep its passphrase separately from the archive. Protect both
 because the archive contains the server's complete retained data and private keys. Losing
-the passphrase makes the archive unusable. Scheduled backups, PostgreSQL archives, S3 archives
-and automatic recovery are not supported by this first profile.
+the passphrase makes the archive unusable. Worker can schedule daily local archives for the
+online SQLite profile below. PostgreSQL archives, S3 archive delivery, archive rotation and
+automatic recovery remain separate work.
 
 This archive profile has these fixed bounds:
 
@@ -91,6 +92,64 @@ outside the source data and object roots. Override the image entry point explici
 the existing service running. Provision access for UID 65532 without widening source or secret
 permissions. Verification and the explicit fresh-volume restore below use the unchanged age
 archive and matching build; stop the original service before starting the restored service.
+
+## Schedule daily local archives
+
+Enable the built-in schedule in the same effective deployment configuration used by Worker:
+
+```toml
+[backup]
+enabled = true
+daily_utc = "03:00"
+directory = "/var/backups/scoplen"
+passphrase_file = "/run/secrets/scoplen-backup-passphrase"
+```
+
+Use exact UTC `HH:MM` from `00:00` to `23:59`. The corresponding overrides are
+`SPL_BACKUP_ENABLED`, `SPL_BACKUP_DAILY_UTC`, `SPL_BACKUP_DIRECTORY` and
+`SPL_BACKUP_PASSPHRASE_FILE`. Configuration changes require restart. Create the dedicated
+private output directory and passphrase file before enabling the schedule. Both must be
+outside source data/object roots and readable/writable as appropriate by the runtime user.
+On Unix, the output directory and passphrase file must have no group or other access
+(normally `0700` and `0600`). On Windows, both the output directory and the passphrase's
+existing parent/file must pass the private ACL checks. Startup and every scheduled attempt
+recheck these permissions; unsafe existing permissions are rejected without modification.
+Keep the passphrase file's exact 1-4,096 UTF-8 bytes; it is reread on each attempt without
+trimming. Its contents are never configuration values or log fields.
+
+Only the actual Worker role runs scheduling: worker-only, combined API/Worker and `all`
+are supported. API-only processes may share this configuration but warn that Worker must
+run. Enabled scheduling rejects PostgreSQL, external KMS, S3 objects, ACME and any managed
+`acme-cache` path. Existing online-capture exclusions of external file writers still apply.
+For a container, mount the dedicated output directory writable and the passphrase file
+read-only into each participating Worker with permissions for the existing runtime user.
+
+The first enabled start with no prior daily job immediately creates today's backup. On later
+starts, Worker resumes today's unfinished job according to its persisted eligibility. A
+missing current-day job waits until the configured UTC time. It never replays missed days;
+a successful daily job prevents a duplicate that day, including after restart. Each UTC
+date has at most three claims, with five minutes between failed attempts. Restarts preserve
+that count and delay. After exhaustion, the next current day follows its normal due time.
+Multiple Workers use one atomic database claim and renew it during capture.
+
+Archives are named `scoplen-YYYY-MM-DD.age`. Existing files are never replaced, and no old
+archives are automatically deleted. A successful event requires both complete synchronized
+archive publication and confirmed job completion. If a crash or database error leaves an
+existing archive without confirmed completion, Worker reports `unconfirmed`/`output_exists`
+and preserves the file. Inspect it with the ordinary matching-build `backup verify` command;
+the scheduler does not automatically adopt, rename or remove it. Manage retention separately.
+
+Structured events use target `backup.daily` and event values `enabled`, `disabled`, `started`,
+`retry_scheduled`, `succeeded`, `exhausted` and `unconfirmed`. Status fields contain only the
+UTC slot, attempt, fixed archive basename, retry/completion timestamp and fixed reason class.
+Ordinary capture failure leaves login, sync and the API running. Disable and restart to stop
+new scheduling and retries while preserving job history and existing archives.
+
+Backup work does not block Worker maintenance or the async request runtime. Shutdown stops
+new scheduling and gives an active capture the existing common ten-second drain. The CLI
+exits with failure if that drain times out; interrupted work is not recorded as successful.
+An embedding host receiving `ShutdownTimedOut` must exit, as with other local operations.
+Verification and fresh-directory restoration use the unchanged matching-build procedure.
 
 ## Restore to a new directory
 

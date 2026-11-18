@@ -50,6 +50,54 @@ pub struct Job {
 }
 
 impl SqliteStore {
+    /// Whether any persisted job, including completed work, has this kind.
+    ///
+    /// # Errors
+    /// Returns a validation or database error when history cannot be read.
+    pub async fn has_job_kind(&self, kind: &str) -> Result<bool, JobQueueError> {
+        validate_kind(kind)?;
+        Ok(sqlx::query_scalar::<_, i64>("SELECT 1 FROM jobs WHERE kind = ? LIMIT 1")
+            .bind(kind)
+            .fetch_optional(self.pool())
+            .await?
+            .is_some())
+    }
+
+    /// Atomically claim one exact eligible job without exceeding its claim limit.
+    ///
+    /// # Errors
+    /// Returns a validation or database error when the claim cannot be committed.
+    pub async fn claim_job_id(
+        &self,
+        id: JobId,
+        owner: &str,
+        now_ms: i64,
+        lease_ms: i64,
+        max_attempts: u32,
+    ) -> Result<Option<Job>, JobQueueError> {
+        validate_owner(owner)?;
+        validate_timestamp(now_ms)?;
+        validate_lease(lease_ms)?;
+        let lease_until_ms =
+            now_ms.checked_add(lease_ms).ok_or(JobQueueError::TimestampOverflow)?;
+        let row = sqlx::query(
+            "UPDATE jobs SET attempts = attempts + 1, lease_owner = ?, lease_until_ms = ?
+             WHERE id = ? AND finished_at_ms IS NULL AND attempts < ? AND available_at_ms <= ?
+               AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+             RETURNING id, kind, payload, available_at_ms, attempts, lease_owner, lease_until_ms,
+                       created_at_ms, finished_at_ms, last_error",
+        )
+        .bind(owner)
+        .bind(lease_until_ms)
+        .bind(id.as_slice())
+        .bind(i64::from(max_attempts))
+        .bind(now_ms)
+        .bind(now_ms)
+        .fetch_optional(self.pool())
+        .await?;
+        row.as_ref().map(job_from_row).transpose()
+    }
+
     /// Enqueue a job for immediate or future processing.
     ///
     /// The job id is idempotent only at the database boundary: reusing an existing id returns a

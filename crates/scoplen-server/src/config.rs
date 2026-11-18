@@ -35,6 +35,8 @@ pub struct Config {
     pub organizations: OrganizationSettings,
     /// API-role browser console assets.
     pub console: ConsoleSettings,
+    /// Optional daily encrypted local SQLite archives run by Worker.
+    pub backup: BackupSettings,
 }
 
 impl Config {
@@ -152,6 +154,7 @@ impl Config {
         self.sync.apply_environment()?;
         self.accounts.apply_environment()?;
         self.organizations.apply_environment()?;
+        self.backup.apply_environment()?;
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -221,6 +224,11 @@ impl Config {
         self.sync.write_body_limits()?;
         self.sync.read_body_limits()?;
         self.accounts.validate()?;
+        self.backup.validate()?;
+        if self.backup.enabled {
+            crate::backup::validate_schedule(self)
+                .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -300,6 +308,121 @@ fn invalid_public_host() -> ConfigError {
 
 fn env_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+/// Daily encrypted local archive settings; changes take effect after restart.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BackupSettings {
+    /// Enable scheduling in processes that actually select Worker.
+    pub enabled: bool,
+    /// Daily UTC time in exact `HH:MM` form.
+    pub daily_utc: String,
+    /// Existing private directory dedicated to this deployment's archives.
+    pub directory: Option<PathBuf>,
+    /// File containing exact UTF-8 passphrase bytes, reread on each attempt.
+    pub passphrase_file: Option<PathBuf>,
+}
+
+impl Default for BackupSettings {
+    fn default() -> Self {
+        Self { enabled: false, daily_utc: "03:00".into(), directory: None, passphrase_file: None }
+    }
+}
+
+impl BackupSettings {
+    fn apply_environment(&mut self) -> Result<(), ConfigError> {
+        if let Some(value) = env_value("SPL_BACKUP_ENABLED") {
+            self.enabled = value.parse().map_err(|_| {
+                ConfigError::Invalid("SPL_BACKUP_ENABLED must be true or false".into())
+            })?;
+        }
+        if let Some(value) = env_value("SPL_BACKUP_DAILY_UTC") {
+            self.daily_utc = value;
+        }
+        if let Some(value) = env_value("SPL_BACKUP_DIRECTORY") {
+            self.directory = Some(value.into());
+        }
+        if let Some(value) = env_value("SPL_BACKUP_PASSPHRASE_FILE") {
+            self.passphrase_file = Some(value.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn minute_of_day(&self) -> Result<i64, ConfigError> {
+        let bytes = self.daily_utc.as_bytes();
+        if bytes.len() == 5
+            && bytes[2] == b':'
+            && [bytes[0], bytes[1], bytes[3], bytes[4]].iter().all(u8::is_ascii_digit)
+        {
+            let hour = (bytes[0] - b'0') * 10 + bytes[1] - b'0';
+            let minute = (bytes[3] - b'0') * 10 + bytes[4] - b'0';
+            if hour < 24 && minute < 60 {
+                return Ok(i64::from(hour) * 60 + i64::from(minute));
+            }
+        }
+        Err(ConfigError::Invalid(
+            "backup.daily_utc must be UTC HH:MM between 00:00 and 23:59".into(),
+        ))
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        self.minute_of_day()?;
+        if self.enabled
+            && [self.directory.as_ref(), self.passphrase_file.as_ref()]
+                .iter()
+                .any(|path| path.is_none_or(|path| path.as_os_str().is_empty()))
+        {
+            return Err(ConfigError::Invalid(
+                "backup.enabled requires backup.directory and backup.passphrase_file".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod backup_settings_tests {
+    use super::*;
+
+    #[test]
+    fn daily_backup_is_disabled_and_utc_time_is_exact() {
+        let mut settings = BackupSettings::default();
+        assert!(!settings.enabled);
+        assert_eq!(settings.minute_of_day().expect("default UTC time"), 180);
+        for (value, expected) in [("00:00", 0), ("03:00", 180), ("23:59", 1_439)] {
+            settings.daily_utc = value.into();
+            assert_eq!(settings.minute_of_day().expect("valid UTC time"), expected);
+        }
+        for value in [
+            "3:00",
+            "03:0",
+            "24:00",
+            "23:60",
+            "03:00Z",
+            " 03:00",
+            "03:00 ",
+            "* * * * *",
+            "\u{ff10}3:00",
+        ] {
+            settings.daily_utc = value.into();
+            assert!(settings.validate().is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn enabled_backup_requires_both_paths() {
+        let mut config: Config =
+            toml::from_str("[backup]\nenabled = true\ndaily_utc = '04:15'\n").expect("backup TOML");
+        assert_eq!(config.backup.minute_of_day().expect("TOML time"), 255);
+        assert!(config.backup.validate().is_err());
+        config.backup.directory = Some("archives".into());
+        assert!(config.backup.validate().is_err());
+        config.backup.passphrase_file = Some("passphrase".into());
+        config.backup.validate().expect("complete settings");
+        config.backup.directory = Some(PathBuf::new());
+        assert!(config.backup.validate().is_err());
+    }
 }
 
 /// Native Account entry policy, independent of Operator and Organization authority.
