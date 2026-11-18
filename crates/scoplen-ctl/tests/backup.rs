@@ -375,6 +375,63 @@ fn public_archive_round_trip_retains_database_keys_and_binary_objects() {
 }
 
 #[test]
+fn missing_passphrase_refuses_create_verify_and_restore_without_repair() {
+    let fixture = Fixture::new();
+    success(&fixture.create(), "Backup created.");
+    let completed = fixture.directory.join("completed.age");
+    fs::rename(&fixture.archive, &completed).expect("retain completed archive");
+    let original = fs::read(&completed).expect("retained archive bytes");
+    fs::remove_file(&fixture.passphrase).expect("remove owned passphrase input");
+    let restored = fixture.directory.join("missing-passphrase-restore");
+    for output in [
+        fixture.create(),
+        fixture.create_online(),
+        Fixture::verify(&completed, &fixture.passphrase),
+        Fixture::restore(&completed, &restored, &fixture.passphrase),
+    ] {
+        failure(&output);
+    }
+    assert!(!fixture.archive.exists());
+    assert!(!restored.exists());
+    assert!(!fixture.passphrase.exists(), "failed commands must not replace the input");
+    assert_eq!(fs::read(&completed).expect("unchanged completed archive"), original);
+}
+
+#[cfg(windows)]
+#[test]
+fn unreadable_passphrase_refuses_create_verify_and_restore_without_repair() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let fixture = Fixture::new();
+    success(&fixture.create(), "Backup created.");
+    let completed = fixture.directory.join("completed.age");
+    fs::rename(&fixture.archive, &completed).expect("retain completed archive");
+    let original = fs::read(&completed).expect("retained archive bytes");
+    // Mandatory sharing denies reads without changing the fixture's private ACLs.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&fixture.passphrase)
+        .expect("hold owned passphrase without read sharing");
+    assert!(fs::read(&fixture.passphrase).is_err(), "the input must actually be unreadable");
+    let restored = fixture.directory.join("unreadable-passphrase-restore");
+    for output in [
+        fixture.create(),
+        fixture.create_online(),
+        Fixture::verify(&completed, &fixture.passphrase),
+        Fixture::restore(&completed, &restored, &fixture.passphrase),
+    ] {
+        failure(&output);
+    }
+    assert!(!fixture.archive.exists());
+    assert!(!restored.exists());
+    drop(held);
+    assert_eq!(fs::read(&fixture.passphrase).expect("retained passphrase input"), PASSPHRASE);
+    assert_eq!(fs::read(&completed).expect("unchanged completed archive"), original);
+    success(&Fixture::verify(&completed, &fixture.passphrase), "Backup verified.");
+}
+
+#[test]
 fn wrong_password_and_damaged_archives_never_publish_a_restore() {
     let fixture = Fixture::new();
     success(&fixture.create(), "Backup created.");
