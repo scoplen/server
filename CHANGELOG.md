@@ -10,6 +10,8 @@ Changes are recorded here for released or reviewable repository outcomes.
   without stopping maintenance or requests. Preserve existing output and report unconfirmed
   publication separately from success. Keep the common shutdown deadline and explicitly exit
   the CLI on its fatal timeout. Document configuration, operation and matching-build recovery.
+  Refuse non-private output-directory and passphrase permissions at startup and before each
+  scheduled attempt, including existing Windows parent/file ACLs, without repairing them.
 
 - Add explicit `splctl backup create --online` for SQLite with stable local objects/keys and
   plain or static-files TLS. Keep default exclusive offline creation, reject ACME and any
