@@ -335,6 +335,61 @@ test("daily runtime evidence requires renewal, one owner and confirmed completio
   }
 });
 
+test("daily capture failures report fixed reasons without observed state", () => {
+  for (const [mutate, reason] of [
+    [(samples) => samples.splice(1), "daily-observations"],
+    [
+      (samples) => {
+        samples[0].staging = 0;
+        samples[1].staging = 0;
+      },
+      "daily-active-interval",
+    ],
+    [
+      (samples) => {
+        samples[1].jobs[0].owner = "synthetic-private-owner";
+      },
+      "daily-owner-change",
+    ],
+    [
+      (samples) => {
+        samples[1].jobs[0].leaseUntil = samples[0].jobs[0].leaseUntil;
+      },
+      "daily-lease-renewal",
+    ],
+    [
+      (samples) => {
+        samples[1].observedAt = samples[0].observedAt + 100;
+      },
+      "daily-renewal-interval",
+    ],
+  ]) {
+    const samples = dailySamples();
+    mutate(samples);
+    assert.throws(
+      () => assertDailyCapture(samples, "2026-11-18"),
+      (error) => {
+        const description = describeCheckFailure({
+          phase: "daily Worker ownership and renewal",
+          error,
+        });
+        assert.deepEqual(description, {
+          phase: "daily Worker ownership and renewal",
+          category: "validation",
+          reason,
+          ioCode: null,
+          exitCode: null,
+          signal: null,
+        });
+        assert(
+          !JSON.stringify(description).includes("synthetic-private-owner"),
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test("daily events accept only fixed content-free status fields", () => {
   const event = {
     target: "backup.daily",
@@ -1104,6 +1159,10 @@ test("post-build failures expose fixed phases, reasons and bounded metadata only
     "SQLite migration snapshot",
     "offline snapshot restore",
     "matching old image recovery",
+    "daily Worker ownership and renewal",
+    "daily Worker events and maintenance",
+    "daily Worker same-day restart",
+    "daily archive verification and restoration",
   ]) {
     const description = describeCheckFailure({ phase, error });
     assert.equal(description.phase, phase);

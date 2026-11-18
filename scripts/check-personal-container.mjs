@@ -52,6 +52,10 @@ const failurePhases = new Set([
   "restored Compose startup and persistent restart",
   "online archive capture and restored Device restart",
   "daily Worker capture and restored Device restart",
+  "daily Worker ownership and renewal",
+  "daily Worker events and maintenance",
+  "daily Worker same-day restart",
+  "daily archive verification and restoration",
   "daily Worker failures and shutdown",
   "offline snapshot restore",
   "matching old image recovery",
@@ -171,6 +175,26 @@ export function describeCheckFailure({
     ["image data directory missing", "directory-missing"],
     ["committed WAL fixture exited before readiness", "wal-holder-exit"],
     ["committed WAL fixture timed out", "wal-holder-timeout"],
+    [
+      "daily capture needs persisted ownership observations",
+      "daily-observations",
+    ],
+    ["daily Worker created duplicate slots", "daily-duplicate-slot"],
+    ["daily slot was claimed more than once", "daily-duplicate-claim"],
+    [
+      "daily capture completed before ownership observation",
+      "daily-active-interval",
+    ],
+    ["daily claim changed owners", "daily-owner-change"],
+    ["daily claim expired during capture", "daily-lease-expired"],
+    ["daily capture did not renew its lease", "daily-lease-renewal"],
+    [
+      "daily capture did not cross a renewal interval",
+      "daily-renewal-interval",
+    ],
+    ["daily completion was not confirmed", "daily-completion"],
+    ["daily Worker capture timed out", "daily-capture-timeout"],
+    ["Worker maintenance did not progress during capture", "daily-maintenance"],
   ];
   const reason =
     (assertion && typeof error.message === "string"
@@ -2068,6 +2092,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         }),
       capture: async () => {
         assert.deepEqual((await dailyState()).jobs, []);
+        progress("daily Worker ownership and renewal");
         await startDailyWorker(dailyWorkers[0]);
         await startDailyWorker(
           dailyWorkers[1],
@@ -2097,8 +2122,14 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           assert(Date.now() < deadline, "daily Worker capture timed out");
           await new Promise((accept) => setTimeout(accept, 1000));
         }
+        await writePrivateDiagnostic(
+          join(directory, "daily-capture-observations.json"),
+          `${JSON.stringify(samples)}\n`,
+          phase,
+        );
         const interval = assertDailyCapture(samples, slot);
         completedDaily = samples.at(-1);
+        progress("daily Worker events and maintenance");
         const logs = (await Promise.all(dailyWorkers.map(records))).flat();
         const events = assertDailyEvents(logs);
         assert.equal(
@@ -2118,6 +2149,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           ),
           "Worker maintenance did not progress during capture",
         );
+        progress("daily Worker same-day restart");
         for (const name of dailyWorkers) await stopDailyWorker(name);
         for (const name of dailyWorkers) await docker(["start", name]);
         await new Promise((accept) => setTimeout(accept, 32_000));
@@ -2158,6 +2190,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         return interval;
       },
       restore: async () => {
+        progress("daily archive verification and restoration");
         await dailyCli("verify");
         await dailyCli("restore");
         await compose(["stop", "server"]);
