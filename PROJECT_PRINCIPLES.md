@@ -48,7 +48,10 @@ self-hosted server, host agent, administration CLI, and web console.
   build and original public origin. Explicit online SQLite creation uses shared admission for
   stable local files and plain/files TLS, rejects ACME and every managed cache path, and preserves
   default exclusive offline creation. Operators exclude external file writers and provide the
-  same build/effective configuration. Scheduling, PostgreSQL and S3 archives remain roadmap gaps.
+  same build/effective configuration. Disabled-by-default Worker scheduling reuses that capture
+  for current-day encrypted local archives, with persistent bounded claims, renewal, fixed
+  status events and the common shutdown deadline. Actual scheduled restoration and failure
+  acceptance remain separately tracked; PostgreSQL and S3 archives remain roadmap gaps.
 - The repository is Exploration maturity until the roadmap evidence is complete. The baseline
   listener is useful for local development and reverse-proxy integration; it is not a complete
   production server.
