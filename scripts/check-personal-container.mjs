@@ -2413,7 +2413,12 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         dailyInterruptedVolume,
         dailyInterruptedVolume,
       );
-      if (state.jobs[0]?.attempts === 2) {
+      if (
+        state.jobs[0]?.attempts === 2 &&
+        state.jobs[0].owner !== null &&
+        state.staging > 0 &&
+        state.archives.length === 0
+      ) {
         interrupted = state.jobs[0];
         assert(interrupted.owner !== null && interrupted.finishedAt === null);
         break;
