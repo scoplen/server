@@ -266,7 +266,7 @@ mod tests {
     }
 
     async fn close(directory: PathBuf, store: SqliteStore) {
-        store.pool().close().await;
+        crate::test_pool_close::close(store.pool()).await;
         drop(store);
         fs::remove_dir_all(directory).expect("remove owned schedule fixture");
     }
@@ -502,7 +502,7 @@ mod tests {
             .fail_job(slot.id, "first", now + 1, now + RETRY_MS, "capture_failed")
             .await
             .expect("retry");
-        store.pool().close().await;
+        crate::test_pool_close::close(store.pool()).await;
         drop(store);
         let store =
             SqliteStore::open(&directory.join("jobs.sqlite")).await.expect("restarted store");
