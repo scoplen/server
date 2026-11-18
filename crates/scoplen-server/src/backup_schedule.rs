@@ -143,7 +143,7 @@ async fn capture(
     let passphrase = config.backup.passphrase_file.as_deref().expect("validated passphrase file");
     info!(target: "backup.daily", event = "started", slot = %slot.date,
         attempt = job.attempts, archive = %slot.basename, "scheduled backup status");
-    let operation = backup::create_online(config, &output, passphrase, lease);
+    let operation = backup::create_scheduled(config, &output, passphrase, lease);
     tokio::pin!(operation);
     let mut renewal = tokio::time::interval(RENEW_INTERVAL);
     renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -239,7 +239,10 @@ pub(crate) async fn run(
 mod tests {
     use super::*;
     use scoplen_store::RelationalStore;
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn directory() -> PathBuf {
         #[cfg(unix)]
@@ -270,6 +273,55 @@ mod tests {
 
     fn settings() -> BackupSettings {
         BackupSettings { enabled: true, ..BackupSettings::default() }
+    }
+
+    fn permission_fixture() -> (PathBuf, Config) {
+        let directory = directory();
+        let secrets = directory.join("secrets");
+        fs::create_dir(&secrets).expect("owned passphrase parent");
+        let password = secrets.join("passphrase");
+        crate::private_material::write_private(&password, "synthetic backup passphrase")
+            .expect("private passphrase");
+        let mut config = Config::default();
+        config.server.data_dir = directory.join("source");
+        config.backup = BackupSettings {
+            enabled: true,
+            directory: Some(directory.clone()),
+            passphrase_file: Some(password),
+            ..BackupSettings::default()
+        };
+        (directory, config)
+    }
+
+    fn broaden_access(path: &Path, directory: bool) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(if directory { 0o755 } else { 0o644 }),
+            )
+            .expect("broaden owned permissions");
+        }
+        #[cfg(windows)]
+        {
+            use std::{os::windows::process::CommandExt, process::Command};
+            let script = if directory {
+                "$path = $env:SCOPLEN_ACL_TEST_PATH; $acl = [System.IO.Directory]::GetAccessControl($path); $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'), [System.Security.AccessControl.FileSystemRights]::Read, [System.Security.AccessControl.AccessControlType]::Allow)); [System.IO.Directory]::SetAccessControl($path, $acl)"
+            } else {
+                "$path = $env:SCOPLEN_ACL_TEST_PATH; $acl = [System.IO.File]::GetAccessControl($path); $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new('S-1-1-0'), [System.Security.AccessControl.FileSystemRights]::Read, [System.Security.AccessControl.AccessControlType]::Allow)); [System.IO.File]::SetAccessControl($path, $acl)"
+            };
+            let executable =
+                PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"))
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+            let output = Command::new(executable)
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("SCOPLEN_ACL_TEST_PATH", path)
+                .creation_flags(0x0800_0000)
+                .output()
+                .expect("owned ACL update");
+            assert!(output.status.success(), "owned ACL update failed");
+        }
     }
 
     fn claimed(due: Due) -> (Slot, Job) {
@@ -320,6 +372,91 @@ mod tests {
         config.server.data_dir = directory.clone();
         assert!(backup::validate_schedule(&config).is_err());
         fs::remove_dir_all(directory).expect("remove owned config fixture");
+    }
+
+    #[test]
+    fn scheduled_output_and_passphrase_must_remain_private_without_repair() {
+        for output_directory in [true, false] {
+            let (directory, config) = permission_fixture();
+            config.validate().expect("private scheduled configuration");
+            let path = if output_directory {
+                directory.as_path()
+            } else {
+                config.backup.passphrase_file.as_deref().expect("passphrase path")
+            };
+            broaden_access(path, output_directory);
+            assert!(config.validate().is_err());
+            assert!(config.validate().is_err(), "unsafe permissions were not repaired");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::metadata(path).expect("retained path").permissions().mode() & 0o777,
+                    if output_directory { 0o755 } else { 0o644 }
+                );
+            }
+            fs::remove_dir_all(directory).expect("remove owned permissions fixture");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduled_passphrase_parent_rejects_public_acl_without_repair() {
+        let (directory, config) = permission_fixture();
+        config.validate().expect("private scheduled configuration");
+        let parent = config
+            .backup
+            .passphrase_file
+            .as_deref()
+            .expect("passphrase")
+            .parent()
+            .expect("existing secret parent");
+        broaden_access(parent, true);
+        assert!(config.validate().is_err());
+        assert!(config.validate().is_err(), "unsafe parent ACL was not repaired");
+        fs::remove_dir_all(directory).expect("remove owned parent fixture");
+    }
+
+    #[tokio::test]
+    async fn each_scheduled_capture_rechecks_permissions_changed_after_startup() {
+        for output_directory in [true, false] {
+            let (directory, config) = permission_fixture();
+            crate::reissue_operator_setup(&config).await.expect("initialized private source");
+            config.validate().expect("valid configuration at startup");
+            let lease = DeploymentLease::try_shared(&config.server.data_dir).expect("shared lease");
+            let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite"))
+                .await
+                .expect("existing source");
+            let (slot, job) = claimed(
+                claim_due(&store, &config.backup, "permissions", now_ms().expect("clock"))
+                    .await
+                    .expect("daily claim"),
+            );
+            let path = if output_directory {
+                directory.as_path()
+            } else {
+                config.backup.passphrase_file.as_deref().expect("passphrase path")
+            };
+            broaden_access(path, output_directory);
+            capture(&config, &store, &lease, "permissions", &slot, &job).await;
+            let failed = store.get_job(slot.id).await.expect("failed slot");
+            assert!(failed.finished_at_ms.is_none());
+            assert_eq!(failed.last_error.as_deref(), Some("capture_failed"));
+            assert!(!directory.join(slot.basename).exists(), "unsafe attempt published no archive");
+            assert!(
+                !fs::read_dir(&directory).expect("owned directory").any(|entry| {
+                    entry
+                        .expect("owned entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".scoplen-backup-")
+                }),
+                "unsafe attempt created no archive staging"
+            );
+            assert!(config.validate().is_err(), "unsafe permissions remain unchanged");
+            drop(lease);
+            close(directory, store).await;
+        }
     }
 
     #[tokio::test]

@@ -364,7 +364,7 @@ pub async fn create(
     if !lease.is_exclusive() {
         return Err(fail("offline backup requires exclusive deployment admission"));
     }
-    create_archive(config, output, passphrase_file, lease).await
+    create_archive(config, output, passphrase_file, lease, false).await
 }
 
 /// Capture an existing SQLite deployment beside ordinary database writers.
@@ -381,7 +381,16 @@ pub async fn create_online(
     lease: &DeploymentLease,
 ) -> Result<BackupReport> {
     validate_online_profile(config)?;
-    create_archive(config, output, passphrase_file, lease).await
+    create_archive(config, output, passphrase_file, lease, false).await
+}
+
+pub(crate) async fn create_scheduled(
+    config: &Config,
+    output: &Path,
+    passphrase_file: &Path,
+    lease: &DeploymentLease,
+) -> Result<BackupReport> {
+    create_archive(config, output, passphrase_file, lease, true).await
 }
 
 fn validate_online_profile(config: &Config) -> Result<()> {
@@ -428,6 +437,28 @@ pub(crate) fn validate_schedule(config: &Config) -> Result<()> {
             .ok_or_else(|| fail("scheduled backup passphrase file is required"))?,
         false,
     )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        for path in [&directory, &password] {
+            if fs::metadata(path)
+                .map_err(io_error("read scheduled backup permissions"))?
+                .permissions()
+                .mode()
+                & 0o077
+                != 0
+            {
+                return Err(fail("scheduled backup directory and passphrase must be private"));
+            }
+        }
+    }
+    #[cfg(windows)]
+    crate::windows_private_directory::prepare_directory(
+        password.parent().ok_or_else(|| fail("scheduled passphrase parent"))?,
+        std::slice::from_ref(&password),
+    )
+    .map_err(|_| fail("private scheduled passphrase parent or file permissions"))?;
     for root in [&config.server.data_dir, &root] {
         let root = match fs::symlink_metadata(root) {
             Ok(_) => files::existing(root, true)?,
@@ -448,6 +479,7 @@ async fn create_archive(
     output: &Path,
     passphrase_file: &Path,
     lease: &DeploymentLease,
+    scheduled: bool,
 ) -> Result<BackupReport> {
     let runtime = tokio::runtime::Handle::current();
     let config = config.clone();
@@ -457,6 +489,9 @@ async fn create_archive(
     // Hashing and age encryption are synchronous. The operation owns admission even when
     // its awaiting task is cancelled during the common runtime shutdown deadline.
     tokio::task::spawn_blocking(move || {
+        if scheduled {
+            validate_schedule(&config)?;
+        }
         runtime.block_on(create_archive_inner(&config, &output, &passphrase_file, &lease))
     })
     .await

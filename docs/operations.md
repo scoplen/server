@@ -110,6 +110,10 @@ Use exact UTC `HH:MM` from `00:00` to `23:59`. The corresponding overrides are
 `SPL_BACKUP_PASSPHRASE_FILE`. Configuration changes require restart. Create the dedicated
 private output directory and passphrase file before enabling the schedule. Both must be
 outside source data/object roots and readable/writable as appropriate by the runtime user.
+On Unix, the output directory and passphrase file must have no group or other access
+(normally `0700` and `0600`). On Windows, both the output directory and the passphrase's
+existing parent/file must pass the private ACL checks. Startup and every scheduled attempt
+recheck these permissions; unsafe existing permissions are rejected without modification.
 Keep the passphrase file's exact 1-4,096 UTF-8 bytes; it is reread on each attempt without
 trimming. Its contents are never configuration values or log fields.
 
