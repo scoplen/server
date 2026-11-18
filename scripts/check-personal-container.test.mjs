@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
   mkdtemp,
@@ -21,6 +21,8 @@ import {
   assertAccountAcceptance,
   assertBackupAcceptance,
   assertDoctorAcceptance,
+  assertDailyCapture,
+  assertDailyEvents,
   assertTeamAcceptance,
   assertTeamRestartAcceptance,
   assertOwnedFixture,
@@ -35,15 +37,25 @@ import {
   runTeamRestart,
   runOnlineBackup,
 } from "./check-personal-container.mjs";
-import { inspectDatabase } from "./personal-sqlite-recovery-probe.mjs";
+import {
+  inspectDailyJobs,
+  inspectDatabase,
+} from "./personal-sqlite-recovery-probe.mjs";
 
-async function onlineTestDriver(fixture, signal, outsideInterval = false) {
+async function onlineTestDriver(
+  fixture,
+  signal,
+  outsideInterval = false,
+  daily = false,
+) {
+  const prefix = daily ? "daily-backup" : "online-backup";
+  const kind = daily ? "daily" : "online";
   const wait = async (name) => {
     for (;;) {
       if (signal.aborted) throw new Error("online test driver aborted");
       try {
         const contents = await readFile(
-          join(fixture, `online-backup.${name}`),
+          join(fixture, `${prefix}.${name}`),
           "utf8",
         );
         assert("continue\n".startsWith(contents));
@@ -55,7 +67,7 @@ async function onlineTestDriver(fixture, signal, outsideInterval = false) {
     }
   };
   const ready = async (name) => {
-    const path = join(fixture, `online-backup.${name}`);
+    const path = join(fixture, `${prefix}.${name}`);
     await writeFile(path, "rea", { flag: "wx" });
     await new Promise((accept) => setTimeout(accept, 60));
     await writeFile(path, "dy\n", { flag: "a" });
@@ -65,7 +77,7 @@ async function onlineTestDriver(fixture, signal, outsideInterval = false) {
   const written = outsideInterval ? 0 : Date.now();
   await wait("complete");
   await writeFile(
-    join(fixture, "online-backup-writes.json"),
+    join(fixture, `${prefix}-writes.json`),
     JSON.stringify([written]),
   );
   await ready("post");
@@ -73,11 +85,11 @@ async function onlineTestDriver(fixture, signal, outsideInterval = false) {
   await ready("restored");
   await wait("restart");
   await writeFile(
-    join(fixture, "online-backup-acceptance.json"),
+    join(fixture, `${prefix}-acceptance.json`),
     JSON.stringify({
-      online_public_writes_verified: true,
-      online_restored_device_team_verified: true,
-      online_restored_restart_verified: true,
+      [`${kind}_public_writes_verified`]: true,
+      [`${kind}_restored_device_team_verified`]: true,
+      [`${kind}_restored_restart_verified`]: true,
     }),
   );
 }
@@ -162,6 +174,242 @@ test("failed online capture aborts its driver without restoration or a completio
       code: "ENOENT",
     });
   } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("daily journey uses separate one-use signals and the observed active Worker interval", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-daily-archive-test-"));
+  try {
+    const confirmed = await runOnlineBackup({
+      fixture,
+      daily: true,
+      run: (signal) => onlineTestDriver(fixture, signal, false, true),
+      capture: async () => {
+        const started = Date.now();
+        await new Promise((accept) => setTimeout(accept, 100));
+        const finished = Date.now();
+        await new Promise((accept) => setTimeout(accept, 25));
+        return { started, finished };
+      },
+      restore: async () => {},
+      restart: async () => {},
+    });
+    assert.equal(confirmed, 1);
+    await assert.rejects(readFile(join(fixture, "online-backup.ready")), {
+      code: "ENOENT",
+    });
+    await assert.rejects(
+      runOnlineBackup({ fixture, daily: true }),
+      /signal already exists/,
+    );
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("daily journey refuses a missing active interval before restoring", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-daily-archive-test-"));
+  let restored = false;
+  try {
+    await assert.rejects(
+      runOnlineBackup({
+        fixture,
+        daily: true,
+        run: (signal) => onlineTestDriver(fixture, signal, false, true),
+        capture: async () => {},
+        restore: async () => {
+          restored = true;
+        },
+        restart: async () => {},
+      }),
+      /invalid active capture interval/,
+    );
+    assert.equal(restored, false);
+    await assert.rejects(readFile(join(fixture, "daily-backup.complete")), {
+      code: "ENOENT",
+    });
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+test("daily journey rejects writes outside the observed active capture interval", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-daily-archive-test-"));
+  let restored = false;
+  try {
+    await assert.rejects(
+      runOnlineBackup({
+        fixture,
+        daily: true,
+        run: (signal) => onlineTestDriver(fixture, signal, false, true),
+        capture: async () => {
+          await new Promise((accept) => setTimeout(accept, 75));
+          const started = Date.now();
+          await new Promise((accept) => setTimeout(accept, 50));
+          return { started, finished: Date.now() };
+        },
+        restore: async () => {
+          restored = true;
+        },
+        restart: async () => {},
+      }),
+      /no confirmed public write/,
+    );
+    assert.equal(restored, false);
+  } finally {
+    await rm(fixture, { recursive: true });
+  }
+});
+
+function dailySamples() {
+  const now = 1_700_000_000_000;
+  const job = {
+    slot: "2026-11-18",
+    attempts: 1,
+    owner: "worker-one",
+    leaseUntil: now + 60_000,
+    availableAt: now,
+    createdAt: now,
+    finishedAt: null,
+    lastError: null,
+  };
+  return [
+    { observedAt: now, jobs: [{ ...job }], archives: [], staging: 1 },
+    {
+      observedAt: now + 21_000,
+      jobs: [{ ...job, leaseUntil: now + 80_000 }],
+      archives: [],
+      staging: 1,
+    },
+    {
+      observedAt: now + 22_000,
+      jobs: [
+        { ...job, owner: null, leaseUntil: null, finishedAt: now + 21_500 },
+      ],
+      archives: [{ name: "scoplen-2026-11-18.age", size: 100 }],
+      staging: 0,
+    },
+  ];
+}
+
+test("daily runtime evidence requires renewal, one owner and confirmed completion", () => {
+  const samples = dailySamples();
+  assert.deepEqual(assertDailyCapture(samples, "2026-11-18"), {
+    started: samples[0].observedAt,
+    finished: samples[1].observedAt,
+  });
+  for (const mutate of [
+    (value) => {
+      value[1].jobs[0].owner = "worker-two";
+    },
+    (value) => {
+      value[1].jobs[0].attempts = 2;
+    },
+    (value) => {
+      value[1].jobs.push({ ...value[1].jobs[0] });
+    },
+    (value) => {
+      value[1].jobs[0].leaseUntil = value[0].jobs[0].leaseUntil;
+    },
+    (value) => {
+      value[1].observedAt = value[0].observedAt + 100;
+    },
+    (value) => {
+      value[2].jobs[0].finishedAt = null;
+    },
+    (value) => {
+      value[2].archives = [];
+    },
+    (value) => {
+      value[2].staging = 1;
+    },
+    (value) => {
+      value[0].staging = 0;
+      value[1].staging = 0;
+    },
+  ]) {
+    const invalid = dailySamples();
+    mutate(invalid);
+    assert.throws(() => assertDailyCapture(invalid, "2026-11-18"));
+  }
+});
+
+test("daily events accept only fixed content-free status fields", () => {
+  const event = {
+    target: "backup.daily",
+    fields: {
+      message: "scheduled backup status",
+      event: "started",
+      slot: "2026-11-18",
+      attempt: 1,
+      archive: "scoplen-2026-11-18.age",
+    },
+  };
+  assertDailyEvents([event]);
+  assertDailyEvents([
+    {
+      target: "backup.daily",
+      fields: {
+        message: "scheduled backups require a Worker process",
+        event: "enabled",
+        reason: "worker_required",
+      },
+    },
+  ]);
+  for (const fields of [
+    { ...event.fields, path: "/private/archive" },
+    { ...event.fields, reason: "private_error_text" },
+    { ...event.fields, archive: "/private/scoplen-2026-11-18.age" },
+    { ...event.fields, message: "underlying private failure" },
+  ])
+    assert.throws(() => assertDailyEvents([{ ...event, fields }]));
+});
+
+test("daily persisted probe validates the public slot payload and deterministic identity", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "scoplen-daily-job-probe-"));
+  const path = join(fixture, "jobs.sqlite");
+  const database = new DatabaseSync(path);
+  try {
+    database.exec(
+      "CREATE TABLE jobs (id BLOB, kind TEXT, payload BLOB, available_at_ms INTEGER, attempts INTEGER, lease_owner TEXT, lease_until_ms INTEGER, created_at_ms INTEGER, finished_at_ms INTEGER, last_error TEXT)",
+    );
+    const day = Buffer.alloc(8);
+    day.writeBigInt64BE(
+      BigInt(Date.parse("2026-11-18T00:00:00Z") / 86_400_000),
+    );
+    const id = createHash("sha256")
+      .update("scoplen.backup.daily.v1\0")
+      .update(day)
+      .digest()
+      .subarray(0, 16);
+    database
+      .prepare(
+        "INSERT INTO jobs VALUES (?, 'backup.daily', ?, 1, 1, 'worker-one', 60001, 1, NULL, NULL)",
+      )
+      .run(id, Buffer.from("2026-11-18"));
+    assert.deepEqual(inspectDailyJobs(path), [
+      {
+        slot: "2026-11-18",
+        attempts: 1,
+        owner: "worker-one",
+        leaseUntil: 60001,
+        availableAt: 1,
+        createdAt: 1,
+        finishedAt: null,
+        lastError: null,
+      },
+    ]);
+    database
+      .prepare("UPDATE jobs SET payload = ?")
+      .run(Buffer.from("2026-02-30"));
+    assert.throws(() => inspectDailyJobs(path));
+    database
+      .prepare("UPDATE jobs SET payload = ?, id = ?")
+      .run(Buffer.from("2026-11-18"), Buffer.alloc(16));
+    assert.throws(() => inspectDailyJobs(path));
+  } finally {
+    database.close();
     await rm(fixture, { recursive: true });
   }
 });

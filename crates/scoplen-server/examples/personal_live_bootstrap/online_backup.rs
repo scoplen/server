@@ -7,7 +7,8 @@ use super::{
 };
 
 async fn wait(directory: &Path, name: &str) -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(120), async {
+    let timeout = if name.starts_with("daily-backup.") { 300 } else { 120 };
+    tokio::time::timeout(Duration::from_secs(timeout), async {
         loop {
             if signal(directory, name)? {
                 return Ok(());
@@ -101,7 +102,8 @@ async fn select_restored_revision(
     actor.read_personal_from_original_device(https).await
 }
 
-pub(super) async fn verify(https: &Https, directory: &Path) -> Result<()> {
+pub(super) async fn verify(https: &Https, directory: &Path, daily: bool) -> Result<()> {
+    let prefix = if daily { "daily-backup" } else { "online-backup" };
     let mut first = PersonalConsumer::new(https).await?.exchange(https).await?;
     let first_team =
         verify_team(https, &first.device, &first.token, first.account.payload.account_id).await?;
@@ -112,10 +114,10 @@ pub(super) async fn verify(https: &Https, directory: &Path) -> Result<()> {
     verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     write_revision(https, &mut first, "pre-capture.example").await?;
     let mut retained = vec![first.object.clone()];
-    ready(directory, "online-backup.ready")?;
-    wait(directory, "online-backup.start").await?;
+    ready(directory, &format!("{prefix}.ready"))?;
+    wait(directory, &format!("{prefix}.start")).await?;
     let mut writes = Vec::new();
-    while !signal(directory, "online-backup.complete")? {
+    while !signal(directory, &format!("{prefix}.complete"))? {
         write_revision(https, &mut first, "pre-capture.example").await?;
         retained.push(first.object.clone());
         writes.push(
@@ -131,16 +133,16 @@ pub(super) async fn verify(https: &Https, directory: &Path) -> Result<()> {
     }
     write_revision(https, &mut first, "post-completion.example").await?;
     crate::write_private(
-        &directory.join("online-backup-writes.json"),
+        &directory.join(format!("{prefix}-writes.json")),
         &serde_json::to_string(&writes).map_err(|_| "online write receipt invalid")?,
     )?;
-    ready(directory, "online-backup.post")?;
-    wait(directory, "online-backup.resume").await?;
+    ready(directory, &format!("{prefix}.post"))?;
+    wait(directory, &format!("{prefix}.resume")).await?;
     select_restored_revision(https, &mut first, &retained).await?;
     second.token = second.device.authenticate(https).await?;
     verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
-    ready(directory, "online-backup.restored")?;
-    wait(directory, "online-backup.restart").await?;
+    ready(directory, &format!("{prefix}.restored"))?;
+    wait(directory, &format!("{prefix}.restart")).await?;
     select_restored_revision(https, &mut first, &retained).await?;
     second.token = second.device.authenticate(https).await?;
     verify_team_isolation(https, &first, &first_team, &second, &second_team).await

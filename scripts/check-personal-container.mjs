@@ -51,6 +51,8 @@ const failurePhases = new Set([
   "restored archive data verification",
   "restored Compose startup and persistent restart",
   "online archive capture and restored Device restart",
+  "daily Worker capture and restored Device restart",
+  "daily Worker failures and shutdown",
   "offline snapshot restore",
   "matching old image recovery",
   "owned-resource cleanup",
@@ -535,7 +537,10 @@ export async function runOnlineBackup({
   restore,
   restart,
   timeout = 120_000,
+  daily = false,
 }) {
+  const prefix = daily ? "daily-backup" : "online-backup";
+  const kind = daily ? "daily" : "online";
   const names = [
     "ready",
     "start",
@@ -547,7 +552,7 @@ export async function runOnlineBackup({
   ];
   for (const name of names) {
     try {
-      await lstat(join(fixture, `online-backup.${name}`));
+      await lstat(join(fixture, `${prefix}.${name}`));
       assert.fail("online backup signal already exists");
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -568,7 +573,7 @@ export async function runOnlineBackup({
       }
       try {
         const contents = await readFile(
-          join(fixture, `online-backup.${name}`),
+          join(fixture, `${prefix}.${name}`),
           "utf8",
         );
         assert(
@@ -584,7 +589,7 @@ export async function runOnlineBackup({
     }
   };
   const signal = (name) =>
-    writeFile(join(fixture, `online-backup.${name}`), "continue\n", {
+    writeFile(join(fixture, `${prefix}.${name}`), "continue\n", {
       flag: "wx",
       mode: 0o600,
     });
@@ -595,24 +600,31 @@ export async function runOnlineBackup({
     capturing = capture();
     capturing.catch(() => {});
     await signal("start");
-    await capturing;
+    const interval = await capturing;
     const finished = Date.now();
+    const captureStarted = daily ? interval?.started : started;
+    const captureFinished = daily ? interval?.finished : finished;
+    assert(
+      Number.isSafeInteger(captureStarted) &&
+        Number.isSafeInteger(captureFinished) &&
+        captureStarted >= started &&
+        captureFinished <= finished &&
+        captureStarted < captureFinished,
+      "invalid active capture interval",
+    );
     await signal("complete");
     await wait("post");
     const writes = JSON.parse(
-      await readFile(join(fixture, "online-backup-writes.json"), "utf8"),
+      await readFile(join(fixture, `${prefix}-writes.json`), "utf8"),
     );
     assert(
       Array.isArray(writes) && writes.every(Number.isSafeInteger),
       "invalid online write receipts",
     );
     const confirmed = writes.filter(
-      (time) => time >= started && time <= finished,
+      (time) => time >= captureStarted && time <= captureFinished,
     ).length;
-    assert(
-      confirmed > 0,
-      "no confirmed public write during online CLI capture",
-    );
+    assert(confirmed > 0, "no confirmed public write during active capture");
     await restore();
     await signal("resume");
     await wait("restored");
@@ -622,12 +634,12 @@ export async function runOnlineBackup({
     await completed;
     assert.deepEqual(
       JSON.parse(
-        await readFile(join(fixture, "online-backup-acceptance.json"), "utf8"),
+        await readFile(join(fixture, `${prefix}-acceptance.json`), "utf8"),
       ),
       {
-        online_public_writes_verified: true,
-        online_restored_device_team_verified: true,
-        online_restored_restart_verified: true,
+        [`${kind}_public_writes_verified`]: true,
+        [`${kind}_restored_device_team_verified`]: true,
+        [`${kind}_restored_restart_verified`]: true,
       },
     );
     return confirmed;
@@ -636,6 +648,129 @@ export async function runOnlineBackup({
     await completed.catch(() => {});
     await capturing?.catch(() => {});
   }
+}
+
+export function assertDailyCapture(samples, slot) {
+  assert(
+    samples.length >= 3,
+    "daily capture needs persisted ownership observations",
+  );
+  for (const sample of samples) {
+    assert.equal(sample.jobs.length, 1, "daily Worker created duplicate slots");
+    assert.equal(sample.jobs[0].slot, slot);
+    assert.equal(
+      sample.jobs[0].attempts,
+      1,
+      "daily slot was claimed more than once",
+    );
+  }
+  const claimed = samples.filter(
+    (sample) => sample.jobs[0].finishedAt === null,
+  );
+  const active = claimed.filter(
+    (sample) => sample.staging > 0 && sample.archives.length === 0,
+  );
+  assert(
+    active.length >= 2,
+    "daily capture completed before ownership observation",
+  );
+  const first = active[0];
+  const last = active.at(-1);
+  assert.equal(typeof first.jobs[0].owner, "string");
+  assert(first.jobs[0].owner.length > 0);
+  for (const sample of claimed) {
+    assert.equal(
+      sample.jobs[0].owner,
+      first.jobs[0].owner,
+      "daily claim changed owners",
+    );
+    assert(
+      sample.jobs[0].leaseUntil > sample.observedAt,
+      "daily claim expired during capture",
+    );
+  }
+  assert(
+    last.jobs[0].leaseUntil > first.jobs[0].leaseUntil,
+    "daily capture did not renew its lease",
+  );
+  assert(
+    last.observedAt - first.observedAt >= 20_000,
+    "daily capture did not cross a renewal interval",
+  );
+  const completed = samples.at(-1);
+  const job = completed.jobs[0];
+  assert(
+    Number.isSafeInteger(job.finishedAt),
+    "daily completion was not confirmed",
+  );
+  assert.equal(job.owner, null);
+  assert.equal(job.leaseUntil, null);
+  assert.equal(job.lastError, null);
+  assert.equal(completed.archives.length, 1);
+  assert.equal(completed.archives[0].name, `scoplen-${slot}.age`);
+  assert(completed.archives[0].size > 0);
+  assert.equal(completed.staging, 0);
+  return { started: first.observedAt, finished: last.observedAt };
+}
+
+export function assertDailyEvents(records) {
+  const events = records.filter((record) => record.target === "backup.daily");
+  assert(events.length > 0, "daily Worker emitted no status events");
+  for (const { fields } of events) {
+    assert.equal(
+      fields.message,
+      fields.reason === "worker_required"
+        ? "scheduled backups require a Worker process"
+        : "scheduled backup status",
+    );
+    assert(
+      [
+        "enabled",
+        "disabled",
+        "started",
+        "retry_scheduled",
+        "succeeded",
+        "exhausted",
+        "unconfirmed",
+      ].includes(fields.event),
+    );
+    for (const name of Object.keys(fields))
+      assert(
+        [
+          "message",
+          "event",
+          "slot",
+          "attempt",
+          "archive",
+          "reason",
+          "retry_at_ms",
+          "completed_at_ms",
+        ].includes(name),
+        "unsafe daily event field",
+      );
+    if (fields.slot !== undefined)
+      assert(/^\d{4}-\d{2}-\d{2}$/.test(fields.slot));
+    if (fields.archive !== undefined)
+      assert.equal(fields.archive, `scoplen-${fields.slot}.age`);
+    if (fields.reason !== undefined)
+      assert(
+        [
+          "worker_required",
+          "clock_unavailable",
+          "job_update_unconfirmed",
+          "lease_update_unconfirmed",
+          "output_exists",
+          "capture_failed",
+          "completion_unconfirmed",
+          "attempt_limit",
+          "schedule_unavailable",
+        ].includes(fields.reason),
+      );
+    for (const name of ["attempt", "retry_at_ms", "completed_at_ms"])
+      if (fields[name] !== undefined)
+        assert(Number.isSafeInteger(fields[name]) && fields[name] >= 0);
+  }
+  return events;
 }
 
 export async function checkPersonalContainer(driverPath, doctorPath) {
@@ -671,6 +806,20 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
   const recoveryVolume = `${project}_recovery`;
   const archiveVolume = `${project}_archive`;
   const onlineArchiveVolume = `${project}_online_archive`;
+  const dailyArchiveVolume = `${project}_daily_archive`;
+  const dailyFailureVolume = `${project}_daily_failure`;
+  const dailyInterruptedVolume = `${project}_daily_interrupted`;
+  const dailyUnconfirmedVolume = `${project}_daily_unconfirmed`;
+  const dailyPassphraseVolume = `${project}_daily_passphrase`;
+  const dailyWorkers = [1, 2].map(
+    (index) => `${project}-daily-worker-${index}`,
+  );
+  const dailyFailureWorker = `${project}-daily-failure-worker`;
+  const dailyAllWorker = `${project}-daily-all-worker`;
+  const dailyDisabledWorker = `${project}-daily-disabled-worker`;
+  const dailyInterruptedWorker = `${project}-daily-interrupted-worker`;
+  const dailyUnconfirmedWorker = `${project}-daily-unconfirmed-worker`;
+  const dailyPassphraseWorker = `${project}-daily-passphrase-worker`;
   let sequence = 0;
   let phase = "preflight";
   let succeeded = false;
@@ -855,12 +1004,24 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       selectedImage,
       restored = false,
       restoredVolume = archiveVolume,
+      daily = false,
+      dailyOutput = dailyArchiveVolume,
     ) =>
       JSON.stringify({
         services: {
           server: {
             image: selectedImage,
             labels: { [ownerLabel]: run },
+            ...(daily
+              ? {
+                  command: [
+                    "--config",
+                    "/etc/scoplen/personal.toml",
+                    "--role",
+                    "api",
+                  ],
+                }
+              : {}),
             ...(restored
               ? {
                   environment: {
@@ -870,6 +1031,15 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
                       "/var/lib/spl/restored/audit-signing.key",
                     SPL_STORAGE_OBJECT_DIRECTORY:
                       "/var/lib/spl/restored/objects",
+                    ...(daily
+                      ? {
+                          SPL_BACKUP_ENABLED: "true",
+                          SPL_BACKUP_DAILY_UTC: "23:59",
+                          SPL_BACKUP_DIRECTORY: "/recovery/archives",
+                          SPL_BACKUP_PASSPHRASE_FILE:
+                            "/recovery/passphrase.txt",
+                        }
+                      : {}),
                   },
                   volumes: [
                     {
@@ -877,6 +1047,15 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
                       source: "archive",
                       target: "/var/lib/spl",
                     },
+                    ...(daily
+                      ? [
+                          {
+                            type: "volume",
+                            source: "daily",
+                            target: "/recovery",
+                          },
+                        ]
+                      : []),
                   ],
                 }
               : {}),
@@ -887,6 +1066,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           ...(restored
             ? { archive: { external: true, name: restoredVolume } }
             : {}),
+          ...(daily ? { daily: { external: true, name: dailyOutput } } : {}),
         },
         networks: { default: { labels: { [ownerLabel]: run } } },
       });
@@ -1657,6 +1837,648 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       `Online capture confirmed ${confirmedOnlineWrites} public writes and restored original Devices across restart.`,
     );
 
+    progress("daily Worker capture and restored Device restart");
+    const slot = new Date().toISOString().slice(0, 10);
+    const dailyArchive = `scoplen-${slot}.age`;
+    const prepareDailyVolume = async (name, collision = false) => {
+      await docker([
+        "volume",
+        "create",
+        "--label",
+        `${ownerLabel}=${run}`,
+        name,
+      ]);
+      assertOwnedResource((await inspect("volume", name)).Labels, run);
+      await sqliteProbe(
+        collision ? "prepare-daily-collision" : "prepare-daily-parent",
+        ["--mount", `type=volume,source=${name},target=/recovery`],
+        "0:0",
+      );
+    };
+    await prepareDailyVolume(dailyArchiveVolume);
+    await sqliteProbe("prepare-daily-source", [
+      "--mount",
+      `type=volume,source=${onlineArchiveVolume},target=/source-parent`,
+    ]);
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    await writeFile(
+      override,
+      overrideContent(image, true, onlineArchiveVolume, true),
+    );
+    await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+    container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+    await checkOnlineService();
+    const dailyState = async (
+      source = onlineArchiveVolume,
+      output = dailyArchiveVolume,
+    ) =>
+      JSON.parse(
+        (
+          await sqliteProbe("daily-state", [
+            "--mount",
+            `type=volume,source=${source},target=/source-parent`,
+            "--mount",
+            `type=volume,source=${output},target=/recovery,readonly`,
+          ])
+        ).stdout,
+      );
+    const records = async (name) => {
+      const result = await docker(["logs", name]);
+      return `${result.stdout}\n${result.stderr}`
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line));
+    };
+    const startDailyWorker = async (
+      name,
+      source = onlineArchiveVolume,
+      output = dailyArchiveVolume,
+      cpus = "0.025",
+      enabled = true,
+      roles = ["worker"],
+    ) => {
+      await docker([
+        "run",
+        "--detach",
+        "--name",
+        name,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--cpus",
+        cpus,
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--label",
+        `com.docker.compose.project=${project}`,
+        "--env",
+        "SPL_SERVER_PUBLIC_HOST=localhost",
+        "--env",
+        `SPL_SERVER_PUBLIC_PORT=${port}`,
+        "--env",
+        "SPL_SERVER_DATA_DIR=/var/lib/spl/restored",
+        "--env",
+        "SPL_STORAGE_KMS_KEY_FILE=/var/lib/spl/restored/kms.key",
+        "--env",
+        "SPL_STORAGE_KMS_AUDIT_KEY_FILE=/var/lib/spl/restored/audit-signing.key",
+        "--env",
+        "SPL_STORAGE_OBJECT_DIRECTORY=/var/lib/spl/restored/objects",
+        "--env",
+        `SPL_BACKUP_ENABLED=${enabled}`,
+        "--env",
+        "SPL_BACKUP_DAILY_UTC=23:59",
+        "--env",
+        "SPL_BACKUP_DIRECTORY=/recovery/archives",
+        "--env",
+        "SPL_BACKUP_PASSPHRASE_FILE=/recovery/passphrase.txt",
+        "--mount",
+        `type=volume,source=${source},target=/var/lib/spl`,
+        "--mount",
+        `type=volume,source=${output},target=/recovery`,
+        "--mount",
+        `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
+        image,
+        "--config",
+        "/etc/scoplen/personal.toml",
+        ...roles.flatMap((role) => ["--role", role]),
+      ]);
+      const worker = await inspect("container", name);
+      assertOwnedResource(worker.Config.Labels, run, project);
+      assert.equal(worker.Image, imageId);
+    };
+    const stopDailyWorker = async (name, expected = 0) => {
+      await docker(["stop", "--time", "16", name]);
+      assert.equal((await inspect("container", name)).State.ExitCode, expected);
+    };
+    const dailyCli = async (
+      operation,
+      destination = dailyArchiveVolume,
+      allowFailure = false,
+      archiveSource = dailyArchiveVolume,
+    ) => {
+      const creating = operation === "create";
+      const result = await docker(
+        [
+          "run",
+          "--rm",
+          "--pull",
+          "never",
+          "--network",
+          "none",
+          "--read-only",
+          "--cap-drop",
+          "ALL",
+          "--security-opt",
+          "no-new-privileges:true",
+          "--tmpfs",
+          "/tmp:rw,noexec,nosuid,nodev,size=256m,mode=1777",
+          "--label",
+          `${ownerLabel}=${run}`,
+          "--env",
+          "SPL_SERVER_PUBLIC_HOST=localhost",
+          "--env",
+          `SPL_SERVER_PUBLIC_PORT=${port}`,
+          "--env",
+          "SPL_SERVER_DATA_DIR=/var/lib/spl/restored",
+          "--env",
+          "SPL_STORAGE_KMS_KEY_FILE=/var/lib/spl/restored/kms.key",
+          "--env",
+          "SPL_STORAGE_KMS_AUDIT_KEY_FILE=/var/lib/spl/restored/audit-signing.key",
+          "--env",
+          "SPL_STORAGE_OBJECT_DIRECTORY=/var/lib/spl/restored/objects",
+          "--mount",
+          `type=volume,source=${archiveSource},target=/archive,readonly`,
+          "--mount",
+          `type=volume,source=${destination},target=/recovery`,
+          ...(creating
+            ? [
+                "--mount",
+                `type=volume,source=${destination},target=/var/lib/spl`,
+                "--mount",
+                `type=bind,source=${join(fixture, "tls")},target=/run/scoplen/tls,readonly`,
+              ]
+            : []),
+          "--entrypoint",
+          "/app/splctl",
+          image,
+          "backup",
+          operation,
+          ...(creating
+            ? [
+                "--config",
+                "/etc/scoplen/personal.toml",
+                "--output",
+                "/recovery/after-stop.age",
+              ]
+            : ["--archive", `/archive/archives/${dailyArchive}`]),
+          ...(operation === "restore"
+            ? ["--data-dir", "/recovery/restored"]
+            : []),
+          "--passphrase-file",
+          creating ? "/recovery/passphrase.txt" : "/archive/passphrase.txt",
+        ],
+        { allowFailure, timeout: 180_000 },
+      );
+      if (!allowFailure) assertBackupAcceptance(result, operation);
+      return result;
+    };
+    const waitDailyFailure = async (volume, reason) => {
+      const deadline = Date.now() + 100_000;
+      for (;;) {
+        const state = await dailyState(volume, volume);
+        assert.equal(state.jobs.length, 1);
+        const job = state.jobs[0];
+        assert.equal(job.slot, slot);
+        assert(job.attempts <= 2);
+        if (job.attempts === 2 && job.owner === null) {
+          assert.equal(job.finishedAt, null);
+          assert.equal(job.lastError, reason);
+          assert(job.availableAt - state.observedAt > 290_000);
+          return state;
+        }
+        assert(Date.now() < deadline, "daily failed attempt timed out");
+        await new Promise((accept) => setTimeout(accept, 1000));
+      }
+    };
+    assert.deepEqual(
+      (await dailyState()).jobs,
+      [],
+      "API-only process scheduled a daily slot",
+    );
+    const apiEvents = assertDailyEvents(await records(container));
+    assert(apiEvents.some(({ fields }) => fields.reason === "worker_required"));
+    let completedDaily;
+    const dailyWrites = await runOnlineBackup({
+      fixture,
+      daily: true,
+      timeout: 180_000,
+      run: (signal) =>
+        command(driver, ["verify-daily-backup", fixture], {
+          signal,
+          timeout: 660_000,
+        }),
+      capture: async () => {
+        assert.deepEqual((await dailyState()).jobs, []);
+        await startDailyWorker(dailyWorkers[0]);
+        await startDailyWorker(
+          dailyWorkers[1],
+          onlineArchiveVolume,
+          dailyArchiveVolume,
+          "0.025",
+          true,
+          ["api", "worker"],
+        );
+        const samples = [];
+        const deadline = Date.now() + 180_000;
+        for (;;) {
+          const sample = await dailyState();
+          assert(
+            sample.jobs.length <= 1,
+            "daily Worker created duplicate slots",
+          );
+          if (sample.jobs[0]?.attempts > 0) samples.push(sample);
+          assert.equal((await request(origin, "/readyz", ca)).status, 200);
+          for (const name of dailyWorkers)
+            assert((await inspect("container", name)).State.Running);
+          if (
+            sample.jobs[0]?.finishedAt !== null &&
+            sample.jobs[0]?.finishedAt !== undefined
+          )
+            break;
+          assert(Date.now() < deadline, "daily Worker capture timed out");
+          await new Promise((accept) => setTimeout(accept, 1000));
+        }
+        const interval = assertDailyCapture(samples, slot);
+        completedDaily = samples.at(-1);
+        const logs = (await Promise.all(dailyWorkers.map(records))).flat();
+        const events = assertDailyEvents(logs);
+        assert.equal(
+          events.filter(({ fields }) => fields.event === "started").length,
+          1,
+        );
+        assert.equal(
+          events.filter(({ fields }) => fields.event === "succeeded").length,
+          1,
+        );
+        assert(
+          logs.some(
+            (record) =>
+              record.fields?.message === "worker heartbeat" &&
+              Date.parse(record.timestamp) > interval.started &&
+              Date.parse(record.timestamp) < interval.finished,
+          ),
+          "Worker maintenance did not progress during capture",
+        );
+        for (const name of dailyWorkers) await stopDailyWorker(name);
+        for (const name of dailyWorkers) await docker(["start", name]);
+        await new Promise((accept) => setTimeout(accept, 32_000));
+        const restarted = await dailyState();
+        assert.deepEqual(
+          restarted.jobs,
+          completedDaily.jobs,
+          "same-day restart changed confirmed job",
+        );
+        assert.deepEqual(
+          restarted.archives,
+          completedDaily.archives,
+          "same-day restart changed archive",
+        );
+        for (const name of dailyWorkers) await stopDailyWorker(name);
+        await startDailyWorker(
+          dailyAllWorker,
+          onlineArchiveVolume,
+          dailyArchiveVolume,
+          "1",
+          true,
+          ["all"],
+        );
+        await new Promise((accept) => setTimeout(accept, 32_000));
+        const allRoles = await dailyState();
+        assert.deepEqual(
+          allRoles.jobs,
+          completedDaily.jobs,
+          "all-role startup repeated the same-day claim",
+        );
+        assert.deepEqual(allRoles.archives, completedDaily.archives);
+        assert(
+          assertDailyEvents(await records(dailyAllWorker)).some(
+            ({ fields }) => fields.event === "enabled",
+          ),
+        );
+        await stopDailyWorker(dailyAllWorker);
+        return interval;
+      },
+      restore: async () => {
+        await dailyCli("verify");
+        await dailyCli("restore");
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await sqliteProbe("check-online-archive-restore", [
+          "--mount",
+          `type=volume,source=${onlineArchiveVolume},target=/source-parent,readonly`,
+          "--mount",
+          `type=volume,source=${dailyArchiveVolume},target=/recovery,readonly`,
+        ]);
+        await writeFile(
+          override,
+          overrideContent(image, true, dailyArchiveVolume),
+        );
+        await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+        container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+        await checkOnlineService();
+      },
+      restart: async () => {
+        await compose(["stop", "server"]);
+        assert.equal((await inspect("container", container)).State.ExitCode, 0);
+        await compose(["up", "--detach", "--no-build"]);
+        await checkOnlineService();
+      },
+    });
+    console.log(
+      `Daily Worker capture confirmed ${dailyWrites} public writes, renewed one two-Worker claim, suppressed same-day restart duplicates and restored original Devices.`,
+    );
+
+    progress("daily Worker failures and shutdown");
+    await prepareDailyVolume(dailyFailureVolume, true);
+    await dailyCli("restore", dailyFailureVolume);
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    await writeFile(
+      override,
+      overrideContent(
+        image,
+        true,
+        dailyFailureVolume,
+        true,
+        dailyFailureVolume,
+      ),
+    );
+    await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+    container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+    await checkOnlineService();
+    await startDailyWorker(
+      dailyFailureWorker,
+      dailyFailureVolume,
+      dailyFailureVolume,
+      "1",
+    );
+    const failedDaily = await waitDailyFailure(
+      dailyFailureVolume,
+      "output_exists",
+    );
+    assert.equal((await request(origin, "/readyz", ca)).status, 200);
+    await command(driver, ["verify-daily-backup-available", fixture]);
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(join(fixture, "daily-failure-acceptance.json"), "utf8"),
+      ),
+      {
+        daily_failure_public_sync_verified: true,
+      },
+    );
+    assert.equal((await inspect("container", container)).RestartCount, 0);
+    const failedEvents = assertDailyEvents(await records(dailyFailureWorker));
+    assert(
+      failedEvents.some(({ fields }) => fields.event === "retry_scheduled"),
+    );
+    assert(!failedEvents.some(({ fields }) => fields.event === "succeeded"));
+    await stopDailyWorker(dailyFailureWorker);
+    await docker(["start", dailyFailureWorker]);
+    await new Promise((accept) => setTimeout(accept, 32_000));
+    assert.deepEqual(
+      (await dailyState(dailyFailureVolume, dailyFailureVolume)).jobs,
+      failedDaily.jobs,
+      "restart reset the persisted retry delay",
+    );
+    await stopDailyWorker(dailyFailureWorker);
+    await sqliteProbe("check-daily-collision", [
+      "--mount",
+      `type=volume,source=${dailyFailureVolume},target=/recovery,readonly`,
+    ]);
+    await startDailyWorker(
+      dailyDisabledWorker,
+      dailyFailureVolume,
+      dailyFailureVolume,
+      "1",
+      false,
+    );
+    await new Promise((accept) => setTimeout(accept, 32_000));
+    const disabled = await dailyState(dailyFailureVolume, dailyFailureVolume);
+    assert.deepEqual(
+      disabled.jobs,
+      failedDaily.jobs,
+      "disabled Worker changed persisted retry state",
+    );
+    assert.deepEqual(
+      disabled.archives,
+      failedDaily.archives,
+      "disabled Worker changed retained output",
+    );
+    const disabledEvents = assertDailyEvents(
+      await records(dailyDisabledWorker),
+    );
+    assert(disabledEvents.some(({ fields }) => fields.event === "disabled"));
+    assert(!disabledEvents.some(({ fields }) => fields.event === "started"));
+    await stopDailyWorker(dailyDisabledWorker);
+
+    await prepareDailyVolume(dailyUnconfirmedVolume);
+    await dailyCli("restore", dailyUnconfirmedVolume);
+    await sqliteProbe("deny-daily-completion", [
+      "--mount",
+      `type=volume,source=${dailyUnconfirmedVolume},target=/source-parent`,
+    ]);
+    await startDailyWorker(
+      dailyUnconfirmedWorker,
+      dailyUnconfirmedVolume,
+      dailyUnconfirmedVolume,
+      "1",
+    );
+    const unconfirmed = await waitDailyFailure(
+      dailyUnconfirmedVolume,
+      "completion_unconfirmed",
+    );
+    assert.equal(unconfirmed.archives.length, 1);
+    assert.equal(unconfirmed.archives[0].name, dailyArchive);
+    assert(unconfirmed.archives[0].size > 0);
+    assert.equal(unconfirmed.staging, 0);
+    const unconfirmedEvents = assertDailyEvents(
+      await records(dailyUnconfirmedWorker),
+    );
+    assert(
+      unconfirmedEvents.some(
+        ({ fields }) =>
+          fields.event === "unconfirmed" &&
+          fields.reason === "completion_unconfirmed",
+      ),
+    );
+    assert(
+      unconfirmedEvents.some(
+        ({ fields }) => fields.event === "retry_scheduled",
+      ),
+    );
+    assert(
+      !unconfirmedEvents.some(({ fields }) => fields.event === "succeeded"),
+    );
+    await dailyCli(
+      "verify",
+      dailyUnconfirmedVolume,
+      false,
+      dailyUnconfirmedVolume,
+    );
+    await stopDailyWorker(dailyUnconfirmedWorker);
+    await docker(["start", dailyUnconfirmedWorker]);
+    await new Promise((accept) => setTimeout(accept, 32_000));
+    const unconfirmedRestart = await dailyState(
+      dailyUnconfirmedVolume,
+      dailyUnconfirmedVolume,
+    );
+    assert.deepEqual(
+      unconfirmedRestart.jobs,
+      unconfirmed.jobs,
+      "restart inferred success from an unconfirmed archive",
+    );
+    assert.deepEqual(
+      unconfirmedRestart.archives,
+      unconfirmed.archives,
+      "unconfirmed archive changed across restart",
+    );
+    await stopDailyWorker(dailyUnconfirmedWorker);
+
+    await prepareDailyVolume(dailyPassphraseVolume);
+    await dailyCli("restore", dailyPassphraseVolume);
+    await sqliteProbe("empty-daily-passphrase", [
+      "--mount",
+      `type=volume,source=${dailyPassphraseVolume},target=/recovery`,
+    ]);
+    await compose(["stop", "server"]);
+    assert.equal((await inspect("container", container)).State.ExitCode, 0);
+    await writeFile(
+      override,
+      overrideContent(
+        image,
+        true,
+        dailyPassphraseVolume,
+        true,
+        dailyPassphraseVolume,
+      ),
+    );
+    await compose(["up", "--detach", "--no-build", "--force-recreate"]);
+    container = (await compose(["ps", "--quiet", "server"])).stdout.trim();
+    await checkOnlineService();
+    await startDailyWorker(
+      dailyPassphraseWorker,
+      dailyPassphraseVolume,
+      dailyPassphraseVolume,
+      "1",
+    );
+    const passphraseFailure = await waitDailyFailure(
+      dailyPassphraseVolume,
+      "capture_failed",
+    );
+    assert.deepEqual(passphraseFailure.archives, []);
+    assert.equal(passphraseFailure.staging, 0);
+    const passphraseEvents = assertDailyEvents(
+      await records(dailyPassphraseWorker),
+    );
+    assert(
+      passphraseEvents.some(
+        ({ fields }) =>
+          fields.event === "retry_scheduled" &&
+          fields.reason === "capture_failed",
+      ),
+    );
+    assert(
+      !passphraseEvents.some(({ fields }) => fields.event === "succeeded"),
+    );
+    await command(driver, [
+      "verify-daily-backup-available",
+      fixture,
+      "--passphrase-failure",
+    ]);
+    assert.deepEqual(
+      JSON.parse(
+        await readFile(
+          join(fixture, "daily-passphrase-failure-acceptance.json"),
+          "utf8",
+        ),
+      ),
+      {
+        daily_failure_public_sync_verified: true,
+      },
+    );
+    assert.equal((await inspect("container", container)).RestartCount, 0);
+    await stopDailyWorker(dailyPassphraseWorker);
+
+    await prepareDailyVolume(dailyInterruptedVolume);
+    await dailyCli("restore", dailyInterruptedVolume);
+    await startDailyWorker(
+      dailyInterruptedWorker,
+      dailyInterruptedVolume,
+      dailyInterruptedVolume,
+      "0.01",
+    );
+    const interruptedDeadline = Date.now() + 100_000;
+    let interrupted;
+    for (;;) {
+      const state = await dailyState(
+        dailyInterruptedVolume,
+        dailyInterruptedVolume,
+      );
+      if (state.jobs[0]?.attempts === 2) {
+        interrupted = state.jobs[0];
+        assert(interrupted.owner !== null && interrupted.finishedAt === null);
+        break;
+      }
+      assert(
+        Date.now() < interruptedDeadline,
+        "daily interrupted attempt timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 500));
+    }
+    const shutdownStarted = Date.now();
+    await docker(["kill", "--signal", "SIGINT", dailyInterruptedWorker]);
+    await new Promise((accept) => setTimeout(accept, 1000));
+    const duringShutdown = await dailyCli(
+      "create",
+      dailyInterruptedVolume,
+      true,
+    );
+    assert(duringShutdown.error, "offline admission escaped a draining Worker");
+    await new Promise((accept) =>
+      setTimeout(accept, Math.max(0, shutdownStarted + 7500 - Date.now())),
+    );
+    assert((await inspect("container", dailyInterruptedWorker)).State.Running);
+    assert(
+      (await dailyCli("create", dailyInterruptedVolume, true)).error,
+      "offline admission escaped before the timed-out process exited",
+    );
+    for (;;) {
+      const state = await inspect("container", dailyInterruptedWorker);
+      if (!state.State.Running) {
+        assert.equal(state.State.ExitCode, 1);
+        break;
+      }
+      assert(
+        Date.now() - shutdownStarted < 16_000,
+        "daily capture extended the common shutdown deadline",
+      );
+      await new Promise((accept) => setTimeout(accept, 250));
+    }
+    const shutdownElapsed = Date.now() - shutdownStarted;
+    assert(shutdownElapsed >= 9000 && shutdownElapsed < 16_000);
+    const interruptedState = await dailyState(
+      dailyInterruptedVolume,
+      dailyInterruptedVolume,
+    );
+    assert.equal(interruptedState.jobs[0].attempts, interrupted.attempts);
+    assert.equal(interruptedState.jobs[0].owner, interrupted.owner);
+    assert.equal(interruptedState.jobs[0].finishedAt, null);
+    assert.deepEqual(interruptedState.archives, []);
+    const interruptedLogs = await docker(["logs", dailyInterruptedWorker]);
+    assert(
+      interruptedLogs.stderr.includes(
+        "spl-server: server shutdown exceeded 10 seconds; the deployment lease remains held until this process exits. Exit this process before an offline backup or restore",
+      ),
+    );
+    assert(
+      !assertDailyEvents(await records(dailyInterruptedWorker)).some(
+        ({ fields }) => fields.event === "succeeded",
+      ),
+    );
+    await dailyCli("create", dailyInterruptedVolume);
+    console.log(
+      "Daily Worker failures preserved collision and unconfirmed output with retry state, empty passphrase failure left public login/sync available, and interrupted capture kept offline admission until the bounded fatal process exit.",
+    );
+
     progress("offline snapshot restore");
     await compose(["stop", "server"]);
     assert.equal((await inspect("container", container)).State.ExitCode, 0);
@@ -1778,6 +2600,15 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
             `/${project}-server-1`,
             `/${walHolder}`,
             `/${recoveryContainer}`,
+            ...[
+              ...dailyWorkers,
+              dailyAllWorker,
+              dailyFailureWorker,
+              dailyDisabledWorker,
+              dailyInterruptedWorker,
+              dailyUnconfirmedWorker,
+              dailyPassphraseWorker,
+            ].map((name) => `/${name}`),
           ].includes(item.Name),
           "unexpected owned container",
         );
@@ -1786,7 +2617,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           "owned container changed images",
         );
         if (item.State.Running) await docker(["stop", "--time", "30", id]);
-        if (succeeded) await docker(["container", "rm", id]);
+        if (succeeded) await docker(["container", "rm", "--volumes", id]);
       }
       if (succeeded) {
         for (const [kind, name] of [
@@ -1812,6 +2643,16 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           run,
         );
         await docker(["volume", "rm", onlineArchiveVolume]);
+        for (const name of [
+          dailyArchiveVolume,
+          dailyFailureVolume,
+          dailyInterruptedVolume,
+          dailyUnconfirmedVolume,
+          dailyPassphraseVolume,
+        ]) {
+          assertOwnedResource((await inspect("volume", name)).Labels, run);
+          await docker(["volume", "rm", name]);
+        }
         for (const [tag, expectedId] of [
           [image, imageId],
           [historicalImage, historicalImageId],
@@ -1850,7 +2691,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, native refresh and complete team/Personal isolation across restart and public encrypted-archive restoration into a fresh Compose parent volume with a further persistent restart, retained database/audit/key/object state and committed WAL Accounts, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, native refresh and complete team/Personal isolation across restart and public encrypted-archive restoration into a fresh Compose parent volume with a further persistent restart, Worker-triggered daily capture during public writes, two-Worker ownership/renewal, worker-only/combined/all selection, same-day restart suppression, collision/retry/disable preservation and bounded shutdown admission, retained database/audit/key/object state and committed WAL Accounts, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 
