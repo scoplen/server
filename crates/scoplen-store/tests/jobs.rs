@@ -291,3 +291,102 @@ async fn concurrent_claims_never_return_the_same_job() {
     drop(store);
     remove_test_directory(directory).await;
 }
+
+#[tokio::test]
+async fn exact_claim_preserves_history_and_never_takes_another_slot() {
+    let (directory, store) = open_store().await;
+    let base = now_ms();
+    assert!(!store.has_job_kind("backup.daily").await.expect("empty history"));
+    store.enqueue_job(job_id(1), "backup.daily", b"older", base).await.expect("old slot");
+    store.enqueue_job(job_id(2), "backup.daily", b"today", base + 100).await.expect("today");
+    let second = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("second pool");
+    let (first, other) = tokio::join!(
+        store.claim_job_id(job_id(2), "first", base + 100, 1_000, 3),
+        second.claim_job_id(job_id(2), "second", base + 100, 1_000, 3),
+    );
+    let claims = [first.expect("first claim"), other.expect("second claim")];
+    assert_eq!(claims.iter().filter(|job| job.is_some()).count(), 1);
+    let owner = claims
+        .iter()
+        .flatten()
+        .next()
+        .expect("one owner")
+        .lease_owner
+        .as_deref()
+        .expect("leased owner");
+    assert_eq!(store.get_job(job_id(1)).await.expect("old job preserved").attempts, 0);
+    store.renew_job(job_id(2), owner, base + 200, 1_000).await.expect("renew exact owner");
+    assert_eq!(store.get_job(job_id(2)).await.expect("renewed").lease_until_ms, Some(base + 1_200));
+    store.complete_job(job_id(2), owner, base + 201).await.expect("confirmed completion");
+    assert!(
+        store
+            .claim_job_id(job_id(2), "later", base + 2_000, 1_000, 3)
+            .await
+            .expect("completed slot")
+            .is_none()
+    );
+    store
+        .claim_job_id(job_id(1), "old", base + 202, 1_000, 3)
+        .await
+        .expect("old claim")
+        .expect("old job still independently eligible");
+    store.complete_job(job_id(1), "old", base + 203).await.expect("old completion");
+    assert!(store.has_job_kind("backup.daily").await.expect("completed history"));
+    second.pool().close().await;
+    drop(second);
+    close_store(directory, store).await;
+}
+
+#[tokio::test]
+async fn exact_claim_persists_delay_and_cap_through_restart_and_lease_expiry() {
+    let (directory, store) = open_store().await;
+    store.enqueue_job(job_id(1), "backup.daily", b"today", 100).await.expect("enqueue");
+    let first =
+        store.claim_job_id(job_id(1), "first", 100, 1_000, 3).await.expect("first").expect("claim");
+    assert_eq!(first.attempts, 1);
+    store.fail_job(job_id(1), "first", 101, 500, "capture_failed").await.expect("defer");
+    store.pool().close().await;
+    drop(store);
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("restart");
+    assert!(
+        store
+            .claim_job_id(job_id(1), "early", 499, 1_000, 3)
+            .await
+            .expect("persisted delay")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .claim_job_id(job_id(1), "second", 500, 1_000, 3)
+            .await
+            .expect("second")
+            .expect("eligible")
+            .attempts,
+        2
+    );
+    assert!(
+        store
+            .claim_job_id(job_id(1), "third", 1_499, 1_000, 3)
+            .await
+            .expect("live lease")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .claim_job_id(job_id(1), "third", 1_500, 1_000, 3)
+            .await
+            .expect("expired claim")
+            .expect("third attempt")
+            .attempts,
+        3
+    );
+    store
+        .fail_job(job_id(1), "third", 1_501, 1_800, "capture_failed")
+        .await
+        .expect("final failure");
+    assert!(store.claim_job_id(job_id(1), "fourth", 1_800, 1_000, 3).await.expect("cap").is_none());
+    let failed = store.get_job(job_id(1)).await.expect("retained failure");
+    assert_eq!(failed.attempts, 3);
+    assert!(failed.finished_at_ms.is_none());
+    close_store(directory, store).await;
+}
