@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/92c398666b140f496e5b7eab226410de5d881c2d/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/326b2d2d7f097c9707e29acd69bbc22fec3cd87d/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -187,6 +187,8 @@ export interface components {
     ServicePrincipal: Resource;
     Role: Resource;
     GrantFields: GrantFields;
+    AuthConnectionDraftCreate: AuthConnectionDraftCreate;
+    AuthConnectionDraftResource: AuthConnectionDraftResource;
     GrantCreateRequest: GrantCreateRequest;
     GrantReplaceRequest: GrantReplaceRequest;
     GrantResource: GrantResource;
@@ -245,6 +247,18 @@ export interface GrantPage { items: GrantResource[]; next_cursor: string | null;
 export interface GrantListQuery { limit?: number; cursor?: string; }
 export type GrantBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
 // END GENERATED Grants
+
+// BEGIN GENERATED AuthConnectionDraft
+export interface AuthConnectionDraftCreate { data: { issuer: string } }
+export interface AuthConnectionDraftResource {
+  id: string;
+  etag: string;
+  created_at: string;
+  updated_at: string;
+  data: { organization_id: string; issuer: string; [key: string]: unknown };
+  [key: string]: unknown;
+}
+// END GENERATED AuthConnectionDraft
 // BEGIN GENERATED AccessRequests
 export interface AccessRequestFields { host: string; remote_user: string; duration_seconds: number; reason: string; }
 export interface AccessRequestCheckRequest { data: AccessRequestFields; }
@@ -911,7 +925,7 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-drafts:manage inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
@@ -1424,6 +1438,30 @@ export const accountBrowserOperations = [
     "path": "/api/v1/orgs/{org}/access-requests/{id}/cancel",
     "scopes": [
       "access-requests:write"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-connection-draft",
+    "scopes": [
+      "auth-drafts:manage"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-connection-draft",
+    "scopes": [
+      "auth-drafts:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/auth-connection-draft",
+    "scopes": [
+      "auth-drafts:manage"
     ],
     "writerReceipt": true
   }

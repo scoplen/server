@@ -4,6 +4,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Align both issuer preparation commands with the Organization draft URL format and its
+  2,048-byte limit. Invalid input is rejected before configuration or network access.
+
 - Add `splctl auth registration-settings` to print the issuer-specific redirect URI and
   confidential client settings from the deployment configuration. The discovery check
   now checks the provider's token endpoint authentication methods.

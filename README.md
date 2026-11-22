@@ -435,7 +435,10 @@ team membership, vault keys and permission to access each SSH resource.
 
 The current CLI supports two preparation steps:
 
-1. Check the exact HTTPS issuer, including its path. For a private CA, add
+1. Use the exact HTTPS issuer, including its path, up to 2,048 UTF-8 bytes. Both commands
+   reject user information, a query, a fragment, backslashes, whitespace and control
+   characters. Keep the same spelling and trailing slash throughout registration.
+   For a private CA, add
    `--ca-certificate deployment-ca.pem`. Exit 0 confirms that the instance advertises
    the supported human sign-in profile.
 

@@ -52,6 +52,54 @@ async fn rejects_invalid_issuers_before_connecting() {
     }
 }
 
+#[tokio::test]
+async fn both_commands_reject_invalid_organization_issuers_before_io() {
+    let dir = std::env::temp_dir().join(format!("spl-issuer-limits-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&dir).expect("fixture directory");
+    let count = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::clone(&count);
+    let (port, server) = https::start(&dir, false, move |_| {
+        Router::new().fallback(move || {
+            requests.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NOT_FOUND }
+        })
+    })
+    .await;
+    let origin = format!("https://127.0.0.1:{port}");
+    let prefix = format!("{origin}/private-marker");
+    let limit = format!("{prefix}{}", "a".repeat(2048 - prefix.len()));
+    let ca = dir.join("ca.pem");
+    let config = dir.join("absent.toml");
+    for issuer in [
+        format!("{limit}a"),
+        format!("{}\u{e9}", &limit[..2047]),
+        format!("{prefix}\u{a0}space"),
+        format!("{prefix}\u{85}control"),
+        format!("{prefix}\u{9f}control"),
+        format!("https://@127.0.0.1:{port}/private-marker"),
+    ] {
+        let check = check(issuer.clone(), Some(ca.clone())).await;
+        let settings = Command::new(env!("CARGO_BIN_EXE_splctl"))
+            .args(["auth", "registration-settings", "--config"])
+            .arg(&config)
+            .args(["--issuer", &issuer])
+            .output()
+            .expect("registration settings CLI");
+        for out in [check, settings] {
+            assert!(!out.status.success() && out.stdout.is_empty());
+            let reason = String::from_utf8(out.stderr).expect("diagnostic text");
+            assert!(reason.contains("absolute HTTPS issuer") && !reason.contains("private-marker"));
+        }
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let accepted = check(limit, Some(ca.clone())).await;
+    assert!(String::from_utf8_lossy(&accepted.stderr).contains("HTTP 200"));
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    server.abort();
+    fs::remove_file(ca).expect("remove fixture CA");
+    fs::remove_dir(dir).expect("commands must leave no deployment files");
+}
+
 fn discovery_response(port: u16, scenario: &str) -> Response<Body> {
     let issuer = format!("https://127.0.0.1:{port}/{scenario}");
     let mut document = json!({
@@ -220,6 +268,10 @@ fn prepares_manual_registration_from_the_configured_origin_offline() {
         );
         assert_eq!(out.stderr, b"");
     }
+    let prefix = "https://id.example.test/";
+    let largest = format!("{prefix}{}", "a".repeat(2046 - prefix.len()) + "\u{e9}");
+    assert_eq!(largest.len(), 2048);
+    assert!(settings(&largest).status.success());
     let invalid = settings("https://private-marker@id.example.test");
     assert!(!invalid.status.success() && invalid.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&invalid.stderr).contains("private-marker"));
