@@ -58,6 +58,7 @@ pub(super) async fn verify_requests(https: &Https) -> Result<()> {
 /// Organizations. It proves that inventory reads resolve the durable tenant,
 /// that absent and foreign objects share the same public boundary, and that
 /// removing one membership withdraws only that Organization's view.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn verify_tenant_isolation(https: &Https) -> Result<()> {
     println!("Tenant isolation acceptance: two Accounts and two Organizations");
     let first = Registration::new(&https.origin)?;
