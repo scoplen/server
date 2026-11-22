@@ -85,6 +85,10 @@ pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     grants::verify_requests(https).await
 }
 
+pub(super) async fn verify_tenant_isolation(https: &Https) -> Result<()> {
+    grants::verify_tenant_isolation(https).await
+}
+
 pub(super) async fn verify_inventory_import(
     https: &Https,
     source: crate::InventoryImportSource,
