@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
@@ -15,6 +15,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { once } from "node:events";
+import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -293,6 +295,52 @@ function dailySamples() {
   ];
 }
 
+test(
+  "Linux fixture lease blocks a real archive object read until release",
+  {
+    skip: process.platform !== "linux",
+    timeout: 15_000,
+  },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scoplen-object-lease-"));
+    const object = join(directory, "ci-daily-capture-buffer");
+    const probe = fileURLToPath(
+      new URL("./hold-daily-backup-object.pl", import.meta.url),
+    );
+    await writeFile(object, "owned object", { mode: 0o600 });
+    const holder = spawn("perl", [probe, object], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const exited = once(holder, "exit");
+    const lines = createInterface({ input: holder.stdout })[
+      Symbol.asyncIterator
+    ]();
+    let reading;
+    let completed = false;
+    try {
+      assert.equal((await lines.next()).value, "ready");
+      reading = readFile(object, "utf8").then((contents) => {
+        completed = true;
+        return contents;
+      });
+      assert.equal((await lines.next()).value, "blocked");
+      await writeFile(join(directory, "unrelated"), "independent write", {
+        flag: "wx",
+      });
+      assert.equal(completed, false);
+      assert(holder.kill("SIGUSR1"));
+      assert.equal((await lines.next()).value, "released");
+      assert.equal(await reading, "owned object");
+      assert.equal((await exited)[0], 0);
+    } finally {
+      holder.kill("SIGKILL");
+      await exited;
+      await reading;
+      await rm(directory, { recursive: true });
+    }
+  },
+);
+
 test("daily runtime evidence requires renewal, one owner and confirmed completion", () => {
   const samples = dailySamples();
   assert.deepEqual(assertDailyCapture(samples, "2026-11-18"), {
@@ -336,6 +384,23 @@ test("daily runtime evidence requires renewal, one owner and confirmed completio
 });
 
 test("daily capture failures report fixed reasons without observed state", () => {
+  for (const [message, reason] of [
+    ["object hold exited early", "daily-object-hold-exit"],
+    ["object hold signal timed out", "daily-object-hold-timeout"],
+    ["object hold release failed", "daily-object-hold-release"],
+    [
+      "daily capture ended outside the held object read",
+      "daily-object-hold-interval",
+    ],
+  ]) {
+    assert.equal(
+      describeCheckFailure({
+        phase: "daily Worker ownership and renewal",
+        error: { code: "ERR_ASSERTION", message },
+      }).reason,
+      reason,
+    );
+  }
   for (const [mutate, reason] of [
     [(samples) => samples.splice(1), "daily-observations"],
     [

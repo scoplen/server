@@ -192,6 +192,13 @@ export function describeCheckFailure({
     ["daily claim changed owners", "daily-owner-change"],
     ["daily claim expired during capture", "daily-lease-expired"],
     ["daily capture did not renew its lease", "daily-lease-renewal"],
+    ["object hold exited early", "daily-object-hold-exit"],
+    ["object hold signal timed out", "daily-object-hold-timeout"],
+    ["object hold release failed", "daily-object-hold-release"],
+    [
+      "daily capture ended outside the held object read",
+      "daily-object-hold-interval",
+    ],
     [
       "daily capture did not cross a renewal interval",
       "daily-renewal-interval",
@@ -846,6 +853,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
   const dailyAllWorker = `${project}-daily-all-worker`;
   const dailyDisabledWorker = `${project}-daily-disabled-worker`;
   const dailyInterruptedWorker = `${project}-daily-interrupted-worker`;
+  const captureHold = `${project}-daily-object-hold`;
+  const interruptedHold = `${project}-interrupted-object-hold`;
   const dailyUnconfirmedWorker = `${project}-daily-unconfirmed-worker`;
   const dailyPassphraseWorker = `${project}-daily-passphrase-worker`;
   let sequence = 0;
@@ -1918,6 +1927,67 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         .filter((line) => line.startsWith("{"))
         .map((line) => JSON.parse(line));
     };
+    const waitForHold = async (name, expected) => {
+      const deadline = Date.now() + 60_000;
+      for (;;) {
+        const { stdout } = await docker(["logs", name]);
+        if (stdout === expected) return;
+        assert(
+          (await inspect("container", name)).State.Running,
+          "object hold exited early",
+        );
+        assert(Date.now() < deadline, "object hold signal timed out");
+        await new Promise((accept) => setTimeout(accept, 200));
+      }
+    };
+    const startHold = async (name, source) => {
+      await docker([
+        "run",
+        "--detach",
+        "--name",
+        name,
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--user",
+        "65532:65532",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--label",
+        `com.docker.compose.project=${project}`,
+        "--mount",
+        `type=volume,source=${source},target=/source,readonly`,
+        "--mount",
+        `type=bind,source=${join(repository, "scripts/hold-daily-backup-object.pl")},target=/hold.pl,readonly`,
+        probeImage,
+        "perl",
+        "/hold.pl",
+        "/source/restored/objects/ci-daily-capture-buffer",
+      ]);
+      const item = await inspect("container", name);
+      assertOwnedResource(item.Config.Labels, run, project);
+      assert.equal(item.Image, probeImageId);
+      await waitForHold(name, "ready\n");
+    };
+    const releaseHold = async (name) => {
+      await docker(["kill", "--signal", "USR1", name]);
+      assert.equal(
+        (await docker(["wait", name])).stdout.trim(),
+        "0",
+        "object hold release failed",
+      );
+      assert.equal(
+        (await docker(["logs", name])).stdout,
+        "ready\nblocked\nreleased\n",
+        "object hold release failed",
+      );
+    };
     const startDailyWorker = async (
       name,
       source = onlineArchiveVolume,
@@ -2097,6 +2167,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       capture: async () => {
         assert.deepEqual((await dailyState()).jobs, []);
         progress("daily Worker ownership and renewal");
+        await startHold(captureHold, onlineArchiveVolume);
         await startDailyWorker(dailyWorkers[0]);
         await startDailyWorker(
           dailyWorkers[1],
@@ -2106,7 +2177,10 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           true,
           ["api", "worker"],
         );
+        await waitForHold(captureHold, "ready\nblocked\n");
         const samples = [];
+        let firstHeld;
+        let heldInterval;
         const deadline = Date.now() + 180_000;
         for (;;) {
           const sample = await dailyState();
@@ -2115,6 +2189,20 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
             "daily Worker created duplicate slots",
           );
           if (sample.jobs[0]?.attempts > 0) samples.push(sample);
+          if (!heldInterval && sample.staging > 0 && sample.jobs[0]?.owner) {
+            firstHeld ??= sample;
+            if (sample.observedAt - firstHeld.observedAt >= 31_000) {
+              assert(
+                sample.jobs[0].leaseUntil > firstHeld.jobs[0].leaseUntil,
+                "daily capture did not renew its lease",
+              );
+              heldInterval = {
+                started: firstHeld.observedAt,
+                finished: sample.observedAt,
+              };
+              await releaseHold(captureHold);
+            }
+          }
           assert.equal((await request(origin, "/readyz", ca)).status, 200);
           for (const name of dailyWorkers)
             assert((await inspect("container", name)).State.Running);
@@ -2132,6 +2220,12 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           phase,
         );
         const interval = assertDailyCapture(samples, slot);
+        assert(
+          heldInterval &&
+            heldInterval.started >= interval.started &&
+            heldInterval.finished <= interval.finished,
+          "daily capture ended outside the held object read",
+        );
         completedDaily = samples.at(-1);
         progress("daily Worker events and maintenance");
         const logs = (await Promise.all(dailyWorkers.map(records))).flat();
@@ -2148,8 +2242,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           logs.some(
             (record) =>
               record.fields?.message === "worker heartbeat" &&
-              Date.parse(record.timestamp) > interval.started &&
-              Date.parse(record.timestamp) < interval.finished,
+              Date.parse(record.timestamp) > heldInterval.started &&
+              Date.parse(record.timestamp) < heldInterval.finished,
           ),
           "Worker maintenance did not progress during capture",
         );
@@ -2191,7 +2285,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
           ),
         );
         await stopDailyWorker(dailyAllWorker);
-        return interval;
+        return heldInterval;
       },
       restore: async () => {
         progress("daily archive verification and restoration");
@@ -2437,12 +2531,14 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
 
     await prepareDailyVolume(dailyInterruptedVolume);
     await dailyCli("restore", dailyInterruptedVolume);
+    await startHold(interruptedHold, dailyInterruptedVolume);
     await startDailyWorker(
       dailyInterruptedWorker,
       dailyInterruptedVolume,
       dailyInterruptedVolume,
       "0.01",
     );
+    await waitForHold(interruptedHold, "ready\nblocked\n");
     const interruptedDeadline = Date.now() + 100_000;
     let interrupted;
     for (;;) {
@@ -2497,6 +2593,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
     const shutdownElapsed = Date.now() - shutdownStarted;
     assert(shutdownElapsed >= 9000 && shutdownElapsed < 16_000);
+    await releaseHold(interruptedHold);
     const interruptedState = await dailyState(
       dailyInterruptedVolume,
       dailyInterruptedVolume,
@@ -2648,6 +2745,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
               dailyFailureWorker,
               dailyDisabledWorker,
               dailyInterruptedWorker,
+              captureHold,
+              interruptedHold,
               dailyUnconfirmedWorker,
               dailyPassphraseWorker,
             ].map((name) => `/${name}`),
