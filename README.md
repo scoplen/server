@@ -608,6 +608,18 @@ external reachability, ACME management, clock offset, storage and KMS probes, ba
 and agent compatibility, and console parity. Complete administration and diagnostics remain
 roadmap work.
 
+To check an existing Plystra Auth instance before registering a human sign-in application:
+
+```text
+splctl auth check-instance --issuer https://auth.example.org
+```
+
+Supply the exact issuer, including any path. Add `--ca-certificate deployment-ca.pem`
+for a private CA. The command reads only the issuer's OpenID discovery document over
+verified HTTPS. Exit 0 confirms the required endpoints and capabilities are advertised.
+Application registration, a browser sign-in test and enabling Organization policy are
+separate steps. The check needs no Account, client secret or running Scoplen server.
+
 Run `cargo run -p scoplen-server -- --help` for role selection and configuration options. The
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM
