@@ -526,6 +526,30 @@ async fn visibility(f: &Fixture) {
             .is_err(),
         "a member must not receive another Organization's view hint"
     );
+    // A continuation cursor from that foreign view must not become a probe
+    // against the member's current tenant. The vault owner and membership
+    // checks run before the cursor is interpreted, so no page is disclosed.
+    let foreign_descriptor = descriptor(f, &foreign_owner, foreign_org).await;
+    let foreign_context = foreign_descriptor.organization.unwrap();
+    let foreign_page = SyncOrganizationViewResponse::from_cbor(
+        &view(f, &foreign_owner, foreign_descriptor.id, foreign_context.view_revision, 0, 1)
+            .await
+            .body,
+    )
+    .expect("foreign current view");
+    sync_problem(
+        &view(
+            f,
+            &b,
+            foreign_descriptor.id,
+            foreign_context.view_revision,
+            foreign_page.next_cursor,
+            1,
+        )
+        .await,
+        404,
+        "sync.object_not_found",
+    );
     let group_id = Uuid::now_v7();
     let group_path = format!("{root}/groups/{group_id}");
     let create = json!({"id":group_id,"data":{"name":"Operators","members":[membership]}});
