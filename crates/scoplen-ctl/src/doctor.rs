@@ -52,7 +52,7 @@ pub async fn run(path: &Path, ca_path: Option<&Path>) -> bool {
     passed
 }
 
-fn configured_origin(path: &Path) -> Result<String, &'static str> {
+pub(crate) fn configured_origin(path: &Path) -> Result<String, &'static str> {
     if !path.is_file() {
         return Err(
             "configuration file is missing or unreadable; provide an existing file with --config.",

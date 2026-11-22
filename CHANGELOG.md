@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add `splctl auth registration-settings` to print the issuer-specific redirect URI and
+  confidential client settings from the deployment configuration. The discovery check
+  now checks the provider's token endpoint authentication methods.
+
 - Add `splctl auth check-instance` to check an existing Plystra Auth instance's human
   sign-in metadata over verified HTTPS before registering an application. The diagnostic
   accepts a private CA and runs independently of Scoplen storage and team configuration.
