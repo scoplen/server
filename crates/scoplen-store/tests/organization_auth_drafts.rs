@@ -80,7 +80,8 @@ macro_rules! check_drafts {
         let changed = create(*winning_key, "https://issuer.example.test/other");
         assert_eq!(request!(&changed).await, Err(Error::Conflict));
         let tag = original.etag();
-        let cancel = DraftRequest::Cancel(Uuid::now_v7(), &tag);
+        let cancel_key = Uuid::now_v7();
+        let cancel = DraftRequest::Cancel(cancel_key, &tag);
         assert_eq!(request!(&DraftRequest::Cancel(*winning_key, &tag)).await, Err(Error::Conflict));
         assert_eq!(request!(&cancel).await, Ok(None));
         assert_eq!(request!(winner).await, Ok(Some(original.clone())));
@@ -143,6 +144,21 @@ macro_rules! check_drafts {
         };
         sqlx::query(drop_trigger).execute(store.pool()).await.unwrap();
         assert_eq!(request!(&cancel_replacement).await, Ok(None));
+
+        // Both retained outcomes belong to an interval ahead of the current server clock.
+        let shifted = sqlx::query(
+            "UPDATE organization_auth_draft_receipts SET created_at_ms=created_at_ms+86400000, \
+             expires_at_ms=expires_at_ms+86400000 WHERE idempotency_key IN ($1,$2)",
+        )
+        .bind(winning_key.as_bytes().as_slice())
+        .bind(cancel_key.as_bytes().as_slice())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(shifted.rows_affected(), 2);
+        assert_eq!(request!(winner).await, Err(Error::Conflict));
+        assert_eq!(request!(&cancel).await, Err(Error::Conflict));
+        assert_eq!(request!(&read).await, Err(Error::NotFound));
 
         sqlx::query("UPDATE organization_auth_draft_receipts SET created_at_ms=1,expires_at_ms=86400001 WHERE idempotency_key=$1")
         .bind(winning_key.as_bytes().as_slice()).execute(store.pool()).await.unwrap();
