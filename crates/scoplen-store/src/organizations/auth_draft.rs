@@ -138,10 +138,13 @@ macro_rules! issuer_drafts {
                     .bind(account.as_slice()).bind(mutation.origin_digest.as_slice()).bind(mutation.key.as_bytes().as_slice())
                     .fetch_optional(&mut *tx).await?;
                 if let Some(row) = receipt {
-                    let expiry: Option<i64> = row.try_get("expires_at_ms")?;
-                    let stored: Option<Vec<u8>> = row.try_get("request_digest")?;
-                    if expiry.is_none_or(|end| now >= end)
-                        || stored.as_deref() != Some(mutation.digest.as_slice())
+                    let Some(created_at) = row.try_get::<Option<i64>, _>("created_at_ms")? else {
+                        return Err(Error::Conflict);
+                    };
+                    let receipt_expires_at: i64 = row.try_get("expires_at_ms")?;
+                    let stored: Vec<u8> = row.try_get("request_digest")?;
+                    if !(created_at..receipt_expires_at).contains(&now)
+                        || stored.as_slice() != mutation.digest.as_slice()
                     {
                         return Err(Error::Conflict);
                     }
@@ -149,7 +152,7 @@ macro_rules! issuer_drafts {
                         DraftRequest::Create(_, body) => Some(resource(
                             organization,
                             row_uuid(&row, "generation")?,
-                            row.try_get("created_at_ms")?,
+                            created_at,
                             body.issuer.clone(),
                         )?),
                         DraftRequest::Cancel(_, _) => None,
