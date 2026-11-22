@@ -860,19 +860,19 @@ async fn response_loss_profile(
     confirm_lost_reply(c, requester, other_requester, &pending).await?;
 
     let before = c.snapshot().await?;
-    let approved =
+    let approved_operation =
         terminal_reply(c, approver, &pending.resource, Some(AccessRequestOutcome::Approve), true)
             .await?;
     effect(
         &before,
         &c.snapshot().await?,
-        &approved.resource,
+        &approved_operation.resource,
         approver_actor,
         "organization.access_request_approved",
     )?;
-    confirm_lost_reply(c, approver, other_approver, &approved).await?;
+    confirm_lost_reply(c, approver, other_approver, &approved_operation).await?;
     c.confirm(requester, &pending).await?;
-    if c.get(requester, request.id).await? != approved.resource {
+    if c.get(requester, request.id).await? != approved_operation.resource {
         return Err("Request HTTPS create confirmation rewrote approved current state");
     }
     let grant = c
@@ -881,7 +881,7 @@ async fn response_loss_profile(
         .grants
         .into_iter()
         .find(|grant| {
-            approved.resource.grant.as_ref().is_some_and(|history| history.id == grant.id)
+            approved_operation.resource.grant.as_ref().is_some_and(|history| history.id == grant.id)
         })
         .ok_or("Request HTTPS lost approval did not retain its original Grant")?;
     withdraw(c.https, approver, c.org, &grant).await?;
