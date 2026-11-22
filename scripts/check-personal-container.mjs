@@ -847,6 +847,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
   const onlineArchiveVolume = `${project}_online_archive`;
   const dailyArchiveVolume = `${project}_daily_archive`;
   const dailyFailureVolume = `${project}_daily_failure`;
+  const dailyPublicationVolume = `${project}_daily_publication`;
   const dailyInterruptedVolume = `${project}_daily_interrupted`;
   const dailyUnconfirmedVolume = `${project}_daily_unconfirmed`;
   const dailyPassphraseVolume = `${project}_daily_passphrase`;
@@ -854,6 +855,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     (index) => `${project}-daily-worker-${index}`,
   );
   const dailyFailureWorker = `${project}-daily-failure-worker`;
+  const dailyPublicationWorker = `${project}-daily-publication-worker`;
+  const publicationHold = `${project}-daily-publication-hold`;
   const dailyAllWorker = `${project}-daily-all-worker`;
   const dailyDisabledWorker = `${project}-daily-disabled-worker`;
   const dailyInterruptedWorker = `${project}-daily-interrupted-worker`;
@@ -2327,6 +2330,90 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     );
 
     progress("daily Worker failures and shutdown");
+    await prepareDailyVolume(dailyPublicationVolume);
+    await dailyCli("restore", dailyPublicationVolume);
+    await startHold(publicationHold, dailyPublicationVolume);
+    await startDailyWorker(
+      dailyPublicationWorker,
+      dailyPublicationVolume,
+      dailyPublicationVolume,
+      "1",
+    );
+    await waitForHold(publicationHold, "ready\nblocked\n");
+    const publicationState = () =>
+      dailyState(dailyPublicationVolume, dailyPublicationVolume);
+    const admitted = await publicationState();
+    assert.equal(admitted.jobs.length, 1);
+    assert.equal(admitted.jobs[0].slot, slot);
+    assert.equal(admitted.jobs[0].attempts, 2);
+    assert(admitted.jobs[0].owner && admitted.jobs[0].finishedAt === null);
+    assert.equal(admitted.staging, 1);
+    assert.deepEqual(admitted.archives, []);
+    const marker = async (operation) => {
+      assertOwnedResource(
+        (await inspect("volume", dailyPublicationVolume)).Labels,
+        run,
+      );
+      await docker([
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--network",
+        "none",
+        "--read-only",
+        "--user",
+        "65532:65532",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--label",
+        `${ownerLabel}=${run}`,
+        "--mount",
+        `type=volume,source=${dailyPublicationVolume},target=/recovery`,
+        "--mount",
+        `type=bind,source=${join(repository, "scripts/check-personal-container-publication.mjs")},target=/publication.mjs,readonly`,
+        probeImage,
+        "node",
+        "/publication.mjs",
+        slot,
+        operation,
+      ]);
+    };
+    // The Worker is blocked on its source object after accepting an absent destination.
+    await marker("publish");
+    await releaseHold(publicationHold);
+    const publicationFailure = await waitDailyFailure(
+      dailyPublicationVolume,
+      "output_exists",
+    );
+    assert.equal(publicationFailure.staging, 1);
+    assert.deepEqual(
+      publicationFailure.archives.map(({ name }) => name),
+      [dailyArchive],
+    );
+    const publicationEvents = assertDailyEvents(
+      await records(dailyPublicationWorker),
+    );
+    assert(
+      publicationEvents.some(
+        ({ fields }) =>
+          fields.event === "unconfirmed" && fields.reason === "output_exists",
+      ),
+    );
+    assert(
+      publicationEvents.some(
+        ({ fields }) =>
+          fields.event === "retry_scheduled" && fields.attempt === 2,
+      ),
+    );
+    assert(
+      !publicationEvents.some(({ fields }) => fields.event === "succeeded"),
+    );
+    // Withdraw only the simulated publisher's own link. Its staging and bytes remain observable.
+    await marker("withdraw");
+
     await prepareDailyVolume(dailyFailureVolume, true);
     await dailyCli("restore", dailyFailureVolume);
     await compose(["stop", "server"]);
@@ -2622,6 +2709,54 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       ),
     );
     await dailyCli("create", dailyInterruptedVolume);
+    const retryAt = publicationFailure.jobs[0].availableAt;
+    for (;;) {
+      const state = await publicationState();
+      assert.equal(state.jobs.length, 1);
+      const [job] = state.jobs;
+      assert.equal(job.slot, slot);
+      if (job.finishedAt !== null) {
+        assert.equal(job.attempts, 3);
+        assert.equal(job.owner, null);
+        assert(job.finishedAt >= retryAt);
+        assert.equal(state.staging, 1);
+        assert.deepEqual(
+          state.archives.map(({ name }) => name),
+          [dailyArchive],
+        );
+        break;
+      }
+      assert(
+        Date.now() < retryAt + 120_000,
+        "daily publication retry timed out",
+      );
+      await new Promise((accept) => setTimeout(accept, 5000));
+    }
+    const retryEvents = assertDailyEvents(
+      await records(dailyPublicationWorker),
+    );
+    const starts = retryEvents.filter(
+      ({ fields }) => fields.event === "started" && fields.attempt === 3,
+    );
+    assert.equal(starts.length, 1);
+    assert(Date.parse(starts[0].timestamp) >= retryAt);
+    assert.equal(
+      retryEvents.filter(
+        ({ fields }) => fields.event === "succeeded" && fields.attempt === 3,
+      ).length,
+      1,
+    );
+    await marker("check-recovered");
+    await dailyCli(
+      "verify",
+      dailyPublicationVolume,
+      false,
+      dailyPublicationVolume,
+    );
+    await stopDailyWorker(dailyPublicationWorker);
+    console.log(
+      "Daily archive publication preserved a competing output and unrelated staging, then the persisted retry published a verified archive.",
+    );
     console.log(
       "Daily Worker failures preserved collision and unconfirmed output with retry state, empty passphrase failure left public login/sync available, and interrupted capture kept offline admission until the bounded fatal process exit.",
     );
@@ -2751,6 +2886,8 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
               ...dailyWorkers,
               dailyAllWorker,
               dailyFailureWorker,
+              dailyPublicationWorker,
+              publicationHold,
               dailyDisabledWorker,
               dailyInterruptedWorker,
               captureHold,
@@ -2795,6 +2932,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         for (const name of [
           dailyArchiveVolume,
           dailyFailureVolume,
+          dailyPublicationVolume,
           dailyInterruptedVolume,
           dailyUnconfirmedVolume,
           dailyPassphraseVolume,
