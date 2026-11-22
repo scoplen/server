@@ -120,6 +120,9 @@ export function AccessRequestPanel({
   const blocked = disabled || busy,
     actionable = !blocked && !pending && !reviewRequired;
   const selected = pending?.original ?? review;
+  useEffect(() => {
+    if (selected) heading.current?.focus();
+  }, [selected]);
   const decisionName = (decision: RequestDecision) =>
     ({
       approve: t("Approve", "批准"),
@@ -226,7 +229,6 @@ export function AccessRequestPanel({
     actions.reviewed();
     setReview(current);
     setNotice("");
-    heading.current?.focus();
   }
   async function decide(decision: RequestDecision) {
     if (!review) return;
