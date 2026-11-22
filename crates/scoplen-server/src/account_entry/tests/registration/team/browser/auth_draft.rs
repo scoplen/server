@@ -7,6 +7,8 @@ use scoplen_api::auth_connection_draft::{DraftCreate, DraftResource};
 use super::super::tls::TlsFixture;
 use super::*;
 
+mod retained_scope;
+
 struct Writer<'a> {
     key: &'a P256SigningKey,
     token: &'a str,
