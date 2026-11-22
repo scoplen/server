@@ -82,7 +82,7 @@ enum Command {
         #[arg(long)]
         server_log: Option<PathBuf>,
     },
-    /// Once only: verify public password entry and encrypted sync with two independent Devices.
+    /// Once only: verify two Accounts' password entry, Host/Credential sync and isolation.
     VerifyAccount {
         directory: PathBuf,
         /// Also verify two password Accounts' teams, name settings and Personal isolation.
@@ -221,7 +221,7 @@ async fn run(command: Command) -> Result<()> {
             .map_err(|_| "Account check exceeded its deadline; abandon this fixture")??;
             write_private(
                 &directory.join("account-acceptance.json"),
-                "{\"account_password_sync_verified\":true}",
+                "{\"account_password_sync_verified\":true,\"account_credential_sync_verified\":true,\"account_credential_isolation_verified\":true}",
             )?;
             if with_team {
                 write_private(
