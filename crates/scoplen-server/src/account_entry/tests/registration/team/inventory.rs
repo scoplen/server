@@ -502,6 +502,30 @@ async fn visibility(f: &Fixture) {
         SyncOrganizationViewResponse::from_cbor(&empty.body).expect("empty current view").objects,
         [] as [scoplen_api::sync::SyncChange; 0]
     );
+    // A connected member must not receive view hints from another Organization in
+    // the same deployment. The notification worker rechecks the current tenant
+    // before fan-out; this keeps a stale client cache from learning that a foreign
+    // tenant changed even though the payload is content-free.
+    let foreign_owner = actor(f, "visibility-foreign-owner").await;
+    let foreign_org = create_team(f, &foreign_owner).await.id;
+    let mut foreign_events = f.notifications.subscribe(scoplen_sync::http::AuthenticatedDevice {
+        account_id: b.registration.payload.account_id.into_bytes(),
+        device_id: b.registration.payload.device_id.into_bytes(),
+    });
+    create_asset(
+        f,
+        &foreign_owner,
+        foreign_org,
+        InventoryType::Host,
+        json!({"name":"Foreign notification host","address":"foreign-notification.example.test"}),
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), foreign_events.recv())
+            .await
+            .is_err(),
+        "a member must not receive another Organization's view hint"
+    );
     let group_id = Uuid::now_v7();
     let group_path = format!("{root}/groups/{group_id}");
     let create = json!({"id":group_id,"data":{"name":"Operators","members":[membership]}});
