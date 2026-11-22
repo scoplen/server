@@ -14,7 +14,7 @@ use scoplen_api::{
     inventory::{InventoryPage, InventoryResource, InventoryType},
     sync::{
         SyncOrganizationAckRequest, SyncOrganizationAckResponse, SyncOrganizationViewResponse,
-        SyncSessionRequest, SyncSessionResponse,
+        SyncSessionRequest, SyncSessionResponse, SyncVaultKeysResponse, VaultKind,
     },
 };
 use scoplen_model::{Object, ObjectType};
@@ -550,6 +550,22 @@ async fn visibility(f: &Fixture) {
         404,
         "sync.object_not_found",
     );
+    // Keep a second active membership so revoking one Organization cannot fence
+    // the account's other tenant or its Personal vault. The stale first-vault
+    // descriptor and acknowledgement below must still be rejected.
+    let other_owner = actor(f, "visibility-other-owner").await;
+    let other_org = create_team(f, &other_owner).await.id;
+    enroll_member(f, &other_owner, &b, other_org).await;
+    let other_host = create_asset(
+        f,
+        &other_owner,
+        other_org,
+        InventoryType::Host,
+        json!({"name":"Retained tenant host","address":"retained.example.test"}),
+    )
+    .await;
+    let other_descriptor = descriptor(f, &b, other_org).await;
+    let other_revision = other_descriptor.organization.unwrap().view_revision;
     let group_id = Uuid::now_v7();
     let group_path = format!("{root}/groups/{group_id}");
     let create = json!({"id":group_id,"data":{"name":"Operators","members":[membership]}});
@@ -742,6 +758,50 @@ async fn visibility(f: &Fixture) {
     assert_eq!(after.fields.members, [] as [Uuid; 0]);
     assert_ne!(after.etag, before.etag);
     sync_problem(&view(f, &b, vault, revision, 0, 100).await, 404, "sync.object_not_found");
+    let stale_ack =
+        SyncOrganizationAckRequest { view_revision: revision, cursor: 0 }.to_cbor().unwrap();
+    sync_problem(
+        &cbor_call(f, &b, "POST", &format!("/sync/v1/vaults/{vault}/ack"), &stale_ack).await,
+        404,
+        "sync.object_not_found",
+    );
+    let retained = view(f, &b, other_descriptor.id, other_revision, 0, 100).await;
+    assert_eq!(retained.status, 200);
+    let retained =
+        SyncOrganizationViewResponse::from_cbor(&retained.body).expect("retained tenant view");
+    assert!(retained.objects.iter().any(|object| object.object_id == other_host.id));
+    let session_body = SyncSessionRequest {
+        client_version: "0.1.0".into(),
+        model_version: 1,
+        device_id: b.registration.payload.device_id,
+    }
+    .to_cbor()
+    .unwrap();
+    let session_reply = cbor_call(f, &b, "POST", "/sync/v1/session", &session_body).await;
+    assert_eq!(session_reply.status, 200);
+    let session =
+        SyncSessionResponse::from_cbor(&session_reply.body).expect("post-revocation session");
+    assert_eq!(session.vaults.len(), 2, "Personal plus the retained Organization");
+    assert!(session.vaults.iter().any(|entry| {
+        entry.id == b.registration.payload.personal_vault_id
+            && entry.kind == VaultKind::Personal
+            && entry.organization.is_none()
+    }));
+    assert!(session.vaults.iter().any(|entry| {
+        entry.id == other_descriptor.id
+            && entry.kind == VaultKind::Organization
+            && entry.organization.is_some_and(|context| context.organization == other_org)
+    }));
+    let personal_keys = cbor_call(
+        f,
+        &b,
+        "GET",
+        &format!("/sync/v1/vaults/{}/keys", b.registration.payload.personal_vault_id),
+        &[],
+    )
+    .await;
+    assert_eq!(personal_keys.status, 200);
+    assert_eq!(SyncVaultKeysResponse::from_cbor(&personal_keys.body).unwrap().keys.len(), 1);
     let removed = call(f, &a, "DELETE", &group_path, &[], &[("If-Match", &after.etag)]).await;
     assert_eq!(removed.status, 204);
     let current = current_team(f, &a, org).await;
