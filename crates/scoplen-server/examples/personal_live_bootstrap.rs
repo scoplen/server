@@ -52,6 +52,7 @@ const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
 const LOGOUT: &str = "/api/v1/auth/operator/logout";
 const GRANTS_ACCEPTANCE: &str = "{\"grant_device_browser_https_verified\":true,\"grant_certificate_expiry_verified\":true,\"grant_lifecycle_tenant_verified\":true,\"grant_personal_sync_preserved\":true}";
 const REQUESTS_ACCEPTANCE: &str = "{\"request_device_browser_https_verified\":true,\"request_current_routing_tenant_verified\":true,\"request_original_confirmation_verified\":true,\"request_personal_sync_preserved\":true}";
+const REQUEST_RESPONSE_LOSS_ACCEPTANCE: &str = "{\"request_device_browser_response_loss_verified\":true,\"request_original_confirmation_verified\":true,\"request_single_transition_effects_verified\":true,\"request_personal_sync_preserved\":true}";
 const TENANT_ISOLATION_ACCEPTANCE: &str = "{\"tenant_foreign_absent_inventory_verified\":true,\"tenant_custom_policy_boundary_verified\":true,\"tenant_view_revision_verified\":true,\"tenant_view_connect_separation_verified\":true,\"tenant_foreign_reference_verified\":true,\"tenant_membership_removal_verified\":true,\"tenant_personal_sync_preserved\":true}";
 const PASSWORD_CHANGE_ACCEPTANCE: &str = "{\"password_change_native_https_verified\":true,\"password_change_browser_generation_verified\":true,\"password_change_historical_receipt_verified\":true}";
 
@@ -117,6 +118,8 @@ enum Command {
     VerifyGrants { directory: PathBuf },
     /// Once only: verify request denials, routing and original confirmation through real HTTPS.
     VerifyRequests { directory: PathBuf },
+    /// Once only: lose request replies and explicitly confirm their original operations over HTTPS.
+    VerifyRequestResponseLoss { directory: PathBuf },
     /// Once only: verify the minimal two-Organization tenant isolation matrix through real HTTPS.
     VerifyTenantIsolation { directory: PathBuf },
     /// Once only: verify atomic inventory imports with genuine Device and browser writers.
@@ -337,6 +340,9 @@ async fn run(command: Command) -> Result<()> {
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
         Command::VerifyPasswordChange { directory } => verify_password_change(&directory).await?,
         Command::VerifyRequests { directory } => verify_requests(&directory).await?,
+        Command::VerifyRequestResponseLoss { directory } => {
+            verify_request_response_loss(&directory).await?;
+        }
         Command::VerifyTenantIsolation { directory } => verify_tenant_isolation(&directory).await?,
         Command::VerifyInventoryImport { directory, source } => {
             verify_inventory_import(&directory, source).await?;
@@ -494,6 +500,33 @@ async fn verify_requests(directory: &Path) -> Result<()> {
     .map_err(|_| "Request check task failed; abandon this fixture")??;
     write_private(&directory.join("requests-acceptance.json"), REQUESTS_ACCEPTANCE)?;
     println!("public Device and Account-browser request HTTPS check passed");
+    Ok(())
+}
+
+async fn verify_request_response_loss(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("request-response-loss-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_mins(12),
+            Box::pin(account::verify_request_response_loss(&https)),
+        )
+        .await
+        .map_err(|_| "Request response-loss check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Request response-loss task failed; abandon this fixture")??;
+    write_private(
+        &directory.join("request-response-loss-acceptance.json"),
+        REQUEST_RESPONSE_LOSS_ACCEPTANCE,
+    )?;
+    println!("public Device and Account-browser request response-loss HTTPS check passed");
     Ok(())
 }
 
@@ -1444,6 +1477,25 @@ mod tests {
         assert!(Cli::try_parse_from(["consumer", "verify-tenant-isolation", "unused"]).is_ok());
     }
 
+    #[test]
+    fn request_response_loss_receipt_keeps_unverified_claims_separate() {
+        let value: serde_json::Value =
+            serde_json::from_str(REQUEST_RESPONSE_LOSS_ACCEPTANCE).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 4);
+        for name in [
+            "request_device_browser_response_loss_verified",
+            "request_original_confirmation_verified",
+            "request_single_transition_effects_verified",
+            "request_personal_sync_preserved",
+        ] {
+            assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
+        }
+        assert!(
+            Cli::try_parse_from(["consumer", "verify-request-response-loss", "unused"]).is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn failed_request_check_publishes_nothing_and_refuses_replay() {
         let scratch = Scratch::new();
@@ -1452,6 +1504,20 @@ mod tests {
         assert!(run(command()).await.is_err());
         assert!(scratch.0.join("requests-check.started").is_file());
         assert!(!scratch.0.join("requests-acceptance.json").exists());
+        assert_eq!(
+            run(command()).await.unwrap_err(),
+            "could not exclusively write private fixture material"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_request_response_loss_publishes_nothing_and_refuses_replay() {
+        let scratch = Scratch::new();
+        prepare(&scratch.0, None, None).expect("prepare");
+        let command = || Command::VerifyRequestResponseLoss { directory: scratch.0.clone() };
+        assert!(run(command()).await.is_err());
+        assert!(scratch.0.join("request-response-loss-check.started").is_file());
+        assert!(!scratch.0.join("request-response-loss-acceptance.json").exists());
         assert_eq!(
             run(command()).await.unwrap_err(),
             "could not exclusively write private fixture material"

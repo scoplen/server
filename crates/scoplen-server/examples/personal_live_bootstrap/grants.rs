@@ -52,6 +52,10 @@ pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     requests::verify(https).await
 }
 
+pub(super) async fn verify_request_response_loss(https: &Https) -> Result<()> {
+    requests::verify_response_loss(https).await
+}
+
 /// Verify the smallest genuine two-tenant negative matrix used by D-126.
 ///
 /// This deliberately uses two newly registered Accounts and two newly created
