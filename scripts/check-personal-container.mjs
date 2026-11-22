@@ -51,7 +51,11 @@ const failurePhases = new Set([
   "restored archive data verification",
   "restored Compose startup and persistent restart",
   "online archive capture and restored Device restart",
-  "daily Worker capture and restored Device restart",
+  "daily archive volume preparation",
+  "daily source preparation",
+  "daily API-only restart",
+  "daily API-only scheduling check",
+  "daily Device write preparation",
   "daily Worker ownership and renewal",
   "daily Worker events and maintenance",
   "daily Worker same-day restart",
@@ -1874,7 +1878,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       `Online capture confirmed ${confirmedOnlineWrites} public writes and restored original Devices across restart.`,
     );
 
-    progress("daily Worker capture and restored Device restart");
+    progress("daily archive volume preparation");
     const slot = new Date().toISOString().slice(0, 10);
     const dailyArchive = `scoplen-${slot}.age`;
     const prepareDailyVolume = async (name, collision = false) => {
@@ -1893,10 +1897,12 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
       );
     };
     await prepareDailyVolume(dailyArchiveVolume);
+    progress("daily source preparation");
     await sqliteProbe("prepare-daily-source", [
       "--mount",
       `type=volume,source=${onlineArchiveVolume},target=/source-parent`,
     ]);
+    progress("daily API-only restart");
     await compose(["stop", "server"]);
     assert.equal((await inspect("container", container)).State.ExitCode, 0);
     await writeFile(
@@ -2147,6 +2153,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
         await new Promise((accept) => setTimeout(accept, 1000));
       }
     };
+    progress("daily API-only scheduling check");
     assert.deepEqual(
       (await dailyState()).jobs,
       [],
@@ -2155,6 +2162,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     const apiEvents = assertDailyEvents(await records(container));
     assert(apiEvents.some(({ fields }) => fields.reason === "worker_required"));
     let completedDaily;
+    progress("daily Device write preparation");
     const dailyWrites = await runOnlineBackup({
       fixture,
       daily: true,
