@@ -7,7 +7,8 @@ checkout. It uses the production `spl-server` binary, real localhost HTTPS, the 
 software passkey authenticator already used in server tests, and only public Operator
 setup/login/logout APIs and verifies the eight retired invitation/enrollment/pairing API routes
 and the old `/pair` landing return 404. The separate `verify-account` command exercises real
-Account password entry and encrypted synchronization using two independently generated Devices.
+Account password entry and encrypted Host/Credential synchronization using two independent
+Accounts, each with two independently generated Devices.
 The separate `prepare-browser-accounts` command registers two disposable password Accounts
 and exports private password files for browser team acceptance. None of these commands seeds
 identity tables, opens SQL connections, manages a server process,
@@ -857,17 +858,31 @@ registration entitlement. This consumer descriptor is unchanged by the separate 
 Keep the descriptor private.
 
 For the production-container acceptance check, run `personal_live_bootstrap verify-account
-<fixture-directory>` once against the same running server. It registers a random password
-Account through D-128, authenticates the first Device and writes an encrypted Host. A fresh
-independent Device obtains password options, derives its credential, verifies/decrypts the
+<fixture-directory>` once against the same running server. It registers two independent random
+password Accounts through D-128. Each authenticates its first Device and writes an encrypted
+Host. A fresh independent Device obtains password options, derives its credential, verifies/decrypts the
 complete signed bootstrap and completes public Device admission. It authenticates and refreshes,
 opens its own ARK and vault-key wraps, and verifies/decrypts the existing Host. Its signed edit is
 then verified/decrypted by the original Device after native refresh. Neither Device's private
 key is supplied to the other, and all server state changes use public HTTPS APIs.
 
+For each Account, the original Device also writes a schema-one shared password Credential
+(kind `1`, binding `1`). The password is generated synthetic data held only in memory and inside
+the encrypted Personal envelope. The independently admitted Device opens its own key wraps,
+verifies the signature and decrypts the complete Credential, checking exact equality including
+the original secret bytes. It changes the password and uploads a signed replacement; the
+original Device verifies and decrypts the replacement with exact value equality. Both snapshots
+also verify that the existing Host is unchanged. The other Account's genuine token-bound DPoP
+requests to the Credential's vault snapshot and object-version routes must return
+`404 sync.object_not_found`, unchanged and nonretryable, in both directions. No password,
+object, key or token is printed or written to a receipt. With `--across-restart`, this Credential
+exchange follows the existing Host/team restart check; it does not establish Credential
+restoration or native application behavior.
+
 The command writes `account-check.started` exclusively before its first request. Only a complete
 successful flow writes the separate `account-acceptance.json` containing exactly
-`{"account_password_sync_verified":true}`. It never upgrades or edits `descriptor.json`.
+`{"account_password_sync_verified":true,"account_credential_sync_verified":true,"account_credential_isolation_verified":true}`.
+It never upgrades or edits `descriptor.json`.
 A failed or interrupted check cannot be retried; discard the caller-owned fixture and its
 database. Its random Account, encrypted objects and keys have the same disposable lifecycle;
 no credential is printed or exported. This check does not establish native desktop restart

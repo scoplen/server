@@ -794,16 +794,28 @@ test("container CLI requires both native consumers before preparing a fixture", 
   );
 });
 
-test("Account acceptance requires the explicit completed password and sync receipt", () => {
-  assert.doesNotThrow(() =>
-    assertAccountAcceptance({ account_password_sync_verified: true }),
-  );
+test("Account acceptance requires password, Host and Credential sync and isolation", () => {
+  const complete = {
+    account_password_sync_verified: true,
+    account_credential_sync_verified: true,
+    account_credential_isolation_verified: true,
+  };
+  assert.doesNotThrow(() => assertAccountAcceptance(complete));
   for (const receipt of [
     undefined,
     null,
     {},
-    { account_password_sync_verified: false },
-    { account_password_sync_verified: "true" },
+    { account_password_sync_verified: true },
+    {
+      account_password_sync_verified: true,
+      account_credential_sync_verified: true,
+    },
+    { ...complete, account_password_sync_verified: false },
+    { ...complete, account_password_sync_verified: "true" },
+    { ...complete, account_credential_sync_verified: false },
+    { ...complete, account_credential_sync_verified: "true" },
+    { ...complete, account_credential_isolation_verified: false },
+    { ...complete, account_credential_isolation_verified: "true" },
     { disposable: true, operator_lifecycle_verified: true },
   ]) {
     assert.throws(() => assertAccountAcceptance(receipt));

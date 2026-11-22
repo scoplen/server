@@ -64,7 +64,11 @@ const failurePhases = new Set([
 ]);
 
 export function assertAccountAcceptance(receipt) {
-  assert.deepEqual(receipt, { account_password_sync_verified: true });
+  assert.deepEqual(receipt, {
+    account_password_sync_verified: true,
+    account_credential_sync_verified: true,
+    account_credential_isolation_verified: true,
+  });
 }
 
 export function assertTeamAcceptance(receipt) {
@@ -2729,7 +2733,7 @@ export async function checkPersonalContainer(driverPath, doctorPath) {
     }
   }
   console.log(
-    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, native refresh and complete team/Personal isolation across restart and public encrypted-archive restoration into a fresh Compose parent volume with a further persistent restart, Worker-triggered daily capture during public writes, two-Worker ownership/renewal, worker-only/combined/all selection, same-day restart suppression, collision/retry/disable preservation and bounded shutdown admission, retained database/audit/key/object state and committed WAL Accounts, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
+    "Personal container check passed: production build, trusted HTTPS, native doctor success/stopped failure/restart recovery, console, public Operator setup/login/logout, independent password Accounts and Devices, team creation/conditional name settings/discovery/confirmation, foreign-versus-absent team GET/PATCH isolation and encrypted Personal Host sync for both Accounts, bidirectional shared-password Credential sync and foreign-Account snapshot/version refusal, native refresh and complete team/Personal isolation across restart and public encrypted-archive restoration into a fresh Compose parent volume with a further persistent restart, Worker-triggered daily capture during public writes, two-Worker ownership/renewal, worker-only/combined/all selection, same-day restart suppression, collision/retry/disable preservation and bounded shutdown admission, retained database/audit/key/object state and committed WAL Accounts, retired entry absence, persistent restart state, SQLite upgrade and matching old image recovery.",
   );
 }
 

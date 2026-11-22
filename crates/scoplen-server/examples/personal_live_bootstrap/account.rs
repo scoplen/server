@@ -54,6 +54,8 @@ const ADMIT: &str = "/api/v1/auth/accounts/device-admissions";
 
 #[path = "audit.rs"]
 mod audit;
+#[path = "credentials.rs"]
+mod credentials;
 #[path = "grants.rs"]
 mod grants;
 #[path = "online_backup.rs"]
@@ -559,14 +561,30 @@ async fn upload(
     object: &Object,
     base: Option<u64>,
 ) -> Result<()> {
+    let sequence = upload_object(https, device, token, vault, key, object, base).await?;
+    if sequence != base.unwrap_or(0) + 1 {
+        return Err("Host write sequence assignment invalid");
+    }
+    Ok(())
+}
+
+async fn upload_object(
+    https: &Https,
+    device: &Device,
+    token: &AuthTokenResponse,
+    vault: Uuid,
+    key: &SecretBytes<32>,
+    object: &Object,
+    base: Option<u64>,
+) -> Result<u64> {
     let payload = ObjectEnvelope::encrypt(vault, 1, object, key, device.id, &device.keys.signing)
         .and_then(|envelope| envelope.encode())
-        .map_err(|_| "Host envelope encryption failed")?;
+        .map_err(|_| "Personal object envelope encryption failed")?;
     let body = SyncWriteBatch {
         writes: vec![SyncWrite { object_id: object.id, base_seq: base, payload, tombstone: false }],
     }
     .to_cbor()
-    .map_err(|_| "Host write batch invalid")?;
+    .map_err(|_| "Personal object write batch invalid")?;
     let bytes = https
         .post(
             &format!("/sync/v1/vaults/{vault}/objects"),
@@ -576,15 +594,15 @@ async fn upload(
             200,
         )
         .await?;
-    let response =
-        SyncWriteBatchResponse::from_cbor(&bytes).map_err(|_| "Host write response invalid")?;
+    let response = SyncWriteBatchResponse::from_cbor(&bytes)
+        .map_err(|_| "Personal object write response invalid")?;
     if response.assignments.len() != 1
         || response.assignments[0].object_id != object.id
-        || response.assignments[0].seq != base.unwrap_or(0) + 1
+        || response.assignments[0].seq == 0
     {
-        return Err("Host write sequence assignment invalid");
+        return Err("Personal object write assignment invalid");
     }
-    Ok(())
+    Ok(response.assignments[0].seq)
 }
 
 async fn download(
@@ -1087,8 +1105,9 @@ pub(super) async fn verify(
 ) -> Result<()> {
     let first = PersonalConsumer::new(https).await?;
     if !with_team {
-        first.exchange(https).await?;
-        return Ok(());
+        let first = first.exchange(https).await?;
+        let second = PersonalConsumer::new(https).await?.exchange(https).await?;
+        return credentials::verify(https, first, second).await;
     }
     let first_team =
         verify_team(https, &first.device, &first.token, first.account.payload.account_id).await?;
@@ -1114,7 +1133,7 @@ pub(super) async fn verify(
         second = second.refresh(https).await?;
         verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     }
-    Ok(())
+    credentials::verify(https, first, second).await
 }
 
 #[cfg(test)]

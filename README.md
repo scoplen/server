@@ -448,6 +448,8 @@ Device API. Shared vaults and remaining administration remain separate roadmap w
 The disposable container check registers two independent password Accounts. Each signs in and
 admits a fresh Device, refreshes its native session, creates and conditionally renames its own
 team, and verifies encrypted Host synchronization in both directions through public HTTPS.
+It then verifies each Account's shared password Credential in both directions between its two
+Devices, preserving the Host and rejecting the other Account's snapshot and version reads.
 Captured stale ETags are rejected; unchanged-name saves preserve the complete Resource.
 Each Account discovers only its own team, and foreign GET/PATCH attempts must return the same
 404 problem as absent teams, apart from request ids. Neither refusal may disclose an ETag.
@@ -530,7 +532,8 @@ For independent Personal integration tests, build the registered
 It prepares a private localhost TLS configuration, then performs real public Operator
 setup/login/logout and retired-route absence against the production server. Its separate
 `verify-account` command verifies password registration, independent Device admission and
-bidirectional encrypted Host sync without seeding identity tables. SQLite is the default; PostgreSQL takes
+bidirectional encrypted Host and shared password Credential sync, and foreign-Account Credential
+read refusal, without seeding identity tables. SQLite is the default; PostgreSQL takes
 a private disposable-database configuration. The caller owns the server process and database.
 
 The maintained WebAuthn verifier builds vendored OpenSSL. Install Perl and a native C toolchain
