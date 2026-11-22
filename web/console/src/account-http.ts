@@ -121,6 +121,7 @@ export async function accountFetch({
         ...(token ? { Authorization: `DPoP ${token}` } : {}),
         ...(options.key ? { "Idempotency-Key": options.key } : {}),
         ...(options.etag ? { "If-Match": options.etag } : {}),
+        ...(options.ifNoneMatch ? { "If-None-Match": options.ifNoneMatch } : {}),
       },
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),

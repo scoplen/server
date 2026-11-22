@@ -10,6 +10,7 @@ import type {
 } from "./generated/api.ts";
 import {
   TeamApi,
+  RequestFailure,
   operationId,
   type AnyResource,
   type AnyFields,
@@ -27,6 +28,10 @@ import { AuditPanel } from "./audit-view.tsx";
 import { GrantPanel } from "./grants-view.tsx";
 import { SnippetPanel, type SnippetHandle } from "./snippets-view.tsx";
 import { AccessRequestPanel } from "./access-requests-view.tsx";
+import {
+  IssuerDraftPanel,
+  type IssuerDraftHandle,
+} from "./issuer-draft-view.tsx";
 import {
   InventoryImportPanel,
   type InventoryImportHandle,
@@ -136,6 +141,8 @@ export function TeamWorkspace({
   const [csvImport, setCsvImport] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [snippetBusy, setSnippetBusy] = useState(false);
+  const [issuerBusy, setIssuerBusy] = useState(false);
+  const [reviewedSettingsTeam, setReviewedSettingsTeam] = useState<string>();
   const [importReviewRequired, setImportReviewRequired] = useState(false);
   const [pendingVersion, setPendingVersion] = useState(0);
   const [dependencyWarning, setDependencyWarning] = useState(false);
@@ -145,12 +152,18 @@ export function TeamWorkspace({
   const invitationHandle = useRef<InvitationHandle | null>(null);
   const importHandle = useRef<InventoryImportHandle | null>(null);
   const snippetHandle = useRef<SnippetHandle | null>(null);
+  const issuerHandle = useRef<IssuerDraftHandle | null>(null);
   const pending = useRef<PendingReceipt | undefined>(undefined);
   const mounted = useRef(true);
   const running = useRef(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const disabled =
-    busy || importBusy || snippetBusy || session.busy || session.blocked;
+    busy ||
+    importBusy ||
+    snippetBusy ||
+    issuerBusy ||
+    session.busy ||
+    session.blocked;
   const labels: Record<Section, string> = {
     hosts: t("Hosts", "主机"),
     "host-groups": t("Host groups", "主机分组"),
@@ -223,7 +236,8 @@ export function TeamWorkspace({
         pending.current ||
         importHandle.current?.hasPending() ||
         snippetHandle.current?.hasPending() ||
-        snippetHandle.current?.hasDraft()
+        snippetHandle.current?.hasDraft() ||
+        issuerHandle.current?.hasLocalWork()
       ) {
         event.preventDefault();
         event.returnValue = "";
@@ -253,6 +267,16 @@ export function TeamWorkspace({
     }
   }
   async function guardLeave(): Promise<boolean> {
+    if (
+      issuerHandle.current?.hasLocalWork() &&
+      !(await confirm(
+        t(
+          "Leave these issuer settings? Unsaved input and any original confirmation will be cleared. An unconfirmed operation may already have completed.",
+          "要离开签发方设置吗？尚未保存的输入和原操作确认数据将被清除。尚未确认的操作可能已经完成。",
+        ),
+      ))
+    )
+      return false;
     if (
       (snippetHandle.current?.hasPending() ||
         snippetHandle.current?.hasDraft()) &&
@@ -325,8 +349,21 @@ export function TeamWorkspace({
       return;
     const cursor = append ? (next ?? undefined) : undefined;
     if (target === "settings") {
-      const current = await api.organization(selected.id);
-      if (mounted.current) setTeam(current);
+      try {
+        const current = await api.organization(selected.id);
+        if (mounted.current) {
+          setTeam(current);
+          setReviewedSettingsTeam(current.id);
+        }
+      } catch (error) {
+        if (
+          mounted.current &&
+          error instanceof RequestFailure &&
+          [401, 403, 404].includes(error.status)
+        )
+          setReviewedSettingsTeam(undefined);
+        throw error;
+      }
     } else if (target === "members") {
       if (!append) setMembers([]);
       const page = await api.members(selected.id, cursor);
@@ -359,7 +396,9 @@ export function TeamWorkspace({
     }
   }
   async function navigate(target: Section) {
+    if (target === "settings" && target === section && !createTeam) return;
     if (!(await guardLeave())) return;
+    setReviewedSettingsTeam(undefined);
     setSection(target);
     setEditor(undefined);
     setMemberEdit(undefined);
@@ -589,7 +628,13 @@ export function TeamWorkspace({
           <button
             className="secondary"
             onClick={() => void sessionAction(onSignOut)}
-            disabled={busy || importBusy || session.busy || session.expired}
+            disabled={
+              busy ||
+              importBusy ||
+              issuerBusy ||
+              session.busy ||
+              session.expired
+            }
           >
             {session.blocked
               ? t("Retry sign out", "重试退出登录")
@@ -701,7 +746,7 @@ export function TeamWorkspace({
           id="team-main"
           className="team-main"
           tabIndex={-1}
-          aria-busy={busy || importBusy}
+          aria-busy={busy || importBusy || issuerBusy}
         >
           <div className="page-heading">
             <div>
@@ -1392,6 +1437,22 @@ export function TeamWorkspace({
                   </button>
                 </div>
               </form>
+              {profile &&
+                reviewedSettingsTeam === team.id &&
+                !session.blocked &&
+                !session.expired &&
+                (owner ||
+                  team.data.membership.roles.includes("administrator")) && (
+                  <IssuerDraftPanel
+                    key={`${team.id}:${profile.id}:${api.transport.sessionGeneration}`}
+                    api={api}
+                    organization={team.id}
+                    teamName={team.data.name}
+                    disabled={busy || session.busy || Boolean(pending.current)}
+                    handle={issuerHandle}
+                    onBusy={setIssuerBusy}
+                  />
+                )}
               <section className="danger-zone">
                 <h2>{t("Leave this team", "离开此团队")}</h2>
                 <p>
@@ -1406,6 +1467,7 @@ export function TeamWorkspace({
                   onClick={() =>
                     void (async () => {
                       if (pending.current) return;
+                      if (!(await guardLeave())) return;
                       if (
                         await confirm(
                           t(
@@ -1445,6 +1507,7 @@ export function TeamWorkspace({
                   disabled={disabled || !owner || Boolean(pending.current)}
                   onClick={() =>
                     void (async () => {
+                      if (!(await guardLeave())) return;
                       if (
                         !(await confirm(
                           t(

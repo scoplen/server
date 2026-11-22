@@ -31,14 +31,13 @@ import { object, text, timestamp, uuid } from "./wire.ts";
 import { snippetFields } from "./snippet-fields.ts";
 
 export type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-export interface RequestOptions {
+export type RequestOptions = {
   body?: unknown;
   key?: string;
-  etag?: string;
   success?: number;
   maximum?: number;
   decode?: (source: string) => unknown;
-}
+} & ({ etag?: string; ifNoneMatch?: never } | { etag?: never; ifNoneMatch: "*" });
 export interface ApiResponse {
   value: unknown;
   etag: string | null;
@@ -169,7 +168,7 @@ function resourceTimestamp(value: unknown): string {
   timestamp(result.replace(/\.\d+Z$/, "Z"));
   return result;
 }
-function resource(value: unknown, etag?: string | null) {
+export function resource(value: unknown, etag?: string | null) {
   const input = object(value);
   const result = {
     id: uuid(input.id),
