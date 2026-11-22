@@ -26,6 +26,20 @@ export class AccountFailure extends RequestFailure {
   }
 }
 
+async function verifyEmptyBody(body: Response["body"]): Promise<void> {
+  if (!body) return;
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) return;
+      if (part.value.byteLength > 0) throw new Error("Unexpected response body.");
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function problem(
   value: unknown,
   status: number,
@@ -162,7 +176,7 @@ export async function accountFetch({
     )
       throw new Error("Invalid response metadata.");
     if (response.status === 204 && success === 204) {
-      if (response.body !== null) throw new Error("Unexpected response body.");
+      await verifyEmptyBody(response.body);
     } else {
       const expected =
         response.status === success
