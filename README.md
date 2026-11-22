@@ -293,8 +293,8 @@ idle admission rows in bounded indexed batches. This challenge route creates no 
 Device and grants no login or sync authority. The separate registration/password/admission
 handlers compose their own protocol coordinators.
 
-All Rust protocol consumers, route-contract CI and generated console API types use published
-`proto@b0bc922`. The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
+The Rust protocol consumers, route-contract CI and generated console API types use the same
+published revision pinned in [Cargo.toml](Cargo.toml). The server consumes `scoplen-api`, `scoplen-crypto` and `scoplen-model`,
 and uses the same revision for the reviewed `ssh-key` scalar-decoding fix.
 D-151 supplies shared CSV preparation, typed atomic import messages and the thin browser export.
 D-153 adds the shared Direct OpenSSH preparer and its browser export; both source choices use
@@ -421,6 +421,40 @@ Retain the exact pending bytes and local keys, verify GET state first, and recov
 fresh DPoP; only a successful response to those exact bytes confirms publication. GET's projection
 does not establish exact replay. Publication does not replace public signing/KEM roots or implement
 ARK rotation or device revocation workflows.
+
+## Choosing native teams or enterprise identity
+
+For a personal workspace or a small team, use native Accounts, Devices, invitations,
+membership, access policies and encrypted sharing. These workflows run on your Scoplen
+deployment. You can start a team this way and consider enterprise identity later.
+
+For an Organization that needs corporate sign-in or directory provisioning, the optional
+integration uses your existing Plystra Auth instance. Its administrator manages upstream
+SAML or OIDC connections and SCIM provisioning there. Scoplen remains responsible for
+team membership, vault keys and permission to access each SSH resource.
+
+The current CLI supports two preparation steps:
+
+1. Check the exact HTTPS issuer, including its path. For a private CA, add
+   `--ca-certificate deployment-ca.pem`. Exit 0 confirms that the instance advertises
+   the supported human sign-in profile.
+
+   ```text
+   splctl auth check-instance --issuer https://auth.example.org
+   ```
+
+2. Generate the registration fields offline from your server's public origin. Give the
+   JSON to the Auth application administrator. It specifies the exact callback, code
+   flow, S256 PKCE, `openid` scope and confidential client authentication. The application
+   profile calls for private visibility, human login enabled and an empty business
+   permission manifest.
+
+   ```text
+   splctl auth registration-settings --config spl-server.toml --issuer https://auth.example.org
+   ```
+
+Both steps work before a team changes how it signs in. Organization binding, confirming
+a linked browser login and activating governance for selected operations are pending.
 
 ## Repository shape
 
@@ -607,29 +641,6 @@ existing endpoint. The remaining diagnostics are explicitly reported as unchecke
 external reachability, ACME management, clock offset, storage and KMS probes, backups, schema
 and agent compatibility, and console parity. Complete administration and diagnostics remain
 roadmap work.
-
-To check an existing Plystra Auth instance before registering a human sign-in application:
-
-```text
-splctl auth check-instance --issuer https://auth.example.org
-```
-
-Supply the exact issuer, including any path. Add `--ca-certificate deployment-ca.pem`
-for a private CA. The command reads only the issuer's OpenID discovery document over
-verified HTTPS. Exit 0 confirms the required endpoints and capabilities are advertised.
-Application registration, a browser sign-in test and enabling Organization policy are
-separate steps. The check needs no Account, client secret or running Scoplen server.
-
-Print the manual registration settings from the deployment's existing configuration:
-
-```text
-splctl auth registration-settings --config spl-server.toml --issuer https://auth.example.org
-```
-
-Give the JSON fields to the Auth application administrator. Register the exact redirect
-URI on a private, confidential web client, enable human login and leave the business
-permission manifest empty. This local command runs offline. Organization linking and
-the browser callback are pending implementation.
 
 Run `cargo run -p scoplen-server -- --help` for role selection and configuration options. The
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
