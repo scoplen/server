@@ -413,8 +413,10 @@ async fn mark_overdue(
     resource: &AccessRequestResource,
 ) -> AccessRequestResource {
     let mut overdue = resource.clone();
-    let now =
-        SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_millis() as i64;
+    let now = i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_millis(),
+    )
+    .expect("fixture timestamp fits i64");
     let expires = now - 1_000;
     let created = expires - 86_400_000;
     overdue.created_at = format_audit_timestamp(created).expect("created timestamp");
@@ -544,7 +546,7 @@ async fn deadline_expiry(f: &Fixture, use_browser: bool) {
             .await;
     assert_eq!(inbox.status, 200);
     inbox.private();
-    assert!(AccessRequestPage::from_json(&inbox.body).unwrap().items.is_empty());
+    assert_eq!(AccessRequestPage::from_json(&inbox.body).unwrap().items.len(), 0);
     let expired = match &f.backend {
         AuthBackend::Sqlite(store) => store.expire_organization_access_requests().await.unwrap(),
         AuthBackend::Postgres(store) => store.expire_organization_access_requests().await.unwrap(),
