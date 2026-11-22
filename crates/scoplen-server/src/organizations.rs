@@ -34,6 +34,7 @@ use crate::{
 
 mod access_requests;
 mod audit;
+mod auth_connection_draft;
 mod grants;
 mod group_policy;
 mod inventory;
@@ -74,6 +75,7 @@ pub(crate) fn router(
         .route("/api/v1/orgs/{org}", get(read))
         .route("/api/v1/orgs/{org}", patch(update))
         .merge(team::routes())
+        .merge(auth_connection_draft::routes())
         .merge(inventory::routes())
         .merge(group_policy::routes())
         .merge(grants::routes())

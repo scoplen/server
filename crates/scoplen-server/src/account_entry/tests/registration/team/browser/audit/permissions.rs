@@ -27,23 +27,6 @@ async fn both(
     }
 }
 
-async fn change_member(
-    f: &Fixture,
-    owner: &Actor,
-    organization: Uuid,
-    membership: Uuid,
-    role: TeamRole,
-    status: TeamMemberStatus,
-) {
-    let path = format!("/api/v1/orgs/{organization}/members/{membership}");
-    let current = call(f, owner, "GET", &path, &[], &[]).await;
-    assert_eq!(current.status, 200);
-    let member = TeamMemberResource::from_json(&current.body).expect("current member");
-    let body = TeamMemberUpdateRequest { roles: vec![role], status }.to_json().unwrap();
-    let changed = call(f, owner, "PATCH", &path, &body, &[("If-Match", &member.etag)]).await;
-    assert_eq!(changed.status, 200, "{}", String::from_utf8_lossy(&changed.body));
-}
-
 #[allow(clippy::too_many_lines)]
 async fn authority(f: &Fixture) {
     let owner = actor(f, "audit-owner").await;

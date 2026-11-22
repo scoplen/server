@@ -28,7 +28,9 @@ use scoplen_store::account_entry_admission::{
     AccountEntryAdmissionDecision, AccountEntryEndpoint, AccountEntryPrivateBucket,
     VerifiedAccountBucket,
 };
-use scoplen_store::organizations::{OrganizationPrincipal as _, OrganizationStoreError};
+use scoplen_store::organizations::{
+    OrganizationActor, OrganizationPrincipal as _, OrganizationStoreError,
+};
 use uuid::Uuid;
 
 use super::{OrganizationState, invalid, problem, reply, specific_problem, store_problem};
@@ -73,6 +75,8 @@ fn route(parts: &Parts) -> Option<(DeviceAccessOperation, &str, Option<&str>)> {
 #[allow(clippy::too_many_lines)]
 pub(super) fn endpoint(operation: DeviceAccessOperation) -> Option<AccountEntryEndpoint> {
     Some(match operation {
+        DeviceAccessOperation::AuthDraftCreate => AccountEntryEndpoint::OrganizationAuthDraftCreate,
+        DeviceAccessOperation::AuthDraftCancel => AccountEntryEndpoint::OrganizationAuthDraftCancel,
         DeviceAccessOperation::TeamInvitationCreate => AccountEntryEndpoint::TeamInvitationCreate,
         DeviceAccessOperation::TeamInvitationAccept => AccountEntryEndpoint::TeamInvitationAccept,
         DeviceAccessOperation::TeamInvitationRevoke => AccountEntryEndpoint::TeamInvitationRevoke,
@@ -313,6 +317,47 @@ pub(super) fn encoded(
     result
 }
 
+pub(super) async fn admitted_actor(
+    state: &OrganizationState,
+    source: IpAddr,
+    operation: DeviceAccessOperation,
+    parts: &Parts,
+    id: &Uuid,
+) -> Result<(OrganizationActor, u64, String), Box<Response>> {
+    let admission_endpoint = endpoint(operation);
+    if let Some(endpoint) = admission_endpoint {
+        admission(state, endpoint, source, None, id).await?;
+    }
+    if parts.headers.contains_key(header::ORIGIN) && !matching_origin(&parts.headers, &state.origin)
+    {
+        return Err(Box::new(problem(StatusCode::FORBIDDEN, "policy.denied", false, id)));
+    }
+    let (principal, expires_at, scopes) = match state
+        .account_auth
+        .authenticate_request_with_scopes(operation, &parts.method, &parts.uri, &parts.headers)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(Box::new(problem(
+                error.status,
+                match error.status {
+                    StatusCode::FORBIDDEN => "policy.denied",
+                    StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
+                    _ => "auth.authentication_required",
+                },
+                false,
+                id,
+            )));
+        }
+    };
+    if let Some(endpoint) = admission_endpoint {
+        admission(state, endpoint, source, Some(Uuid::from_bytes(principal.account_id())), id)
+            .await?;
+    }
+    Ok((principal, expires_at, scopes))
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -322,47 +367,11 @@ async fn handle(
     let id = Uuid::new_v4();
     let (parts, request_body) = request.into_parts();
     let Some((operation, organization, target)) = route(&parts) else { return invalid(&id) };
-    let admission_endpoint = endpoint(operation);
-    if let Some(endpoint) = admission_endpoint
-        && let Err(response) = admission(&state, endpoint, peer.ip(), None, &id).await
-    {
-        return response;
-    }
-    if parts.headers.contains_key(header::ORIGIN) && !matching_origin(&parts.headers, &state.origin)
-    {
-        return problem(StatusCode::FORBIDDEN, "policy.denied", false, &id);
-    }
-    let (principal, expires_at, scopes) = match state
-        .account_auth
-        .authenticate_request_with_scopes(operation, &parts.method, &parts.uri, &parts.headers)
-        .await
-    {
-        Ok(value) => value,
-        Err(error) => {
-            return problem(
-                error.status,
-                match error.status {
-                    StatusCode::FORBIDDEN => "policy.denied",
-                    StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
-                    _ => "auth.authentication_required",
-                },
-                false,
-                &id,
-            );
-        }
-    };
-    if let Some(endpoint) = admission_endpoint
-        && let Err(response) = admission(
-            &state,
-            endpoint,
-            peer.ip(),
-            Some(Uuid::from_bytes(principal.account_id())),
-            &id,
-        )
-        .await
-    {
-        return response;
-    }
+    let (principal, expires_at, scopes) =
+        match admitted_actor(&state, peer.ip(), operation, &parts, &id).await {
+            Ok(actor) => actor,
+            Err(response) => return *response,
+        };
     let Ok(organization) = parse_organization_idempotency_key(organization) else {
         return invalid(&id);
     };

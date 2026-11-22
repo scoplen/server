@@ -21,6 +21,7 @@ use super::*;
 
 mod browser;
 mod inventory;
+mod tls;
 
 struct Fixture {
     backend: AuthBackend,
@@ -199,22 +200,26 @@ impl Fixture {
     }
 
     async fn commit_failure(&self, enabled: bool) {
+        self.receipt_commit_failure(enabled, "organization_operation_receipts").await;
+    }
+
+    async fn receipt_commit_failure(&self, enabled: bool, table: &'static str) {
         if enabled {
             self.execute("CREATE TABLE IF NOT EXISTS team_commit_parent (id INTEGER PRIMARY KEY); CREATE TABLE IF NOT EXISTS team_commit_child (id INTEGER REFERENCES team_commit_parent(id) DEFERRABLE INITIALLY DEFERRED);").await;
         }
         let sql = match (&self.backend, enabled) {
             (AuthBackend::Sqlite(_), true) => {
-                "CREATE TRIGGER team_commit_failure AFTER INSERT ON organization_operation_receipts BEGIN INSERT INTO team_commit_child VALUES(1); END;"
+                "CREATE TRIGGER team_commit_failure AFTER INSERT ON {receipts} BEGIN INSERT INTO team_commit_child VALUES(1); END;"
             }
             (AuthBackend::Sqlite(_), false) => "DROP TRIGGER team_commit_failure;",
             (AuthBackend::Postgres(_), true) => {
-                "CREATE FUNCTION team_commit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO team_commit_child VALUES(1); RETURN NEW; END $$; CREATE TRIGGER team_commit_failure AFTER INSERT ON organization_operation_receipts FOR EACH ROW EXECUTE FUNCTION team_commit_failure();"
+                "CREATE FUNCTION team_commit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO team_commit_child VALUES(1); RETURN NEW; END $$; CREATE TRIGGER team_commit_failure AFTER INSERT ON {receipts} FOR EACH ROW EXECUTE FUNCTION team_commit_failure();"
             }
             (AuthBackend::Postgres(_), false) => {
-                "DROP TRIGGER team_commit_failure ON organization_operation_receipts; DROP FUNCTION team_commit_failure();"
+                "DROP TRIGGER team_commit_failure ON {receipts}; DROP FUNCTION team_commit_failure();"
             }
         };
-        self.execute(sql).await;
+        self.execute(&sql.replace("{receipts}", table)).await;
     }
 }
 

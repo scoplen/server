@@ -87,10 +87,9 @@ fn https_url(value: &str) -> Option<Url> {
 }
 
 fn validate_issuer(issuer: &str) -> Result<(), &'static str> {
-    if https_url(issuer).is_none_or(|url| url.query().is_some()) {
-        return Err("provide an absolute HTTPS issuer without credentials, query or fragment.");
-    }
-    Ok(())
+    scoplen_api::auth_connection_draft::validate_issuer(issuer).map_err(|_| {
+        "provide an absolute HTTPS issuer of at most 2,048 bytes without credentials, query, fragment, backslashes, whitespace or control characters."
+    })
 }
 
 async fn check_instance(issuer: &str, ca: Option<&std::path::Path>) -> Result<(), &'static str> {

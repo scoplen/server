@@ -133,6 +133,23 @@ async fn login(f: &Fixture, account: &Registration) -> Browser {
     Browser { key, access, cookie }
 }
 
+async fn change_member(
+    f: &Fixture,
+    owner: &Actor,
+    organization: Uuid,
+    membership: Uuid,
+    role: TeamRole,
+    status: TeamMemberStatus,
+) {
+    let path = format!("/api/v1/orgs/{organization}/members/{membership}");
+    let current = call(f, owner, "GET", &path, &[], &[]).await;
+    assert_eq!(current.status, 200);
+    let member = TeamMemberResource::from_json(&current.body).expect("current member");
+    let body = TeamMemberUpdateRequest { roles: vec![role], status }.to_json().unwrap();
+    let changed = call(f, owner, "PATCH", &path, &body, &[("If-Match", &member.etag)]).await;
+    assert_eq!(changed.status, 200, "{}", String::from_utf8_lossy(&changed.body));
+}
+
 async fn current(f: &Fixture, browser: &Browser) -> bool {
     let token = AccountBrowserAccessToken::parse(&browser.access).expect("original access token");
     match &f.backend {
@@ -722,6 +739,7 @@ async fn postgres_account_browser_logout_lost_commit_requires_explicit_terminal_
 
 mod access_requests;
 mod audit;
+mod auth_draft;
 mod business;
 mod grants;
 mod scope;

@@ -435,7 +435,10 @@ team membership, vault keys and permission to access each SSH resource.
 
 The current CLI supports two preparation steps:
 
-1. Check the exact HTTPS issuer, including its path. For a private CA, add
+1. Use the exact HTTPS issuer, including its path, up to 2,048 UTF-8 bytes. Both commands
+   reject user information, a query, a fragment, backslashes, whitespace and control
+   characters. Keep the same spelling and trailing slash throughout registration.
+   For a private CA, add
    `--ca-certificate deployment-ca.pem`. Exit 0 confirms that the instance advertises
    the supported human sign-in profile.
 
@@ -453,8 +456,23 @@ The current CLI supports two preparation steps:
    splctl auth registration-settings --config spl-server.toml --issuer https://auth.example.org
    ```
 
-Both steps work before a team changes how it signs in. Organization binding, confirming
-a linked browser login and activating governance for selected operations are pending.
+An Organization Owner or Administrator can save the exact issuer for later review through
+`/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
+`auth-drafts:manage` and a fresh DPoP proof. Current Organization policy must permit the
+operation. A browser mutation also needs the deployment's trusted Origin.
+
+| To | Request | Result |
+|---|---|---|
+| Save the proposed issuer | `POST` with `If-None-Match: *`, a UUIDv7 `Idempotency-Key`, and `{"data":{"issuer":"https://auth.example.org"}}` | `201` with the draft and its strong ETag |
+| Resume setup | `GET` | `200` with the current draft and ETag, or `404` when an authorized administrator has no draft to review |
+| Cancel the reviewed draft | `DELETE` with that strong ETag in `If-Match` and a fresh UUIDv7 `Idempotency-Key` | `204` with an empty body |
+
+On `412`, read the draft again before choosing whether to replace it. After an uncertain
+write, its original writer can confirm the exact request within 24 hours using the same key
+and a fresh proof. A later `GET` reports the current generation. Scoplen can save and
+cancel drafts while the issuer is offline. Native teams continue to use their existing
+sign-in and access policies. Organization binding, a linked browser
+login and activation of governance remain pending.
 
 ## Repository shape
 
