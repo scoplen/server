@@ -245,6 +245,43 @@ async fn authoring(f: &Fixture) {
         "organization.precondition_failed",
     );
     problem(&call(f, &outsider, "GET", &path, &[], &[]).await, 404, "organization.not_found");
+    let foreign_owner = actor(f, "inventory-foreign-owner").await;
+    let foreign_org = create_team(f, &foreign_owner).await.id;
+    let foreign_host = create_asset(
+        f,
+        &foreign_owner,
+        foreign_org,
+        InventoryType::Host,
+        json!({"name":"Foreign host","address":"foreign.example.test"}),
+    )
+    .await;
+    let revision = f.revision(org).await;
+    problem(
+        &call(
+            f,
+            &a,
+            "POST",
+            &format!("{root}/access-profiles"),
+            &serde_json::to_vec(&json!({
+                "id":Uuid::now_v7(),
+                "data":{"fields":{"host":foreign_host.id,"username":"deploy"}}
+            }))
+            .unwrap(),
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+        )
+        .await,
+        404,
+        "organization.not_found",
+    );
+    assert_eq!(f.revision(org).await, revision);
+    for id in [foreign_host.id, Uuid::now_v7()] {
+        problem(
+            &call(f, &a, "GET", &format!("{root}/hosts/{id}"), &[], &[]).await,
+            404,
+            "organization.not_found",
+        );
+    }
+    problem(&call(f, &foreign_owner, "GET", &path, &[], &[]).await, 404, "organization.not_found");
     let profile = create_asset(
         f,
         &a,
