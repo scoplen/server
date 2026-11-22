@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Deployment diagnostics and explicit local administration operations.
 
+mod auth;
 mod backup;
+mod diagnostic_http;
 mod doctor;
 
 use clap::{Parser, Subcommand};
@@ -18,6 +20,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect an existing Plystra Auth instance before connecting an Organization.
+    Auth {
+        #[command(subcommand)]
+        command: auth::Command,
+    },
     /// Create, verify or restore an encrypted deployment archive.
     Backup {
         #[command(subcommand)]
@@ -47,6 +54,7 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
+        Command::Auth { command } => return auth::run(command).await,
         Command::Backup { command } => return backup::run(command).await,
         Command::Doctor { config, ca_certificate } => {
             return if doctor::run(&config, ca_certificate.as_deref()).await {

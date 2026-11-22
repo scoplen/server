@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Add `splctl auth check-instance` to check an existing Plystra Auth instance's human
+  sign-in metadata over verified HTTPS before registering an application. The diagnostic
+  accepts a private CA and runs independently of Scoplen storage and team configuration.
+
 - Add disabled-by-default Worker scheduling for daily encrypted local SQLite archives, using
   the loaded deployment configuration and existing online archive. Persist current-UTC-day
   claims, retry at five minutes up to three times and renew ownership during blocking capture
