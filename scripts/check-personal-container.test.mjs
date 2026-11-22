@@ -4,6 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
+  link,
   mkdtemp,
   readFile,
   readdir,
@@ -19,6 +20,7 @@ import { once } from "node:events";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { publicationMarker } from "./check-personal-container-publication.mjs";
 import {
   assertAccountAcceptance,
   assertBackupAcceptance,
@@ -340,6 +342,28 @@ test(
     }
   },
 );
+
+test("post-admission publication collides on a real hard link and preserves competing staging across retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "scoplen-publication-test-"));
+  const slot = "2026-01-02";
+  const output = join(root, `scoplen-${slot}.age`);
+  const staged = join(root, "encrypted-fixture");
+  try {
+    await writeFile(staged, "simulated completed archive", { flag: "wx" });
+    await publicationMarker(root, slot, "publish");
+    await assert.rejects(link(staged, output), { code: "EEXIST" });
+    await publicationMarker(root, slot, "withdraw");
+    await link(staged, output);
+    await publicationMarker(root, slot, "check-recovered");
+    await assert.rejects(
+      publicationMarker(root, slot, "withdraw"),
+      /unrelated file/,
+    );
+    assert.equal(await readFile(output, "utf8"), "simulated completed archive");
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
 
 test("daily runtime evidence requires renewal, one owner and confirmed completion", () => {
   const samples = dailySamples();
