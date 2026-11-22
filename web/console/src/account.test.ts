@@ -214,6 +214,80 @@ test("HTTP boundary verifies all problem fields and cache metadata before accept
   await assert.rejects(run(), rejected("invalid_response", true));
 });
 
+test("documented Account DELETE operations accept both browser representations of an empty 204 and reject any bytes", async () => {
+  const key = await AccountProofKey.create(),
+    resource = "019a0000-0000-7000-8000-000000000002";
+  let answer = response(undefined, 204);
+  mock.method(globalThis, "fetch", async () => answer);
+  const run = (suffix: string, success = 204) =>
+    accountFetch({
+      origin,
+      key,
+      method: "DELETE",
+      path: `/api/v1/orgs/${org}/${suffix}`,
+      operation: "request",
+      token: access(1),
+      options: { etag: '"original"', success },
+    });
+  const streamed = (body: ReadableStream<Uint8Array>) => {
+    const reply = response(undefined, 204);
+    // A network 204 in Chromium exposes a stream even though Response(null) does not.
+    Object.defineProperty(reply, "body", { value: body });
+    return reply;
+  };
+  for (const suffix of [
+    "auth-connection-draft",
+    `invitations/${resource}`,
+    `members/${resource}`,
+    `hosts/${resource}`,
+    `grants/${resource}`,
+  ]) {
+    answer = response(undefined, 204);
+    assert.deepEqual(await run(suffix), { value: undefined, etag: null });
+    answer = streamed(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array());
+          controller.close();
+        },
+      }),
+    );
+    assert.deepEqual(await run(suffix), { value: undefined, etag: null });
+  }
+  let cancelled = false;
+  answer = streamed(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Uint8Array.of(0));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }),
+  );
+  await assert.rejects(
+    run("auth-connection-draft"),
+    rejected("invalid_response", true),
+  );
+  assert.ok(cancelled);
+  answer = streamed(
+    new ReadableStream({
+      start(controller) {
+        controller.error(new Error("interrupted response"));
+      },
+    }),
+  );
+  await assert.rejects(
+    run("auth-connection-draft"),
+    rejected("invalid_response", true),
+  );
+  answer = response(undefined, 204);
+  await assert.rejects(
+    run("auth-connection-draft", 200),
+    rejected("invalid_response", true),
+  );
+});
+
 test("Account public transport confines routes and omits cookies while signing each exact HTTP method", async () => {
   const key = await AccountProofKey.create();
   const client = new AccountClient(origin, loginBoundary(key));
