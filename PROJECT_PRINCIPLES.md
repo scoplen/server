@@ -8,8 +8,11 @@ self-hosted server, host agent, administration CLI, and web console.
 
 - The server owns durable service behavior, role supervision, operator configuration, and the
   web console. It does not own client source or shared wire contracts.
+- Native Accounts, invitations, team authorization and encrypted sharing operate independently.
+  The optional enterprise integration consumes the selected identity provider's public
+  interface. Upstream identity connections and directory provisioning belong to Plystra Auth.
 - Rust protocol consumers, the reviewed `ssh-key` patch, route-contract CI and console artifacts
-  use published `proto@b0bc922`. D-155 admits the five existing Snippet library operations for
+  share the published revision in [Cargo.toml](Cargo.toml). D-155 admits the five existing Snippet library operations for
   genuine Account-browser families, with current scope/tenant/Cedar checks, original-family
   creation receipts and unchanged native views. The Console edits typed definitions using its
   existing custom selector, preserves secret variables without defaults, and requires explicit
