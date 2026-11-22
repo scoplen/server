@@ -592,7 +592,7 @@ async fn visibility(f: &Fixture) {
     // descriptor and acknowledgement below must still be rejected.
     let other_owner = actor(f, "visibility-other-owner").await;
     let other_org = create_team(f, &other_owner).await.id;
-    enroll_member(f, &other_owner, &b, other_org).await;
+    let other_membership = enroll_member(f, &other_owner, &b, other_org).await;
     let other_host = create_asset(
         f,
         &other_owner,
@@ -601,8 +601,43 @@ async fn visibility(f: &Fixture) {
         json!({"name":"Retained tenant host","address":"retained.example.test"}),
     )
     .await;
+    let other_source = SimpleRuleInput {
+        organization: other_org,
+        subject: SimpleRuleSubject::Membership(other_membership),
+        rule: SimpleRule::View {
+            resources: vec![SimpleRuleSelector {
+                object_type: ObjectType::HOST,
+                id: other_host.id,
+            }],
+        },
+    }
+    .generate()
+    .expect("retained tenant view rule");
+    policy(
+        &call(
+            f,
+            &other_owner,
+            "POST",
+            &format!("/api/v1/orgs/{other_org}/policies"),
+            &serde_json::to_vec(&json!({
+                "id":Uuid::now_v7(),
+                "data":{"name":"Retained tenant host","source":other_source,"enabled":true}
+            }))
+            .unwrap(),
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+        )
+        .await,
+        201,
+    );
     let other_descriptor = descriptor(f, &b, other_org).await;
     let other_revision = other_descriptor.organization.unwrap().view_revision;
+    let retained_before = view(f, &b, other_descriptor.id, other_revision, 0, 100).await;
+    assert_eq!(retained_before.status, 200);
+    let retained_before = SyncOrganizationViewResponse::from_cbor(&retained_before.body)
+        .expect("retained tenant view before suspension");
+    assert!(!retained_before.more);
+    assert_eq!(retained_before.objects.len(), 1);
+    assert_eq!(retained_before.objects[0].object_id, other_host.id);
     let group_id = Uuid::now_v7();
     let group_path = format!("{root}/groups/{group_id}");
     let create = json!({"id":group_id,"data":{"name":"Operators","members":[membership]}});
