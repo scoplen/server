@@ -260,7 +260,7 @@ pub(super) async fn exchange(
         .ok_or("audit consumer expected a complete response")
 }
 
-/// Deliberately lose a create reply before inspecting its status, headers or body.
+/// Deliberately lose a mutation reply before inspecting its status, headers or body.
 pub(super) async fn lose_response(
     https: &Https,
     actor: Actor<'_>,

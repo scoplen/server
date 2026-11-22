@@ -26,8 +26,8 @@ use zeroize::Zeroizing;
 use super::super::{
     Registration,
     audit::{
-        Actor, Browser, Reply, create_team, exchange, invite, native, replace_policy, timeline,
-        update_member,
+        Actor, Browser, Reply, create_team, exchange, invite, lose_response, native,
+        replace_policy, timeline, update_member,
     },
 };
 use super::{asset, list, policy, problem, rule, withdraw};
@@ -179,6 +179,38 @@ impl Context<'_> {
         self.create_fields(actor, account, self.fields()).await
     }
 
+    async fn write_losing_response(
+        &self,
+        actor: Actor<'_>,
+        path: String,
+        body: Vec<u8>,
+        if_match: Option<String>,
+        status: u16,
+        id: Uuid,
+    ) -> Result<Written> {
+        let key = Uuid::now_v7().to_string();
+        let mut headers = vec![("Idempotency-Key", key.as_str())];
+        if let Some(etag) = &if_match {
+            headers.push(("If-Match", etag.as_str()));
+        }
+        lose_response(self.https, actor, &path, &body, &headers).await?;
+        let reply =
+            exchange(self.https, actor, "GET", &format!("{}/{id}", self.base()), &[], &[], 200)
+                .await?;
+        let resource = resource(&reply)?;
+        resource.validate_for_id(id).map_err(|_| "Request HTTPS observed state changed its id")?;
+        // This read observes current state; only original-writer/key confirmation proves the operation.
+        Ok(Written {
+            path,
+            body: Zeroizing::new(body),
+            key,
+            if_match,
+            status,
+            original: reply.body,
+            resource,
+        })
+    }
+
     async fn create_fields(
         &self,
         actor: Actor<'_>,
@@ -293,6 +325,16 @@ async fn terminal(
     original: &AccessRequestResource,
     decision: Option<AccessRequestOutcome>,
 ) -> Result<Written> {
+    terminal_reply(c, actor, original, decision, false).await
+}
+
+async fn terminal_reply(
+    c: &Context<'_>,
+    actor: Actor<'_>,
+    original: &AccessRequestResource,
+    decision: Option<AccessRequestOutcome>,
+    lose_reply: bool,
+) -> Result<Written> {
     let (suffix, body) = if let Some(decision) = decision {
         (
             "decisions",
@@ -303,15 +345,13 @@ async fn terminal(
     } else {
         ("cancel", Vec::new())
     };
-    let written = c
-        .write(
-            actor,
-            format!("{}/{}/{suffix}", c.base(), original.id),
-            body,
-            Some(original.etag.clone()),
-            200,
-        )
-        .await?;
+    let path = format!("{}/{}/{suffix}", c.base(), original.id);
+    let written = if lose_reply {
+        c.write_losing_response(actor, path, body, Some(original.etag.clone()), 200, original.id)
+            .await?
+    } else {
+        c.write(actor, path, body, Some(original.etag.clone()), 200).await?
+    };
     if let Some(decision) = decision {
         written
             .resource
@@ -753,8 +793,137 @@ async fn profile(
     Ok(())
 }
 
+async fn confirm_lost_reply(
+    c: &Context<'_>,
+    writer: Actor<'_>,
+    other_writer: Actor<'_>,
+    written: &Written,
+) -> Result<()> {
+    let key = Uuid::now_v7().to_string();
+    let mut headers = written.headers();
+    headers[0] = ("Idempotency-Key", key.as_str());
+    let (status, code) = if written.if_match.is_some() {
+        (412, "organization.precondition_failed")
+    } else {
+        (409, "organization.conflict")
+    };
+    c.failure(writer, &written.path, &written.body, &headers, status, code).await?;
+    c.failure(
+        other_writer,
+        &written.path,
+        &written.body,
+        &written.headers(),
+        409,
+        "organization.conflict",
+    )
+    .await?;
+    c.confirm(writer, written).await
+}
+
 #[allow(clippy::too_many_lines)]
+async fn response_loss_profile(
+    c: &Context<'_>,
+    requester: Actor<'_>,
+    approver: Actor<'_>,
+    other_requester: Actor<'_>,
+    other_approver: Actor<'_>,
+    browser: bool,
+) -> Result<()> {
+    let requester_actor = ExpectedActor {
+        account: c.member.payload.account_id,
+        device: (!browser).then_some(c.member.device.id),
+    };
+    let approver_actor = ExpectedActor {
+        account: c.owner.payload.account_id,
+        device: (!browser).then_some(c.owner.device.id),
+    };
+    let request = AccessRequestCreateRequest { id: Uuid::now_v7(), fields: c.fields() };
+    let body = request.to_json().map_err(|_| "Request HTTPS lost-create input is invalid")?;
+    let before = c.snapshot().await?;
+    let pending = c.write_losing_response(requester, c.base(), body, None, 201, request.id).await?;
+    pending
+        .resource
+        .validate_for_create(&request, requester_actor.account)
+        .map_err(|_| "Request HTTPS lost-create observation changed the original input")?;
+    if pending.resource.status != AccessRequestStatus::Pending
+        || pending.resource.requester_membership_id != c.membership
+    {
+        return Err("Request HTTPS lost-create observation selected another state or Membership");
+    }
+    effect(
+        &before,
+        &c.snapshot().await?,
+        &pending.resource,
+        requester_actor,
+        "organization.access_request_created",
+    )?;
+    confirm_lost_reply(c, requester, other_requester, &pending).await?;
+
+    let before = c.snapshot().await?;
+    let approved =
+        terminal_reply(c, approver, &pending.resource, Some(AccessRequestOutcome::Approve), true)
+            .await?;
+    effect(
+        &before,
+        &c.snapshot().await?,
+        &approved.resource,
+        approver_actor,
+        "organization.access_request_approved",
+    )?;
+    confirm_lost_reply(c, approver, other_approver, &approved).await?;
+    c.confirm(requester, &pending).await?;
+    if c.get(requester, request.id).await? != approved.resource {
+        return Err("Request HTTPS create confirmation rewrote approved current state");
+    }
+    let grant = c
+        .snapshot()
+        .await?
+        .grants
+        .into_iter()
+        .find(|grant| {
+            approved.resource.grant.as_ref().is_some_and(|history| history.id == grant.id)
+        })
+        .ok_or("Request HTTPS lost approval did not retain its original Grant")?;
+    withdraw(c.https, approver, c.org, &grant).await?;
+
+    let before = c.snapshot().await?;
+    let cancellable = c.create(requester, requester_actor.account).await?;
+    effect(
+        &before,
+        &c.snapshot().await?,
+        &cancellable.resource,
+        requester_actor,
+        "organization.access_request_created",
+    )?;
+    let before = c.snapshot().await?;
+    let cancelled = terminal_reply(c, requester, &cancellable.resource, None, true).await?;
+    effect(
+        &before,
+        &c.snapshot().await?,
+        &cancelled.resource,
+        requester_actor,
+        "organization.access_request_cancelled",
+    )?;
+    confirm_lost_reply(c, requester, other_requester, &cancelled).await?;
+    c.confirm(requester, &cancellable).await?;
+    if c.get(requester, cancellable.resource.id).await? != cancelled.resource
+        || !c.snapshot().await?.grants.is_empty()
+    {
+        return Err("Request HTTPS lost cancellation changed current state or created a Grant");
+    }
+    Ok(())
+}
+
 pub(super) async fn verify(https: &Https) -> Result<()> {
+    verify_flow(https, false).await
+}
+
+pub(super) async fn verify_response_loss(https: &Https) -> Result<()> {
+    verify_flow(https, true).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn verify_flow(https: &Https, response_loss: bool) -> Result<()> {
     println!("Request acceptance: genuine independent Account, Device and browser families");
     let owner = Registration::new(&https.origin)?;
     owner.register(https).await?;
@@ -833,110 +1002,140 @@ pub(super) async fn verify(https: &Https) -> Result<()> {
         view,
         request,
     };
-    let before = c.snapshot().await?;
-    let original = c.create(member_browser.actor(), member.payload.account_id).await?;
-    effect(
-        &before,
-        &c.snapshot().await?,
-        &original.resource,
-        ExpectedActor { account: member.payload.account_id, device: None },
-        "organization.access_request_created",
-    )?;
-    member_browser.refresh(https).await?;
-    c.confirm(member_browser.actor(), &original).await?;
-    c.failure(
-        other_family.actor(),
-        &original.path,
-        &original.body,
-        &original.headers(),
-        409,
-        "organization.conflict",
-    )
-    .await?;
-    terminal(&c, member_browser.actor(), &original.resource, None).await?;
-    println!(
-        "Request acceptance: native deny/cancel, current routing and exact original confirmation"
-    );
-    profile(
-        &mut c,
-        member_actor,
-        owner_actor,
-        member_browser.actor(),
-        owner_browser.actor(),
-        false,
-    )
-    .await?;
-    println!("Request acceptance: waiting one real admission window before the browser profile");
-    tokio::time::sleep(std::time::Duration::from_secs(61)).await;
-    println!(
-        "Request acceptance: browser deny/cancel, current routing and exact original confirmation"
-    );
-    profile(
-        &mut c,
-        member_browser.actor(),
-        owner_browser.actor(),
-        other_family.actor(),
-        owner_actor,
-        true,
-    )
-    .await?;
-    let absent = Uuid::now_v7();
-    let original_id = original.resource.id;
-    for actor in [member_actor, member_browser.actor()] {
-        let missing = problem(
-            &exchange(https, actor, "GET", &format!("{}/{absent}", c.base()), &[], &[], 404)
-                .await?,
-            404,
-            "organization.not_found",
+    if response_loss {
+        println!("Request acceptance: losing native create, approval and cancellation responses");
+        response_loss_profile(
+            &c,
+            member_actor,
+            owner_actor,
+            member_browser.actor(),
+            owner_browser.actor(),
+            false,
+        )
+        .await?;
+        println!(
+            "Request acceptance: waiting one real admission window before browser response loss"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        println!("Request acceptance: losing browser create, approval and cancellation responses");
+        response_loss_profile(
+            &c,
+            member_browser.actor(),
+            owner_browser.actor(),
+            other_family.actor(),
+            owner_actor,
+            true,
+        )
+        .await?;
+    } else {
+        let before = c.snapshot().await?;
+        let original = c.create(member_browser.actor(), member.payload.account_id).await?;
+        effect(
+            &before,
+            &c.snapshot().await?,
+            &original.resource,
+            ExpectedActor { account: member.payload.account_id, device: None },
+            "organization.access_request_created",
         )?;
-        let cross = problem(
-            &exchange(
-                https,
-                actor,
-                "GET",
-                &format!("/api/v1/orgs/{}/access-requests/{original_id}", foreign.id),
-                &[],
-                &[],
-                404,
-            )
-            .await?,
-            404,
-            "organization.not_found",
-        )?;
-        if missing != cross {
-            return Err("Request HTTPS foreign and absent request problems differ");
-        }
-        for host in [foreign_host.id, absent] {
-            let body =
-                AccessRequestCheckRequest { fields: AccessRequestFields { host, ..c.fields() } }
-                    .to_json()
-                    .map_err(|_| "Request HTTPS foreign check is invalid")?;
-            c.failure(
-                actor,
-                &format!("{}/check", c.base()),
-                &body,
-                &[],
+        member_browser.refresh(https).await?;
+        c.confirm(member_browser.actor(), &original).await?;
+        c.failure(
+            other_family.actor(),
+            &original.path,
+            &original.body,
+            &original.headers(),
+            409,
+            "organization.conflict",
+        )
+        .await?;
+        terminal(&c, member_browser.actor(), &original.resource, None).await?;
+        println!(
+            "Request acceptance: native deny/cancel, current routing and exact original confirmation"
+        );
+        profile(
+            &mut c,
+            member_actor,
+            owner_actor,
+            member_browser.actor(),
+            owner_browser.actor(),
+            false,
+        )
+        .await?;
+        println!(
+            "Request acceptance: waiting one real admission window before the browser profile"
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+        println!(
+            "Request acceptance: browser deny/cancel, current routing and exact original confirmation"
+        );
+        profile(
+            &mut c,
+            member_browser.actor(),
+            owner_browser.actor(),
+            other_family.actor(),
+            owner_actor,
+            true,
+        )
+        .await?;
+        let absent = Uuid::now_v7();
+        let original_id = original.resource.id;
+        for actor in [member_actor, member_browser.actor()] {
+            let missing = problem(
+                &exchange(https, actor, "GET", &format!("{}/{absent}", c.base()), &[], &[], 404)
+                    .await?,
                 404,
                 "organization.not_found",
-            )
-            .await?;
-        }
-    }
-    for actor in [owner_actor, owner_browser.actor()] {
-        problem(
-            &exchange(
-                https,
-                actor,
-                "GET",
-                &format!("/api/v1/orgs/{}/access-requests?view=mine", foreign.id),
-                &[],
-                &[],
+            )?;
+            let cross = problem(
+                &exchange(
+                    https,
+                    actor,
+                    "GET",
+                    &format!("/api/v1/orgs/{}/access-requests/{original_id}", foreign.id),
+                    &[],
+                    &[],
+                    404,
+                )
+                .await?,
                 404,
-            )
-            .await?,
-            404,
-            "organization.not_found",
-        )?;
+                "organization.not_found",
+            )?;
+            if missing != cross {
+                return Err("Request HTTPS foreign and absent request problems differ");
+            }
+            for host in [foreign_host.id, absent] {
+                let body = AccessRequestCheckRequest {
+                    fields: AccessRequestFields { host, ..c.fields() },
+                }
+                .to_json()
+                .map_err(|_| "Request HTTPS foreign check is invalid")?;
+                c.failure(
+                    actor,
+                    &format!("{}/check", c.base()),
+                    &body,
+                    &[],
+                    404,
+                    "organization.not_found",
+                )
+                .await?;
+            }
+        }
+        for actor in [owner_actor, owner_browser.actor()] {
+            problem(
+                &exchange(
+                    https,
+                    actor,
+                    "GET",
+                    &format!("/api/v1/orgs/{}/access-requests?view=mine", foreign.id),
+                    &[],
+                    &[],
+                    404,
+                )
+                .await?,
+                404,
+                "organization.not_found",
+            )?;
+        }
     }
     let current_foreign = super::inventory(
         &exchange(

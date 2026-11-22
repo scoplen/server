@@ -610,6 +610,57 @@ foreign/absent inventory, view-revision and membership-loss slice; the broader D
 still tracks old receipts, cross-tenant continuations, worker/cache delivery and complete
 request-to-SSH acceptance separately.
 
+## Access-request response-loss HTTPS acceptance
+
+Use another new private API-only fixture on each database, with Account registration and team
+creation enabled, then complete `bootstrap` from the same server/example checkout:
+
+```text
+personal_live_bootstrap verify-request-response-loss <fixture-directory>
+```
+
+This independent subflow reuses the genuine password Accounts, enrolled Devices, Account-browser
+families, ordinary View/RequestAccess rules, verified TLS 1.3/HTTP/2, public audit/Grant/view
+snapshots and encrypted Personal continuity from `verify-requests`. It deliberately discards
+each create, approval and cancellation response before inspecting its status, headers or body.
+This uses the existing consumer-side response-loss helper, with no production hook or altered
+clock, scope, quota or authority.
+
+A separate public GET observes the current Resource and binds its exact input and transition;
+that read is not confirmation of the original operation. Explicit confirmation retains the
+original writer, Idempotency-Key, payload and If-Match, and checks the returned original
+Resource against the observed bytes; the lost response itself was never captured. Confirmation
+must leave the independently observed audit, Grants and view unchanged. An approval has
+exactly one finite Grant and its two attributable events. Cancellation adds one event without
+a Grant/view change. Create confirmation after approval or cancellation still returns the
+original pending Resource without rewriting the terminal current state.
+
+A new key for an existing create id must conflict with `409 organization.conflict`. For a
+decision or cancellation, a new key and the unchanged original If-Match must fail with
+`412 organization.precondition_failed` because that ETag is now stale. The original key with
+another current Device/browser writer of the same Account must return
+`409 organization.conflict`. None may change the observed effects or substitute a new ETag.
+
+Each Device/browser profile uses seven create, four decision and four cancellation attempts
+for the respective Account. A real 61-second admission-window wait separates profiles;
+production limits remain unchanged. There is no business retry after a failed/ambiguous check:
+abandon the fixture instead. Only the deliberately retained original operation is explicitly
+confirmed. The command keeps the existing twelve-minute overall and fifteen-second HTTPS bounds.
+
+Exclusive `request-response-loss-check.started` creation prevents repeating the command on the
+same fixture. Only complete success writes `request-response-loss-acceptance.json` with four
+fixed, content-free fields, without any retained identity or receipt collection:
+
+```json
+{"request_device_browser_response_loss_verified":true,"request_original_confirmation_verified":true,"request_single_transition_effects_verified":true,"request_personal_sync_preserved":true}
+```
+
+This observes consumer delivery loss after a response becomes available; it does not inject
+an unacknowledged database COMMIT or pre-response transport loss. The fixed 24-hour pending
+deadline and reduced-scope upgrade checks remain separate. Current public login/refresh has
+no requested-scope input; this command creates no artificial narrower credential. It makes
+no certificate, SSH, rendered/native or complete integration-gate claim.
+
 ## Independent access-request client handoff
 
 Build the production server and example from the same current checkout. Prepare another new
