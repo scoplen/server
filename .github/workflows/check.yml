@@ -175,7 +175,16 @@ jobs:
           --test account_password_change --test account_password_change_migrations -- --test-threads=1
       - name: Check native Account entry, team lifecycle HTTP and startup on SQLite and PostgreSQL
         run: >-
-          cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry:: -- --test-threads=2
+          cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry::
+          -- --skip registration::team::browser::auth_draft:: --test-threads=2
+      - name: Check Organization issuer draft storage on SQLite and PostgreSQL
+        run: >-
+          cargo test --locked -p scoplen-store --features postgres-integration
+          --test organization_auth_drafts -- --test-threads=1
+      - name: Check Organization issuer drafts over HTTPS on SQLite and PostgreSQL
+        run: >-
+          cargo test --locked -p scoplen-server --lib --features postgres-integration
+          registration::team::browser::auth_draft:: -- --test-threads=1
       - name: Export verified TLS KRL downloads from both stores
         env:
           SCOPLEN_KRL_ACCEPTANCE_DIRECTORY: ${{ runner.temp }}/krl-acceptance
