@@ -573,6 +573,43 @@ Only complete success writes `requests-acceptance.json` with exactly these conte
 No Account password, key, token, cookie, request reason or response body is exported or printed.
 The caller owns service/database lifecycle, private diagnostics and exact resource cleanup.
 
+## Focused two-Organization tenant isolation acceptance
+
+Build the server and example from the same checkout. Prepare a fresh fixture with Account
+registration and team creation enabled, complete `bootstrap`, and run independently against
+SQLite and a new disposable PostgreSQL database:
+
+```text
+personal_live_bootstrap verify-tenant-isolation <fixture-directory>
+```
+
+This consumer registers two independent Accounts, creates one Organization for each, and
+creates one Host in each Organization through the public HTTPS API. A broad custom
+`view_inventory` permit for one Host cannot cross the durable Organization boundary:
+foreign and absent Host reads use the same `organization.not_found` response. A named
+invitation then grants the second Account view access to the first Host, and the complete
+Organization sync view is checked against its current `view_revision`. A policy-only change
+invalidates the old revision with `sync.view_changed`; the refreshed view is the only accepted
+continuation. View permission remains separate from `connect`, so certificate issuance is
+still denied without a connect rule. A Grant that names a Membership from the other
+Organization is rejected before mutation.
+
+Removing the invited Membership withdraws only the first Organization: its inventory and
+previous sync view return the bounded not-found boundary, while the second Account's own
+Organization and encrypted Personal Host continue to work. The verifier writes no Account,
+token, key, cookie, Host or response data. Success writes only this content-free receipt:
+
+```json
+{"tenant_foreign_absent_inventory_verified":true,"tenant_custom_policy_boundary_verified":true,"tenant_view_revision_verified":true,"tenant_view_connect_separation_verified":true,"tenant_foreign_reference_verified":true,"tenant_membership_removal_verified":true,"tenant_personal_sync_preserved":true}
+```
+
+`tenant-isolation-check.started` is created before the first request. On any failure or
+interruption, abandon the fixture instead of replaying a potentially committed operation;
+the caller owns the service, database, private diagnostics and cleanup. This is the focused
+foreign/absent inventory, view-revision and membership-loss slice; the broader D-126 matrix
+still tracks old receipts, cross-tenant continuations, worker/cache delivery and complete
+request-to-SSH acceptance separately.
+
 ## Independent access-request client handoff
 
 Build the production server and example from the same current checkout. Prepare another new

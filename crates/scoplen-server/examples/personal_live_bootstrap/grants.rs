@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 
 use scoplen_api::{
     ProblemDetails,
+    auth::AuthTokenResponse,
     certificate::{CertificateIssuanceRequest, CertificateIssuanceResponse, CertificateTargets},
     grant::{GrantCreateRequest, GrantFields, GrantPage, GrantReplaceRequest, GrantResource},
     group_policy::{
@@ -13,6 +14,10 @@ use scoplen_api::{
     },
     inventory::{InventoryResource, InventoryType},
     organization::OrganizationListQuery,
+    sync::{
+        SessionVault, SyncOrganizationViewQuery, SyncOrganizationViewResponse, SyncSessionRequest,
+        SyncSessionResponse,
+    },
     team::{TeamMemberStatus, TeamRole},
     user_ca::{UserCaCreateRequest, UserCaResource},
 };
@@ -45,6 +50,306 @@ pub(super) async fn verify_inventory_import(
 
 pub(super) async fn verify_requests(https: &Https) -> Result<()> {
     requests::verify(https).await
+}
+
+/// Verify the smallest genuine two-tenant negative matrix used by D-126.
+///
+/// This deliberately uses two newly registered Accounts and two newly created
+/// Organizations. It proves that inventory reads resolve the durable tenant,
+/// that absent and foreign objects share the same public boundary, and that
+/// removing one membership withdraws only that Organization's view.
+pub(super) async fn verify_tenant_isolation(https: &Https) -> Result<()> {
+    println!("Tenant isolation acceptance: two Accounts and two Organizations");
+    let first = Registration::new(&https.origin)?;
+    first.register(https).await?;
+    let second = Registration::new(&https.origin)?;
+    second.register(https).await?;
+    let first_token = first.device.refresh(https, first.device.authenticate(https).await?).await?;
+    let second_token =
+        second.device.refresh(https, second.device.authenticate(https).await?).await?;
+    let first_browser = Browser::login(https, &first).await?;
+    let second_browser = Browser::login(https, &second).await?;
+    let first_actor = native(&first, &first_token);
+    let second_actor = native(&second, &second_token);
+    let first_personal = super::host(first.device.id)?;
+    let second_personal = super::host(second.device.id)?;
+    super::upload(
+        https,
+        &first.device,
+        &first_token,
+        first.payload.personal_vault_id,
+        &first.vault_key,
+        &first_personal,
+        None,
+    )
+    .await?;
+    super::upload(
+        https,
+        &second.device,
+        &second_token,
+        second.payload.personal_vault_id,
+        &second.vault_key,
+        &second_personal,
+        None,
+    )
+    .await?;
+    let first_org = create_team(https, first_actor).await?;
+    let second_org = create_team(https, second_actor).await?;
+    let first_host = asset(
+        https,
+        first_browser.actor(),
+        first_org.id,
+        InventoryType::Host,
+        json!({"name":"First tenant host","address":"first.example.test"}),
+    )
+    .await?;
+    let second_host = asset(
+        https,
+        second_browser.actor(),
+        second_org.id,
+        InventoryType::Host,
+        json!({"name":"Second tenant host","address":"second.example.test"}),
+    )
+    .await?;
+    let absent = Uuid::now_v7();
+    policy(
+        https,
+        first_actor,
+        first_org.id,
+        format!(
+            "permit(principal, action == Action::\"view_inventory\", resource == Host::\"{}\");",
+            first_host.id
+        ),
+    )
+    .await?;
+    for (actor, foreign_org, foreign_host) in
+        [(first_actor, second_org.id, second_host.id), (second_actor, first_org.id, first_host.id)]
+    {
+        let foreign = problem(
+            &exchange(
+                https,
+                actor,
+                "GET",
+                &format!("/api/v1/orgs/{foreign_org}/hosts/{foreign_host}"),
+                &[],
+                &[],
+                404,
+            )
+            .await?,
+            404,
+            "organization.not_found",
+        )?;
+        let missing = problem(
+            &exchange(
+                https,
+                actor,
+                "GET",
+                &format!("/api/v1/orgs/{foreign_org}/hosts/{absent}"),
+                &[],
+                &[],
+                404,
+            )
+            .await?,
+            404,
+            "organization.not_found",
+        )?;
+        if foreign != missing {
+            return Err("foreign and absent inventory reads disclose different facts");
+        }
+    }
+
+    let membership =
+        invite(https, first_actor, second_browser.actor(), &second, first_org.id).await?;
+    rule(
+        https,
+        first_actor,
+        first_org.id,
+        membership,
+        SimpleRule::View {
+            resources: vec![SimpleRuleSelector {
+                object_type: ObjectType::HOST,
+                id: first_host.id,
+            }],
+        },
+    )
+    .await?;
+    let visible = exchange(
+        https,
+        second_actor,
+        "GET",
+        &format!("/api/v1/orgs/{}/hosts/{}", first_org.id, first_host.id),
+        &[],
+        &[],
+        200,
+    )
+    .await?;
+    inventory(&visible, InventoryType::Host, first_host.id)?;
+    let (vault, view) = organization_view(https, &second, &second_token, first_org.id).await?;
+    if !view.objects.iter().any(|change| change.object_id == first_host.id) {
+        return Err("authorized member view omitted its permitted Host");
+    }
+    let old_revision =
+        vault.organization.ok_or("Organization vault context missing")?.view_revision;
+    let _revision_policy = rule(
+        https,
+        first_actor,
+        first_org.id,
+        membership,
+        SimpleRule::View {
+            resources: vec![SimpleRuleSelector {
+                object_type: ObjectType::HOST,
+                id: first_host.id,
+            }],
+        },
+    )
+    .await?;
+    let stale_path =
+        format!("/sync/v1/vaults/{}/view?revision={old_revision}&after=0&limit=100", vault.id);
+    let stale = https
+        .exchange(
+            "GET",
+            &stale_path,
+            &[],
+            Some((&second.device.keys.signing, Some(second_token.access_token.as_str()))),
+            409,
+        )
+        .await?;
+    let stale_problem = scoplen_api::ProblemDetails::from_cbor(&stale)
+        .map_err(|_| "stale Organization view problem invalid")?;
+    if stale_problem.code.as_str() != "sync.view_changed" {
+        return Err("policy-only Organization view change used the wrong error");
+    }
+    let _ = organization_view(https, &second, &second_token, first_org.id).await?;
+    let trust = ca(https, first_actor, first_org.id).await?;
+    let connect_request = request(CertificateTargets::Hosts(vec![first_host.id]))?;
+    deny_sign(https, second_actor, first_org.id, &connect_request, Uuid::now_v7(), 403).await?;
+    let foreign_grant = GrantCreateRequest {
+        id: Uuid::now_v7(),
+        fields: GrantFields {
+            membership: second_org.membership.id,
+            host: first_host.id,
+            remote_user: "operator".into(),
+            valid_from: 0,
+            valid_until: None,
+        },
+    }
+    .to_json()
+    .map_err(|_| "foreign Grant reference request invalid")?;
+    problem(
+        &exchange(
+            https,
+            first_actor,
+            "POST",
+            &format!("/api/v1/orgs/{}/grants", first_org.id),
+            &foreign_grant,
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+            400,
+        )
+        .await?,
+        400,
+        "organization.invalid_request",
+    )?;
+
+    let current = member(https, first_actor, first_org.id, membership).await?;
+    exchange(
+        https,
+        first_actor,
+        "DELETE",
+        &format!("/api/v1/orgs/{}/members/{membership}", first_org.id),
+        &[],
+        &[("If-Match", &current.etag)],
+        204,
+    )
+    .await?;
+    problem(
+        &exchange(
+            https,
+            second_actor,
+            "GET",
+            &format!("/api/v1/orgs/{}/hosts/{}", first_org.id, first_host.id),
+            &[],
+            &[],
+            404,
+        )
+        .await?,
+        404,
+        "organization.not_found",
+    )?;
+    let _ = https
+        .exchange(
+            "GET",
+            &format!(
+                "/sync/v1/vaults/{}/view?revision={}&after=0&limit=100",
+                vault.id,
+                vault.organization.ok_or("Organization vault context missing")?.view_revision
+            ),
+            &[],
+            Some((&second.device.keys.signing, Some(second_token.access_token.as_str()))),
+            404,
+        )
+        .await?;
+    let (remaining_vault, _) =
+        organization_view(https, &second, &second_token, second_org.id).await?;
+    if remaining_vault.organization.ok_or("second Organization context missing")?.organization
+        != second_org.id
+    {
+        return Err("membership removal affected the wrong Organization");
+    }
+    super::download(
+        https,
+        &second.device,
+        &second_token,
+        (second.payload.personal_vault_id, &second.vault_key),
+        &second.device,
+        &second_personal,
+        1,
+    )
+    .await?;
+    let _ = trust;
+    println!(
+        "Tenant isolation acceptance: foreign/absent inventory, scoped view and membership removal passed"
+    );
+    Ok(())
+}
+
+async fn organization_view(
+    https: &Https,
+    account: &Registration,
+    token: &AuthTokenResponse,
+    organization: Uuid,
+) -> Result<(SessionVault, SyncOrganizationViewResponse)> {
+    let body = SyncSessionRequest {
+        client_version: "0.1.0".into(),
+        model_version: 1,
+        device_id: account.device.id,
+    }
+    .to_cbor()
+    .map_err(|_| "tenant isolation session request invalid")?;
+    let proof = Some((&account.device.keys.signing, Some(token.access_token.as_str())));
+    let bytes = https.exchange("POST", "/sync/v1/session", &body, proof, 200).await?;
+    let session = SyncSessionResponse::from_cbor(&bytes)
+        .map_err(|_| "tenant isolation session response invalid")?;
+    let vault = session
+        .vaults
+        .into_iter()
+        .find(|vault| {
+            vault.organization.is_some_and(|context| context.organization == organization)
+        })
+        .ok_or("tenant isolation Organization vault missing")?;
+    let source = vault.organization.ok_or("tenant isolation Organization context missing")?;
+    let query =
+        SyncOrganizationViewQuery { view_revision: source.view_revision, after: 0, limit: 100 };
+    let path = format!(
+        "/sync/v1/vaults/{}/view?{}",
+        vault.id,
+        query.to_query().map_err(|_| "tenant isolation view query invalid")?
+    );
+    let bytes = https.exchange("GET", &path, &[], proof, 200).await?;
+    let view = SyncOrganizationViewResponse::from_cbor(&bytes)
+        .map_err(|_| "tenant isolation view response invalid")?;
+    view.validate_for_query(source, vault.id, &query)
+        .map_err(|_| "tenant isolation view source differs")?;
+    Ok((vault, view))
 }
 
 pub(super) async fn prepare_client(

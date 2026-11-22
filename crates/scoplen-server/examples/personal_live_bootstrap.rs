@@ -52,6 +52,7 @@ const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
 const LOGOUT: &str = "/api/v1/auth/operator/logout";
 const GRANTS_ACCEPTANCE: &str = "{\"grant_device_browser_https_verified\":true,\"grant_certificate_expiry_verified\":true,\"grant_lifecycle_tenant_verified\":true,\"grant_personal_sync_preserved\":true}";
 const REQUESTS_ACCEPTANCE: &str = "{\"request_device_browser_https_verified\":true,\"request_current_routing_tenant_verified\":true,\"request_original_confirmation_verified\":true,\"request_personal_sync_preserved\":true}";
+const TENANT_ISOLATION_ACCEPTANCE: &str = "{\"tenant_foreign_absent_inventory_verified\":true,\"tenant_custom_policy_boundary_verified\":true,\"tenant_view_revision_verified\":true,\"tenant_view_connect_separation_verified\":true,\"tenant_foreign_reference_verified\":true,\"tenant_membership_removal_verified\":true,\"tenant_personal_sync_preserved\":true}";
 const PASSWORD_CHANGE_ACCEPTANCE: &str = "{\"password_change_native_https_verified\":true,\"password_change_browser_generation_verified\":true,\"password_change_historical_receipt_verified\":true}";
 
 #[derive(Parser)]
@@ -116,6 +117,8 @@ enum Command {
     VerifyGrants { directory: PathBuf },
     /// Once only: verify request denials, routing and original confirmation through real HTTPS.
     VerifyRequests { directory: PathBuf },
+    /// Once only: verify the minimal two-Organization tenant isolation matrix through real HTTPS.
+    VerifyTenantIsolation { directory: PathBuf },
     /// Once only: verify atomic inventory imports with genuine Device and browser writers.
     VerifyInventoryImport {
         directory: PathBuf,
@@ -334,6 +337,7 @@ async fn run(command: Command) -> Result<()> {
         Command::VerifyGrants { directory } => verify_grants(&directory).await?,
         Command::VerifyPasswordChange { directory } => verify_password_change(&directory).await?,
         Command::VerifyRequests { directory } => verify_requests(&directory).await?,
+        Command::VerifyTenantIsolation { directory } => verify_tenant_isolation(&directory).await?,
         Command::VerifyInventoryImport { directory, source } => {
             verify_inventory_import(&directory, source).await?;
         }
@@ -490,6 +494,33 @@ async fn verify_requests(directory: &Path) -> Result<()> {
     .map_err(|_| "Request check task failed; abandon this fixture")??;
     write_private(&directory.join("requests-acceptance.json"), REQUESTS_ACCEPTANCE)?;
     println!("public Device and Account-browser request HTTPS check passed");
+    Ok(())
+}
+
+async fn verify_tenant_isolation(directory: &Path) -> Result<()> {
+    let directory = canonical_fixture_directory(directory)?;
+    let config = fixture_config(&directory)?;
+    let origin = config.public_origin().map_err(|_| "prepared origin is invalid")?;
+    let https = Https::new(&directory, config.server.listen_port, origin)?;
+    write_private(
+        &directory.join("tenant-isolation-check.started"),
+        "One attempt only; discard this fixture after any failure.",
+    )?;
+    tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(180),
+            Box::pin(account::verify_tenant_isolation(&https)),
+        )
+        .await
+        .map_err(|_| "Tenant isolation check exceeded its deadline; abandon this fixture")?
+    })
+    .await
+    .map_err(|_| "Tenant isolation check task failed; abandon this fixture")??;
+    write_private(
+        &directory.join("tenant-isolation-acceptance.json"),
+        TENANT_ISOLATION_ACCEPTANCE,
+    )?;
+    println!("public two-Organization tenant isolation HTTPS check passed");
     Ok(())
 }
 
@@ -1392,6 +1423,25 @@ mod tests {
             assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
         }
         assert!(Cli::try_parse_from(["consumer", "verify-requests", "unused"]).is_ok());
+    }
+
+    #[test]
+    fn tenant_isolation_acceptance_has_only_fixed_matrix_claims() {
+        let value: serde_json::Value = serde_json::from_str(TENANT_ISOLATION_ACCEPTANCE).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 7);
+        for name in [
+            "tenant_foreign_absent_inventory_verified",
+            "tenant_custom_policy_boundary_verified",
+            "tenant_view_revision_verified",
+            "tenant_view_connect_separation_verified",
+            "tenant_foreign_reference_verified",
+            "tenant_membership_removal_verified",
+            "tenant_personal_sync_preserved",
+        ] {
+            assert_eq!(object.get(name), Some(&serde_json::Value::Bool(true)));
+        }
+        assert!(Cli::try_parse_from(["consumer", "verify-tenant-isolation", "unused"]).is_ok());
     }
 
     #[tokio::test]
