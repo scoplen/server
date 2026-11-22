@@ -620,6 +620,17 @@ verified HTTPS. Exit 0 confirms the required endpoints and capabilities are adve
 Application registration, a browser sign-in test and enabling Organization policy are
 separate steps. The check needs no Account, client secret or running Scoplen server.
 
+Print the manual registration settings from the deployment's existing configuration:
+
+```text
+splctl auth registration-settings --config spl-server.toml --issuer https://auth.example.org
+```
+
+Give the JSON fields to the Auth application administrator. Register the exact redirect
+URI on a private, confidential web client, enable human login and leave the business
+permission manifest empty. This local command runs offline. Organization linking and
+the browser callback are pending implementation.
+
 Run `cargo run -p scoplen-server -- --help` for role selection and configuration options. The
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM

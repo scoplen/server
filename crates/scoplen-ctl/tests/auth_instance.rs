@@ -70,6 +70,11 @@ fn discovery_response(port: u16, scenario: &str) -> Response<Body> {
         Response::builder().header("content-type", "application/json; charset=utf-8");
     match scenario {
         "tenant" => {}
+        "basic" => {
+            document["token_endpoint_auth_methods_supported"] = json!(["client_secret_basic"]);
+        }
+        "public-only" => document["token_endpoint_auth_methods_supported"] = json!(["none"]),
+        "null-methods" => document["token_endpoint_auth_methods_supported"] = json!(null),
         "mismatch" => document["issuer"] = json!("https://other.example.test"),
         "missing" => document["scopes_supported"] = json!(["email"]),
         "keyset" => document["jwks_uri"] = json!("http://example.test/keys"),
@@ -129,6 +134,9 @@ async fn checks_only_the_configured_instances_discovery_and_requires_trusted_log
     assert_eq!(count.load(Ordering::SeqCst), 0);
     for (index, (scenario, expected)) in [
         ("tenant", "PASS"),
+        ("basic", "PASS"),
+        ("public-only", "client_secret_basic"),
+        ("null-methods", "invalid discovery"),
         ("mismatch", "issuer mismatch"),
         ("missing", "openid scope"),
         ("keyset", "advertised endpoint"),
@@ -141,7 +149,7 @@ async fn checks_only_the_configured_instances_discovery_and_requires_trusted_log
     .enumerate()
     {
         let out = check(format!("{issuer}/{scenario}"), Some(ca.clone())).await;
-        assert_eq!(out.status.success(), scenario == "tenant");
+        assert_eq!(out.status.success(), matches!(scenario, "tenant" | "basic"));
         let report = format!(
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -158,4 +166,65 @@ async fn checks_only_the_configured_instances_discovery_and_requires_trusted_log
     task.abort();
     fs::remove_file(ca).expect("remove test CA");
     fs::remove_dir(dir).expect("there should be no new deployment files");
+}
+
+#[test]
+fn prepares_manual_registration_from_the_configured_origin_offline() {
+    let dir = std::env::temp_dir().join(format!("spl-registration-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&dir).expect("fixture directory");
+    let config = dir.join("server.toml");
+    let data = dir.join("absent");
+    fs::write(&config, format!(
+        "[server]\npublic_host = 'workspace.example.test'\npublic_port = 9443\ndata_dir = '{}'\n[storage]\nbackend = 'postgres'\ndatabase_url = 'postgres://private-config-marker@unreachable.example.test/unused'\n",
+        data.to_str().expect("fixture path").replace('\\', "/")
+    )).expect("deployment configuration");
+    let settings = |issuer: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_splctl"));
+        for (key, _) in std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("SPL_"))
+        {
+            cmd.env_remove(key);
+        }
+        cmd.env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "")
+            .args(["auth", "registration-settings", "--config"])
+            .arg(&config)
+            .args(["--issuer", issuer])
+            .output()
+            .expect("registration CLI")
+    };
+    for (issuer, digest) in [
+        (
+            "https://id.example.test/teams",
+            "3f44c165315f1fc33c4cd2af803fcad5c877351b407399263401a16ded59c718",
+        ),
+        (
+            "https://id.example.test/teams/",
+            "1c58e73e1bbabe5cffcf56b3b0fc91fb07e16a8c47878ae3e3818316d92f1851",
+        ),
+        (
+            "https://id.example.test/team-b",
+            "32281b66eee1eb866e816ef8fd52e586f70525288ea3f8fc30b091c5a1a36ffc",
+        ),
+    ] {
+        let out = settings(issuer);
+        assert!(out.status.success());
+        let actual: serde_json::Value = serde_json::from_slice(&out.stdout).expect("settings JSON");
+        assert_eq!(
+            actual,
+            json!({
+                "redirect_uri": format!("https://workspace.example.test:9443/api/v1/auth/enterprise/oidc/{digest}/callback"),
+                "response_type": "code", "grant_type": "authorization_code", "scope": "openid",
+                "code_challenge_method": "S256", "token_endpoint_auth_method": "client_secret_basic"
+            })
+        );
+        assert_eq!(out.stderr, b"");
+    }
+    let invalid = settings("https://private-marker@id.example.test");
+    assert!(!invalid.status.success() && invalid.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&invalid.stderr).contains("private-marker"));
+    fs::remove_file(&config).expect("remove fixture");
+    let missing = settings("https://id.example.test");
+    assert!(!missing.status.success() && missing.stdout.is_empty());
+    fs::remove_dir(dir).expect("the command must leave no deployment state");
 }

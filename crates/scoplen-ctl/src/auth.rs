@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Read-only discovery for an explicitly selected enterprise issuer.
+//! Read-only discovery and manual registration settings for an enterprise issuer.
 
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::Subcommand;
 use reqwest::{StatusCode, Url, header};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::diagnostic_http::{diagnostic_client, read_body, request_failure};
 
@@ -20,15 +21,29 @@ pub enum Command {
         #[arg(long)]
         ca_certificate: Option<PathBuf>,
     },
+    /// Print the confidential web client settings for manual registration, offline.
+    RegistrationSettings {
+        /// Existing local server configuration with the deployment's public HTTPS origin.
+        #[arg(long, default_value = "spl-server.toml", env = "SPL_CONFIG")]
+        config: PathBuf,
+        /// Exact HTTPS issuer URL used for this registration.
+        #[arg(long)]
+        issuer: String,
+    },
 }
 
 pub async fn run(command: Command) -> ExitCode {
-    let Command::CheckInstance { issuer, ca_certificate } = command;
-    match check_instance(&issuer, ca_certificate.as_deref()).await {
-        Ok(()) => {
-            println!(
-                "PASS: compatible human sign-in metadata. Register the application and verify a browser login before enabling access."
-            );
+    let result = match command {
+        Command::CheckInstance { issuer, ca_certificate } => {
+            check_instance(&issuer, ca_certificate.as_deref()).await.map(|()|
+                "PASS: compatible human sign-in metadata. Register the application and verify a browser login before enabling access.".to_owned()
+            )
+        }
+        Command::RegistrationSettings { config, issuer } => registration_settings(&config, &issuer),
+    };
+    match result {
+        Ok(report) => {
+            println!("{report}");
             ExitCode::SUCCESS
         }
         Err(reason) => {
@@ -36,6 +51,21 @@ pub async fn run(command: Command) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn registration_settings(config: &std::path::Path, issuer: &str) -> Result<String, &'static str> {
+    validate_issuer(issuer)?;
+    let origin = crate::doctor::configured_origin(config)?;
+    let hash = Sha256::digest(issuer.as_bytes());
+    let settings = serde_json::json!({
+        "redirect_uri": format!("{origin}/api/v1/auth/enterprise/oidc/{hash:x}/callback"),
+        "response_type": "code",
+        "grant_type": "authorization_code",
+        "code_challenge_method": "S256",
+        "scope": "openid",
+        "token_endpoint_auth_method": "client_secret_basic"
+    });
+    Ok(format!("{settings:#}"))
 }
 
 fn https_url(value: &str) -> Option<Url> {
@@ -56,10 +86,15 @@ fn https_url(value: &str) -> Option<Url> {
     .then_some(url)
 }
 
-async fn check_instance(issuer: &str, ca: Option<&std::path::Path>) -> Result<(), &'static str> {
+fn validate_issuer(issuer: &str) -> Result<(), &'static str> {
     if https_url(issuer).is_none_or(|url| url.query().is_some()) {
         return Err("provide an absolute HTTPS issuer without credentials, query or fragment.");
     }
+    Ok(())
+}
+
+async fn check_instance(issuer: &str, ca: Option<&std::path::Path>) -> Result<(), &'static str> {
+    validate_issuer(issuer)?;
     let client = diagnostic_client(ca)?;
     let discovery = format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'));
     let response = client
@@ -101,6 +136,8 @@ struct Discovery {
     #[serde(default)]
     response_types_supported: Vec<String>,
     grant_types_supported: Option<Vec<String>>,
+    #[serde(default = "default_token_auth_methods")]
+    token_endpoint_auth_methods_supported: Vec<String>,
     #[serde(default)]
     code_challenge_methods_supported: Vec<String>,
     #[serde(default)]
@@ -109,6 +146,10 @@ struct Discovery {
     subject_types_supported: Vec<String>,
     #[serde(default)]
     id_token_signing_alg_values_supported: Vec<String>,
+}
+
+fn default_token_auth_methods() -> Vec<String> {
+    vec!["client_secret_basic".to_owned()]
 }
 
 impl Discovery {
@@ -136,6 +177,11 @@ impl Discovery {
             return Err("the instance does not advertise the authorization code grant.");
         }
         for (values, expected, reason) in [
+            (
+                &self.token_endpoint_auth_methods_supported,
+                "client_secret_basic",
+                "the instance must support client_secret_basic for confidential web clients.",
+            ),
             (
                 &self.response_types_supported,
                 "code",
