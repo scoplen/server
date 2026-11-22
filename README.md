@@ -456,8 +456,13 @@ The current CLI supports two preparation steps:
    splctl auth registration-settings --config spl-server.toml --issuer https://auth.example.org
    ```
 
-An Organization Owner or Administrator can save the exact issuer for later review through
-`/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
+To save a proposed instance, sign in to the Console as an Organization Owner or
+Administrator, select the team, then open **Settings → Connect Plystra Auth**. Enter the
+Auth instance's issuer URL and choose **Save draft**. Return to the same team to review
+the saved address. To replace it, review and cancel the current generation before saving
+another address. The Console labels the draft as untested.
+
+API clients use `/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
 `auth-drafts:manage` and a fresh DPoP proof. Current Organization policy must permit the
 operation. A browser mutation also needs the deployment's trusted Origin.
 

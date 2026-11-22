@@ -6,7 +6,9 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 - Organization administrators can save, read and cancel one proposed identity issuer
   per team using a Device or Account-browser session. Both database backends retain the
-  draft generation and audit each change. Native sign-in continues during setup.
+  draft generation and audit each change. Team settings provides the same workflow in
+  the Console, including explicit confirmation after a lost response. Native sign-in
+  continues during setup.
 
 - Align both issuer preparation commands with the Organization draft URL format and its
   2,048-byte limit. Invalid input is rejected before configuration or network access.
