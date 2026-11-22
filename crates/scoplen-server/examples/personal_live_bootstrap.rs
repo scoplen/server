@@ -1092,10 +1092,10 @@ impl Https {
         if expected == 404 && !path.starts_with("/api/v1/orgs") {
             return Ok(Zeroizing::new(Vec::new()));
         }
-        let content_type = if expected >= 400 {
+        let content_type = if path.starts_with("/sync/") {
+            if expected >= 400 { "application/problem+cbor" } else { "application/cbor" }
+        } else if expected >= 400 {
             "application/problem+json"
-        } else if path.starts_with("/sync/") {
-            "application/cbor"
         } else {
             "application/json"
         };
