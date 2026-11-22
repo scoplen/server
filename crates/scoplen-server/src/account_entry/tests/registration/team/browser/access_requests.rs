@@ -10,9 +10,11 @@ use scoplen_api::{
         AccessRequestCheckRequest, AccessRequestCheckResponse, AccessRequestCreateRequest,
         AccessRequestFields, AccessRequestPage, AccessRequestResource, AccessRequestStatus,
     },
+    audit::format_audit_timestamp,
     inventory::InventoryType,
 };
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 async fn transport(
     f: &Fixture,
@@ -356,6 +358,172 @@ async fn browser_lifecycle(f: &Fixture) {
     lifecycle(f, true).await;
 }
 
+async fn mark_overdue(
+    f: &Fixture,
+    organization: Uuid,
+    resource: &AccessRequestResource,
+) -> AccessRequestResource {
+    let mut overdue = resource.clone();
+    let now =
+        SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_millis() as i64;
+    let expires = now - 1_000;
+    let created = expires - 86_400_000;
+    overdue.created_at = format_audit_timestamp(created).expect("created timestamp");
+    overdue.updated_at = overdue.created_at.clone();
+    overdue.expires_at = format_audit_timestamp(expires).expect("expiry timestamp");
+    overdue.etag = "\"overdue-http-fixture\"".into();
+    let response = overdue.to_json().expect("overdue response JSON");
+    match &f.backend {
+        AuthBackend::Sqlite(store) => {
+            sqlx::query("UPDATE organization_access_requests SET response_json=$1,created_at_ms=$2,updated_at_ms=$2,expires_at_ms=$3 WHERE organization_id=$4 AND id=$5")
+                .bind(response)
+                .bind(created)
+                .bind(expires)
+                .bind(organization.as_bytes().as_slice())
+                .bind(overdue.id.as_bytes().as_slice())
+                .execute(store.pool())
+                .await
+                .expect("overdue request mutation");
+        }
+        AuthBackend::Postgres(store) => {
+            sqlx::query("UPDATE organization_access_requests SET response_json=$1,created_at_ms=$2,updated_at_ms=$2,expires_at_ms=$3 WHERE organization_id=$4 AND id=$5")
+                .bind(response)
+                .bind(created)
+                .bind(expires)
+                .bind(organization.as_bytes().as_slice())
+                .bind(overdue.id.as_bytes().as_slice())
+                .execute(store.pool())
+                .await
+                .expect("overdue request mutation");
+        }
+    }
+    overdue
+}
+
+#[allow(clippy::too_many_lines)]
+async fn deadline_expiry(f: &Fixture, use_browser: bool) {
+    let owner = actor(f, "request-deadline-owner").await;
+    let member = actor(f, "request-deadline-member").await;
+    let owner_browser = login(f, &owner.registration).await;
+    let member_browser = login(f, &member.registration).await;
+    let org = create_team(f, &owner).await.id;
+    super::super::inventory::enroll_member(f, &owner, &member, org).await;
+    let host = create_asset(
+        f,
+        &owner_browser,
+        org,
+        InventoryType::Host,
+        json!({"name":"Deadline target","address":"deadline.example.test"}),
+    )
+    .await;
+    let path = format!("/api/v1/orgs/{org}/access-requests");
+    let fields = AccessRequestFields {
+        host: host.id,
+        remote_user: "deploy".into(),
+        duration_seconds: 120,
+        reason: "deadline test".into(),
+    };
+    let view = json!({"id":Uuid::now_v7(),"data":{"name":"Deadline target","source":format!("permit(principal, action == Action::\"view_inventory\", resource == Host::\"{}\");",host.id),"enabled":true}});
+    assert_eq!(
+        business(
+            f,
+            &owner_browser,
+            "POST",
+            &format!("/api/v1/orgs/{org}/policies"),
+            &serde_json::to_vec(&view).unwrap(),
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+        )
+        .await
+        .status,
+        201
+    );
+    let policy = json!({"id":Uuid::now_v7(),"data":{"name":"Deadline target","source":format!("permit(principal, action == Action::\"request_access\", resource == Host::\"{}\") when {{ context.duration_seconds <= 120 }};",host.id),"enabled":true}});
+    assert_eq!(
+        business(
+            f,
+            &owner_browser,
+            "POST",
+            &format!("/api/v1/orgs/{org}/policies"),
+            &serde_json::to_vec(&policy).unwrap(),
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+        )
+        .await
+        .status,
+        201
+    );
+    let requester = use_browser.then_some(&member_browser);
+    let decision_browser = use_browser.then_some(&owner_browser);
+    let create = AccessRequestCreateRequest { id: Uuid::now_v7(), fields };
+    let body = create.to_json().unwrap();
+    let pending = resource(
+        &transport(
+            f,
+            &member,
+            requester,
+            "POST",
+            &path,
+            &body,
+            &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+        )
+        .await,
+        201,
+    );
+    let overdue = mark_overdue(f, org, &pending).await;
+    let before_revision = f.revision(org).await;
+    let before_grants = f.count("SELECT COUNT(*) FROM organization_grants").await;
+    let before_audit = f.count("SELECT COUNT(*) FROM audit_events").await;
+    let decide = format!("{path}/{}/decisions", overdue.id);
+    let decision = transport(
+        f,
+        &owner,
+        decision_browser,
+        "POST",
+        &decide,
+        br#"{"decision":"approve"}"#,
+        &[("Idempotency-Key", &Uuid::now_v7().to_string()), ("If-Match", overdue.etag.as_str())],
+    )
+    .await;
+    decision.problem(409, "organization.conflict", false);
+    assert_eq!(f.revision(org).await, before_revision);
+    let current = resource(
+        &transport(f, &member, requester, "GET", &format!("{path}/{}", overdue.id), &[], &[]).await,
+        200,
+    );
+    assert_eq!(current.status, AccessRequestStatus::Pending);
+    let inbox =
+        transport(f, &owner, decision_browser, "GET", &format!("{path}?view=approvals"), &[], &[])
+            .await;
+    assert_eq!(inbox.status, 200);
+    inbox.private();
+    assert!(AccessRequestPage::from_json(&inbox.body).unwrap().items.is_empty());
+    let expired = match &f.backend {
+        AuthBackend::Sqlite(store) => store.expire_organization_access_requests().await.unwrap(),
+        AuthBackend::Postgres(store) => store.expire_organization_access_requests().await.unwrap(),
+    };
+    assert_eq!(expired, 1);
+    let expired_again = match &f.backend {
+        AuthBackend::Sqlite(store) => store.expire_organization_access_requests().await.unwrap(),
+        AuthBackend::Postgres(store) => store.expire_organization_access_requests().await.unwrap(),
+    };
+    assert_eq!(expired_again, 0);
+    let current = resource(
+        &transport(f, &member, requester, "GET", &format!("{path}/{}", overdue.id), &[], &[]).await,
+        200,
+    );
+    assert_eq!(current.status, AccessRequestStatus::Expired);
+    assert_eq!(f.revision(org).await, before_revision);
+    assert_eq!(f.count("SELECT COUNT(*) FROM organization_grants").await, before_grants);
+    assert_eq!(f.count("SELECT COUNT(*) FROM audit_events").await, before_audit + 1);
+}
+
+async fn native_deadline_expiry(f: &Fixture) {
+    deadline_expiry(f, false).await;
+}
+
+async fn browser_deadline_expiry(f: &Fixture) {
+    deadline_expiry(f, true).await;
+}
+
 browser_tests!(
     sqlite_access_request_device_http,
     postgres_access_request_device_http,
@@ -365,4 +533,14 @@ browser_tests!(
     sqlite_access_request_browser_http,
     postgres_access_request_browser_http,
     browser_lifecycle
+);
+browser_tests!(
+    sqlite_access_request_deadline_expiry_http,
+    postgres_access_request_deadline_expiry_http,
+    native_deadline_expiry
+);
+browser_tests!(
+    sqlite_access_request_deadline_expiry_browser_http,
+    postgres_access_request_deadline_expiry_browser_http,
+    browser_deadline_expiry
 );
