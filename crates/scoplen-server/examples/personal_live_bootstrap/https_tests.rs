@@ -92,7 +92,7 @@ async fn sync_not_found_retains_cbor_while_retired_routes_require_only_status() 
         assert!(https.exchange("GET", &path, &[], None, 404).await.is_err());
     }
     for &(method, path) in RETIRED_ROUTES {
-        assert!(https.exchange(method, path, b"{}", None, 404).await.unwrap().is_empty());
+        assert_eq!(https.exchange(method, path, b"{}", None, 404).await.unwrap().len(), 0);
     }
     assert!(https.exchange("GET", "/pair?wrong-status", &[], None, 404).await.is_err());
 }
