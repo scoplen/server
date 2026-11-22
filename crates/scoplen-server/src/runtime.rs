@@ -2497,7 +2497,18 @@ mod tests {
     }
 
     async fn assert_retired_entry_routes_absent(address: std::net::SocketAddr) {
+        let providers = "/api/v1/orgs/019a0000-0000-7000-8000-000000000001/identity-providers";
+        let provider = format!("{providers}/019a0000-0000-7000-8000-000000000002");
         for (method, path) in [
+            ("GET", providers),
+            ("POST", providers),
+            ("GET", provider.as_str()),
+            ("PATCH", provider.as_str()),
+            ("DELETE", provider.as_str()),
+            ("GET", "/scim/v2/Users"),
+            ("POST", "/scim/v2/Users"),
+            ("GET", "/scim/v2/Groups"),
+            ("POST", "/scim/v2/Groups"),
             ("POST", "/api/v1/admin/personal-invitations"),
             ("POST", "/api/v1/auth/personal-enroll"),
             ("POST", "/api/v1/auth/pairings"),
@@ -2512,7 +2523,7 @@ mod tests {
                 "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{{}}"
             );
             let retired = http_request(address, request.as_bytes()).await;
-            assert!(retired.starts_with("HTTP/1.1 404 Not Found"), "{retired}");
+            assert!(retired.starts_with("HTTP/1.1 404 Not Found"), "{method} {path}: {retired}");
         }
     }
 

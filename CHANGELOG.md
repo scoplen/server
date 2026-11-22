@@ -17,6 +17,10 @@ Changes are recorded here for released or reviewable repository outcomes.
   Refuse non-private output-directory and passphrase permissions at startup and before each
   scheduled attempt, including existing Windows parent/file ACLs, without repairing them.
 
+- Update the public control-plane contract and Console types to remove direct Organization
+  identity-provider administration. The Server exposes native Account and team management.
+  The former provider collection and item and the proposed SCIM Users and Groups return 404.
+
 - Add explicit `splctl backup create --online` for SQLite with stable local objects/keys and
   plain or static-files TLS. Keep default exclusive offline creation, reject ACME and any
   managed cache path online, and reuse the complete age archive and explicit fresh-directory
