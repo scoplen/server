@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#[path = "support/admission_migrations.rs"]
+mod admission_migrations;
 mod support;
+
+use admission_migrations::{apply_admission_migration, assert_retained_admission};
 
 use scoplen_store::{RelationalStore as _, SqliteStore};
 use uuid::Uuid;
@@ -92,13 +96,6 @@ macro_rules! constraints {
             .bind(foreign_membership.as_bytes().as_slice()).bind(foreign_host.as_bytes().as_slice())
             .bind(b"{}".as_slice()).bind(None::<i64>).execute($pool).await;
         assert!(cross_team.is_err(), "withdrawn Grant identifiers remain globally used");
-        for endpoint in [43_i64,44,45] {
-            sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES ($1,1,$2,1000,1,0,1001,601001)")
-                .bind(endpoint).bind([127_u8,0,0,1].as_slice()).execute($pool).await.expect("independent Grant endpoint");
-        }
-        let rejected = sqlx::query("INSERT INTO account_entry_admission (endpoint,kind,bucket_key,window_start_ms,attempts,failure_streak,last_admitted_ms,retire_at_ms) VALUES (51,1,$1,1000,1,0,1001,601001)")
-            .bind([127_u8,0,0,1].as_slice()).execute($pool).await;
-        assert!(rejected.is_err(), "endpoint bound remains closed");
         grant
     }};
 }
@@ -123,13 +120,22 @@ async fn sqlite_grant_upgrade_preserves_state_and_enforces_tenant_bounds_after_r
     old.migrations.to_mut().retain(|migration| migration.version < MIGRATION);
     old.run(&pool).await.expect("historical migrations");
     let ids = populate!(&pool);
+    apply_admission_migration!(
+        &pool,
+        "./migrations/sqlite",
+        MIGRATION,
+        43_i64..=45,
+        [0_i64, 46, 51]
+    );
     pool.close().await;
     let store = SqliteStore::open(&path).await.expect("forward migration");
     preserved!(store.pool(), ids.0);
+    assert_retained_admission!(store.pool(), 43_i64..=45);
     let grant = constraints!(store.pool(), ids);
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.expect("idempotent reopen");
     preserved!(store.pool(), ids.0);
+    assert_retained_admission!(store.pool(), 43_i64..=45);
     let retained: (i64, Vec<u8>) = sqlx::query_as(
         "SELECT withdrawn_at_ms,response_json FROM organization_grants WHERE organization_id=$1 AND id=$2",
     ).bind(ids.0.as_bytes().as_slice()).bind(grant.as_bytes().as_slice())
@@ -153,15 +159,24 @@ async fn postgres_grant_upgrade_preserves_state_and_enforces_tenant_bounds_after
     old.migrations.to_mut().retain(|migration| migration.version < MIGRATION);
     old.run(&pool).await.expect("historical migrations");
     let ids = populate!(&pool);
+    apply_admission_migration!(
+        &pool,
+        "./migrations/postgres",
+        MIGRATION,
+        43_i64..=45,
+        [0_i64, 46, 51]
+    );
     pool.close().await;
     let store =
         scoplen_store::PostgresStore::connect(url.as_str()).await.expect("forward migration");
     preserved!(store.pool(), ids.0);
+    assert_retained_admission!(store.pool(), 43_i64..=45);
     let grant = constraints!(store.pool(), ids);
     store.pool().close().await;
     let store =
         scoplen_store::PostgresStore::connect(url.as_str()).await.expect("idempotent reopen");
     preserved!(store.pool(), ids.0);
+    assert_retained_admission!(store.pool(), 43_i64..=45);
     let retained: (i64, Vec<u8>) = sqlx::query_as(
         "SELECT withdrawn_at_ms,response_json FROM organization_grants WHERE organization_id=$1 AND id=$2",
     ).bind(ids.0.as_bytes().as_slice()).bind(grant.as_bytes().as_slice())
