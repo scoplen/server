@@ -109,6 +109,55 @@ async fn lifecycle(f: &Fixture, use_browser: bool) {
     );
     let requester = use_browser.then_some(&member_browser);
     let decision_browser = use_browser.then_some(&owner_browser);
+    // A current member of one Organization must not use an access-request
+    // route to probe or create authority in another Organization owned by the
+    // same deployment. Keep this negative path on both native and browser
+    // transports so the account and session bindings cannot diverge.
+    let foreign_org = create_team(f, &owner).await.id;
+    let foreign_host = create_asset(
+        f,
+        &owner_browser,
+        foreign_org,
+        InventoryType::Host,
+        json!({"name":"Foreign request target","address":"foreign-request.example.test"}),
+    )
+    .await;
+    let foreign_path = format!("/api/v1/orgs/{foreign_org}/access-requests");
+    let foreign_check = AccessRequestCheckRequest {
+        fields: AccessRequestFields {
+            host: foreign_host.id,
+            remote_user: "deploy".into(),
+            duration_seconds: 120,
+            reason: "foreign tenant probe".into(),
+        },
+    }
+    .to_json()
+    .unwrap();
+    transport(f, &member, requester, "POST", &format!("{foreign_path}/check"), &foreign_check, &[])
+        .await
+        .problem(404, "organization.not_found", false);
+    let foreign_create = AccessRequestCreateRequest {
+        id: Uuid::now_v7(),
+        fields: AccessRequestFields {
+            host: foreign_host.id,
+            remote_user: "deploy".into(),
+            duration_seconds: 120,
+            reason: "foreign tenant create".into(),
+        },
+    }
+    .to_json()
+    .unwrap();
+    transport(
+        f,
+        &member,
+        requester,
+        "POST",
+        &foreign_path,
+        &foreign_create,
+        &[("Idempotency-Key", &Uuid::now_v7().to_string())],
+    )
+    .await
+    .problem(404, "organization.not_found", false);
     let allowed = transport(f, &member, requester, "POST", &check_path, &check, &[]).await;
     assert_eq!(allowed.status, 200);
     allowed.private();
