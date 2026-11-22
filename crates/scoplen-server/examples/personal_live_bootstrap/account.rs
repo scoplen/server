@@ -1107,7 +1107,7 @@ pub(super) async fn verify(
     if !with_team {
         let first = first.exchange(https).await?;
         let second = PersonalConsumer::new(https).await?.exchange(https).await?;
-        return credentials::verify(https, first, second).await;
+        return Box::pin(credentials::verify(https, first, second)).await;
     }
     let first_team =
         verify_team(https, &first.device, &first.token, first.account.payload.account_id).await?;
@@ -1133,7 +1133,7 @@ pub(super) async fn verify(
         second = second.refresh(https).await?;
         verify_team_isolation(https, &first, &first_team, &second, &second_team).await?;
     }
-    credentials::verify(https, first, second).await
+    Box::pin(credentials::verify(https, first, second)).await
 }
 
 #[cfg(test)]
