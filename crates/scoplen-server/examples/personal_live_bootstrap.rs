@@ -37,6 +37,9 @@ use zeroize::Zeroizing;
 
 #[path = "personal_live_bootstrap/account.rs"]
 mod account;
+#[cfg(test)]
+#[path = "personal_live_bootstrap/https_tests.rs"]
+mod https_tests;
 #[path = "../../scoplen-store/tests/support/passkey.rs"]
 mod passkey;
 #[path = "../src/private_material.rs"]
@@ -46,6 +49,17 @@ type Result<T> = std::result::Result<T, &'static str>;
 const MARKER: &str = "disposable-scoplen-public-https-v1";
 const SETUP_PREFIX: &str = "one-time operator setup link (keep private): ";
 const SETUP_OPTIONS: &str = "/api/v1/auth/operator/setup/options";
+const RETIRED_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/v1/admin/personal-invitations"),
+    ("POST", "/api/v1/auth/personal-enroll"),
+    ("POST", "/api/v1/auth/pairings"),
+    ("GET", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
+    ("DELETE", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
+    ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/claim"),
+    ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/messages"),
+    ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/complete"),
+    ("GET", "/pair"),
+];
 const SETUP_FINISH: &str = "/api/v1/auth/operator/setup/finish";
 const LOGIN_OPTIONS: &str = "/api/v1/auth/operator/login/options";
 const LOGIN_FINISH: &str = "/api/v1/auth/operator/login/finish";
@@ -921,17 +935,7 @@ async fn public_flow(https: &Https, token: [u8; 32]) -> Result<()> {
         let reply = https.post(LOGOUT, b"{}", &key, Some(&session.access_token), 200).await?;
         OperatorLogoutResponse::from_json(&reply).map_err(|_| "logout confirmation invalid")?;
     }
-    for (method, path) in [
-        ("POST", "/api/v1/admin/personal-invitations"),
-        ("POST", "/api/v1/auth/personal-enroll"),
-        ("POST", "/api/v1/auth/pairings"),
-        ("GET", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
-        ("DELETE", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001"),
-        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/claim"),
-        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/messages"),
-        ("POST", "/api/v1/auth/pairings/019a0000-0000-7000-8000-000000000001/complete"),
-        ("GET", "/pair"),
-    ] {
+    for &(method, path) in RETIRED_ROUTES {
         https.exchange(method, path, b"{}", None, 404).await?;
     }
     Ok(())
@@ -1122,7 +1126,7 @@ impl Https {
                 "public fixture API rejected request; abandon the fixture and inspect only private server diagnostics",
             );
         }
-        if expected == 404 && !path.starts_with("/api/v1/orgs") {
+        if expected == 404 && !path.starts_with("/api/v1/orgs") && !path.starts_with("/sync/") {
             return Ok(Zeroizing::new(Vec::new()));
         }
         let content_type = if path.starts_with("/sync/") {
@@ -1187,10 +1191,10 @@ fn verify_organization_response(
 mod tests {
     use super::*;
 
-    struct Scratch(PathBuf);
+    pub(super) struct Scratch(pub(super) PathBuf);
 
     impl Scratch {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self(
                 std::env::temp_dir().join(format!("scoplen-live-fixture-{}", uuid::Uuid::new_v4())),
             )
