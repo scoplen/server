@@ -68,6 +68,8 @@ pub enum AccountEntryEndpoint {
     OrganizationAccessRequestDecide = 48,
     OrganizationAccessRequestCancel = 49,
     PasswordChange = 50,
+    OrganizationAuthDraftCreate = 51,
+    OrganizationAuthDraftCancel = 52,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

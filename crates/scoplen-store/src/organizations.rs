@@ -29,6 +29,7 @@ pub(crate) use actor::{postgres_actor, sqlite_actor};
 
 pub mod access_requests;
 mod audit;
+mod auth_draft;
 pub mod grants;
 pub mod group_policy;
 pub mod inventory;
@@ -229,8 +230,10 @@ macro_rules! organizations {
                     .bind(now).execute(&mut *tx).await?.rows_affected();
                 let inventory_removed = sqlx::query("DELETE FROM organization_inventory_receipts WHERE (account_id,idempotency_key) IN (SELECT account_id,idempotency_key FROM organization_inventory_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
                     .bind(now).execute(&mut *tx).await?.rows_affected();
+                let draft_results_retired = sqlx::query("UPDATE organization_auth_draft_receipts SET request_digest=NULL,generation=NULL,created_at_ms=NULL,expires_at_ms=NULL WHERE (account_id,origin_digest,idempotency_key) IN (SELECT account_id,origin_digest,idempotency_key FROM organization_auth_draft_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
                 tx.commit().await?;
-                Ok(removed + lifecycle_removed + inventory_removed)
+                Ok(removed + lifecycle_removed + inventory_removed + draft_results_retired)
             }
 
             /// Atomically create a team, its sole initial owner, audit and 24-hour receipt.
