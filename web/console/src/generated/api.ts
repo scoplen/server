@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/b0bc92267422f352645266c1244ddf3e49410e6c/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/92c398666b140f496e5b7eab226410de5d881c2d/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -184,7 +184,6 @@ export interface components {
     Account: Resource;
     Device: Resource;
     Organization: Resource;
-    IdentityProvider: Resource;
     ServicePrincipal: Resource;
     Role: Resource;
     GrantFields: GrantFields;
