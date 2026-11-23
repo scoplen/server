@@ -94,6 +94,7 @@ impl Listener {
             hub.clone(),
             crate::AccountSettings::default(),
             crate::OrganizationSettings::default(),
+            crate::EnterpriseIdentitySettings::default(),
             crate::runtime::test_audit_verification_key(),
         );
         let plain = TcpListener::bind("127.0.0.1:0").await.expect("HTTP listener");

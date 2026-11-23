@@ -106,12 +106,20 @@ macro_rules! constraints {
 
 const PASSWORD_CHANGE: i64 = 20_261_117_020_000;
 const AUTH_DRAFTS: i64 = 20_261_123_000_000;
+const AUTH_DRAFT_TEST_ADMISSION: i64 = 20_261_123_020_000;
 
 macro_rules! upgrade_admission {
     ($pool:expr, $directory:literal) => {{
         apply_admission_migration!($pool, $directory, MIGRATION, 46_i64..=49, [0_i64, 50]);
         apply_admission_migration!($pool, $directory, PASSWORD_CHANGE, [50_i64], [0_i64, 51]);
         apply_admission_migration!($pool, $directory, AUTH_DRAFTS, [51_i64, 52], [0_i64, 53]);
+        apply_admission_migration!(
+            $pool,
+            $directory,
+            AUTH_DRAFT_TEST_ADMISSION,
+            [53_i64],
+            [0_i64, 54]
+        );
     }};
 }
 
@@ -143,7 +151,7 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=52);
+    assert_retained_admission!(store.pool(), 46_i64..=53);
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )
@@ -179,7 +187,7 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     store.pool().close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=52);
+    assert_retained_admission!(store.pool(), 46_i64..=53);
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )

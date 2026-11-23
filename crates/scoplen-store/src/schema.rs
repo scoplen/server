@@ -4487,6 +4487,12 @@ mod tests {
         include_str!("../migrations/sqlite/20261123010000_organization_auth_draft_tests.sql");
     const POSTGRES_AUTH_DRAFT_TESTS: &str =
         include_str!("../migrations/postgres/20261123010000_organization_auth_draft_tests.sql");
+    const SQLITE_AUTH_DRAFT_TEST_ADMISSION: &str = include_str!(
+        "../migrations/sqlite/20261123020000_organization_auth_draft_test_admission.sql"
+    );
+    const POSTGRES_AUTH_DRAFT_TEST_ADMISSION: &str = include_str!(
+        "../migrations/postgres/20261123020000_organization_auth_draft_test_admission.sql"
+    );
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4550,6 +4556,7 @@ mod tests {
             SQLITE_BROWSER_TOKEN_INDEXES,
             SQLITE_AUTH_DRAFTS,
             SQLITE_AUTH_DRAFT_TESTS,
+            SQLITE_AUTH_DRAFT_TEST_ADMISSION,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4592,6 +4599,7 @@ mod tests {
             POSTGRES_PASSWORD_CHANGE,
             POSTGRES_AUTH_DRAFTS,
             POSTGRES_AUTH_DRAFT_TESTS,
+            POSTGRES_AUTH_DRAFT_TEST_ADMISSION,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");

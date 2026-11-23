@@ -78,6 +78,7 @@ impl Fixture {
             kms,
             notifications.clone(),
             scoplen_sync::http::ReadBodyLimits::default(),
+            crate::EnterpriseIdentitySettings::default(),
         );
         let (address, server) = serve_router(app).await;
         Self { backend, directory, address, server, notifications, fanout }
@@ -89,6 +90,7 @@ impl Fixture {
         kms: Arc<scoplen_store::kms::LocalKeyFile>,
         notifications: scoplen_sync::notify::NotificationHub,
         read_limits: scoplen_sync::http::ReadBodyLimits,
+        enterprise_identity: crate::EnterpriseIdentitySettings,
     ) -> Router {
         let database = match backend {
             AuthBackend::Sqlite(store) => crate::runtime::ListenerDatabase::Sqlite(store.clone()),
@@ -112,6 +114,7 @@ impl Fixture {
             notifications,
             AccountSettings { registration_enabled: true, ..AccountSettings::default() },
             crate::OrganizationSettings { allow_creation: true },
+            enterprise_identity,
             crate::runtime::test_audit_verification_key(),
         )
     }
@@ -125,6 +128,7 @@ impl Fixture {
             test_kms(),
             self.notifications.clone(),
             limits,
+            crate::EnterpriseIdentitySettings::default(),
         );
         let (address, server) = serve_router(app).await;
         self.address = address;

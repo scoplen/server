@@ -10,6 +10,7 @@ use super::*;
 mod audit_projection;
 mod login_attempt;
 mod retained_scope;
+mod wire_login;
 
 struct Writer<'a> {
     key: &'a P256SigningKey,

@@ -70,6 +70,7 @@ pub enum AccountEntryEndpoint {
     PasswordChange = 50,
     OrganizationAuthDraftCreate = 51,
     OrganizationAuthDraftCancel = 52,
+    OrganizationAuthDraftTestStart = 53,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

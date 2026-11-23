@@ -60,7 +60,7 @@ if (invoked) {
 }
 
 const oldMigration = 20261024030000;
-const newMigration = 20261123010000;
+const newMigration = 20261123020000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);

@@ -187,6 +187,17 @@ macro_rules! draft_login {
     ($store:ty, $db:ty, $begin:literal, $lock:ident, $actor:ident, $audit:ident,
         $family_lock:literal, $cleanup_lock:literal) => {
         impl $store {
+            async fn current_draft_login_target(
+                tx: &mut Transaction<'_, $db>, organization: Uuid, if_match: &str,
+            ) -> Result<(Uuid, String), Error> {
+                let tag = parse_organization_if_match(Some(if_match)).map_err(|_| Error::InvalidRequest)?;
+                let row = sqlx::query("SELECT generation,issuer FROM organization_auth_drafts WHERE organization_id=$1")
+                    .bind(organization.as_bytes().as_slice()).fetch_optional(&mut **tx).await?.ok_or(Error::PreconditionFailed)?;
+                let generation = row_uuid(&row, "generation")?;
+                if format!("\"{generation}\"") != tag { return Err(Error::PreconditionFailed); }
+                Ok((generation, row.try_get("issuer")?))
+            }
+
             async fn check_draft_login_session(
                 tx: &mut Transaction<'_, $db>, session: &CurrentAccountBrowserSession, organization: Uuid,
             ) -> Result<(), Error> {
@@ -197,6 +208,24 @@ macro_rules! draft_login {
                 }
                 Self::authorize_auth_draft(tx, &session.account_id, organization).await?;
                 Ok(())
+            }
+
+            /// Resolve the current draft before contacting any issuer.
+            ///
+            /// # Errors
+            /// Rejects stale authority, stale draft and an outstanding family attempt.
+            pub async fn organization_auth_draft_login_issuer(
+                &self, session: &CurrentAccountBrowserSession, organization: Uuid, if_match: &str,
+            ) -> Result<String, Error> {
+                let mut tx = self.pool.begin_with($begin).await?;
+                Self::check_draft_login_session(&mut tx, session, organization).await?;
+                let (_, issuer) = Self::current_draft_login_target(&mut tx, organization, if_match).await?;
+                let active: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_auth_draft_tests WHERE family_id=$1 AND phase IN ('pending','claimed') AND expires_at_ms>$2)")
+                    .bind(session.family_id.as_slice()).bind(now_ms()?).fetch_one(&mut *tx).await?;
+                if active { return Err(Error::Conflict); }
+                $actor(&mut tx, session, 0).await?;
+                tx.commit().await?;
+                Ok(issuer)
             }
 
             /// Store the immutable five-minute attempt and its initiation audit. The HTTP
@@ -210,11 +239,8 @@ macro_rules! draft_login {
             ) -> Result<DraftLoginAttempt, Error> {
                 let mut tx = self.pool.begin_with($begin).await?;
                 Self::check_draft_login_session(&mut tx, session, start.organization).await?;
-                let tag = parse_organization_if_match(Some(start.if_match)).map_err(|_| Error::InvalidRequest)?;
-                let row = sqlx::query("SELECT generation,issuer FROM organization_auth_drafts WHERE organization_id=$1")
-                    .bind(start.organization.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or(Error::PreconditionFailed)?;
-                let generation = row_uuid(&row, "generation")?;
-                if format!("\"{generation}\"") != tag || row.try_get::<String,_>("issuer")? != start.issuer {
+                let (generation, issuer) = Self::current_draft_login_target(&mut tx, start.organization, start.if_match).await?;
+                if issuer != start.issuer {
                     return Err(Error::PreconditionFailed);
                 }
                 if trust(start.issuer) != Some(start.trust_fingerprint) { return Err(Error::PermissionDenied); }

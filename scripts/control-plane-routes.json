@@ -101,5 +101,8 @@
   {"method": "GET", "path": "/orgs/{org}/access-requests"},
   {"method": "GET", "path": "/orgs/{org}/access-requests/{id}"},
   {"method": "POST", "path": "/orgs/{org}/access-requests/{id}/decisions"},
-  {"method": "POST", "path": "/orgs/{org}/access-requests/{id}/cancel"}
+  {"method": "POST", "path": "/orgs/{org}/access-requests/{id}/cancel"},
+  {"method": "POST", "path": "/orgs/{org}/auth-connection-draft/test-login"},
+  {"method": "GET", "path": "/orgs/{org}/auth-connection-draft/test-login/{attempt}"},
+  {"method": "GET", "path": "/auth/enterprise/oidc/{issuer_hash}/callback", "protocol": "oidc-redirect"}
 ]

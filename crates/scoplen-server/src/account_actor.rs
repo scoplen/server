@@ -13,8 +13,9 @@ use scoplen_api::{
 };
 use scoplen_crypto::{DpopProof, DpopTarget, DpopToken};
 use scoplen_store::{
-    account_browser_sessions::AccountBrowserSessionError,
-    device_authentication::DeviceAuthenticationError, kms::LocalKeyFile,
+    account_browser_sessions::{AccountBrowserSessionError, CurrentAccountBrowserSession},
+    device_authentication::DeviceAuthenticationError,
+    kms::LocalKeyFile,
     organizations::OrganizationActor,
 };
 use scoplen_sync::http::AuthFailure;
@@ -70,9 +71,29 @@ impl AccountActorAuthenticator {
         )
         .filter(|value| value.http_method() == method.as_str())
         .ok_or_else(|| failure(StatusCode::FORBIDDEN))?;
+        let current =
+            self.authenticate_browser_request(browser_operation, method, uri, headers).await?;
+        let expires = u64::try_from(current.expires_at_ms.div_euclid(1000))
+            .map_err(|_| failure(StatusCode::SERVICE_UNAVAILABLE))?;
+        let scope = current.scope.clone();
+        Ok((OrganizationActor::AccountBrowser(current), expires, scope))
+    }
+
+    pub(crate) async fn authenticate_browser_request(
+        &self,
+        browser_operation: AccountBrowserAccessOperation,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<CurrentAccountBrowserSession, AuthFailure> {
+        if browser_operation.http_method() != method.as_str() {
+            return Err(failure(StatusCode::FORBIDDEN));
+        }
+        let dpop = one(headers, "dpop")?.ok_or_else(|| failure(StatusCode::UNAUTHORIZED))?;
         let token = AccountBrowserProtectedHttpMetadata {
-            authorization,
-            dpop: one(headers, "dpop")?.ok_or_else(|| failure(StatusCode::UNAUTHORIZED))?,
+            authorization: one(headers, "authorization")?
+                .ok_or_else(|| failure(StatusCode::UNAUTHORIZED))?,
+            dpop,
             origin: one(headers, "origin")?,
         }
         .validate(browser_operation, &self.origin)
@@ -96,10 +117,7 @@ impl AccountActorAuthenticator {
             _ => failure(StatusCode::SERVICE_UNAVAILABLE),
         })?
         .ok_or_else(|| failure(StatusCode::UNAUTHORIZED))?;
-        let proof = DpopProof::parse(
-            one(headers, "dpop")?.ok_or_else(|| failure(StatusCode::UNAUTHORIZED))?,
-        )
-        .map_err(|_| failure(StatusCode::UNAUTHORIZED))?;
+        let proof = DpopProof::parse(dpop).map_err(|_| failure(StatusCode::UNAUTHORIZED))?;
         let target = DpopTarget::new(method.as_str(), &self.origin, uri.path())
             .map_err(|_| failure(StatusCode::UNAUTHORIZED))?;
         self.backend
@@ -116,10 +134,7 @@ impl AccountActorAuthenticator {
         {
             return Err(failure(StatusCode::FORBIDDEN));
         }
-        let expires = u64::try_from(current.expires_at_ms.div_euclid(1000))
-            .map_err(|_| failure(StatusCode::SERVICE_UNAVAILABLE))?;
-        let scope = current.scope.clone();
-        Ok((OrganizationActor::AccountBrowser(current), expires, scope))
+        Ok(current)
     }
 }
 

@@ -27,12 +27,20 @@ impl Drop for TlsFixture {
 
 impl TlsFixture {
     pub(super) async fn start(f: &Fixture) -> Self {
+        Self::start_with_enterprise_identity(f, crate::EnterpriseIdentitySettings::default()).await
+    }
+
+    pub(super) async fn start_with_enterprise_identity(
+        f: &Fixture,
+        settings: crate::EnterpriseIdentitySettings,
+    ) -> Self {
         let app = Fixture::app(
             &f.backend,
             &f.directory,
             test_kms(),
             f.notifications.clone(),
             scoplen_sync::http::ReadBodyLimits::default(),
+            settings,
         );
         let rcgen::CertifiedKey { cert, key_pair } =
             rcgen::generate_simple_self_signed(vec!["example.com".into()]).unwrap();

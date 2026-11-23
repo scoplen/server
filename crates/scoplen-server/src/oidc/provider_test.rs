@@ -2,10 +2,11 @@
 //! Owned HTTPS provider fixture for the draft login exchange.
 
 use std::{
+    collections::BTreeMap,
     io::Write as _,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -13,6 +14,7 @@ use std::{
 use axum::{
     Json, Router,
     body::Bytes,
+    extract::Query,
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse as _, Response},
     routing::{get, post},
@@ -27,6 +29,7 @@ use scoplen_api::auth_connection_draft::{
 use scoplen_crypto::{P256SigningKey, SecretBytes, SecretVec};
 use scoplen_store::organizations::auth_draft_login::{DraftLoginMaterial, DraftLoginProvider};
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
 
 use crate::{EnterpriseIdentitySettings, TrustedIssuerSettings};
@@ -42,7 +45,7 @@ const VERIFIER: [u8; 32] = [32; 32];
 pub(crate) struct Provider {
     directory: PathBuf,
     server: tokio::task::JoinHandle<()>,
-    requests: Arc<[AtomicUsize; 3]>,
+    requests: Arc<[AtomicUsize; 4]>,
     original_ca: Vec<u8>,
     pub(crate) settings: EnterpriseIdentitySettings,
     pub(crate) issuer: String,
@@ -63,8 +66,10 @@ impl Provider {
                 "kid":"test-signing-key", "kty":"EC", "crv":"P-256", "alg":"ES256", "use":"sig",
                 "x":URL_SAFE_NO_PAD.encode(&sec1[1..33]), "y":URL_SAFE_NO_PAD.encode(&sec1[33..]),
             }]});
+            let browser = Arc::new(Mutex::new(None));
+            let routes = browser_routes(&issuer, origin, Arc::clone(&browser), Arc::clone(&counts));
             let (token, jwks, unexpected) = (Arc::clone(&counts), Arc::clone(&counts), counts);
-            Router::new()
+            routes
                 .route(
                     "/tenant/token",
                     post(move |headers: HeaderMap, body: Bytes| {
@@ -72,7 +77,10 @@ impl Provider {
                         let issuer = issuer.clone();
                         let key = Arc::clone(&key);
                         let live_ca = live_ca.clone();
-                        async move { token_reply(&headers, &body, &key, &issuer, origin, &live_ca) }
+                        let browser = Arc::clone(&browser);
+                        async move {
+                            token_reply(&headers, &body, &key, &issuer, origin, &live_ca, &browser)
+                        }
                     }),
                 )
                 .route(
@@ -109,6 +117,27 @@ impl Provider {
         std::array::from_fn(|index| self.requests[index].load(Ordering::SeqCst))
     }
 
+    pub(crate) fn discoveries(&self) -> usize {
+        self.requests[3].load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn navigate(&self, authorization_url: &str) -> url::Url {
+        let ca = reqwest::Certificate::from_pem(&self.original_ca).unwrap();
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .https_only(true)
+            .tls_certs_merge([ca])
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(authorization_url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap()
+    }
+
     pub(crate) fn metadata(&self) -> DraftLoginProvider {
         let issuer = &self.issuer;
         DraftLoginProvider {
@@ -141,6 +170,71 @@ impl Provider {
     }
 }
 
+struct BrowserProof {
+    nonce: String,
+    challenge: String,
+}
+
+fn browser_routes(
+    issuer: &str,
+    origin: &'static str,
+    browser: Arc<Mutex<Option<BrowserProof>>>,
+    requests: Arc<[AtomicUsize; 4]>,
+) -> Router {
+    let discovery = json!({
+        "issuer":issuer, "authorization_endpoint":format!("{issuer}authorize"),
+        "token_endpoint":format!("{issuer}token"), "jwks_uri":format!("{issuer}jwks"),
+        "userinfo_endpoint":format!("{issuer}userinfo"), "response_types_supported":["code"],
+        "grant_types_supported":["authorization_code"], "code_challenge_methods_supported":["S256"],
+        "token_endpoint_auth_methods_supported":["client_secret_basic"], "scopes_supported":["openid"],
+        "subject_types_supported":["public"], "id_token_signing_alg_values_supported":["ES256"],
+        "authorization_response_iss_parameter_supported":true,
+    });
+    let redirect = format!("{origin}{}", callback_path(issuer).unwrap());
+    let issuer = issuer.to_owned();
+    Router::new()
+        .route(
+            "/tenant/.well-known/openid-configuration",
+            get(move |headers: HeaderMap| {
+                requests[3].fetch_add(1, Ordering::SeqCst);
+                let discovery = discovery.clone();
+                async move {
+                    assert!(!has_session_headers(&headers));
+                    assert!(!headers.contains_key(header::AUTHORIZATION));
+                    Json(discovery)
+                }
+            }),
+        )
+        .route(
+            "/tenant/authorize",
+            get(move |Query(params): Query<BTreeMap<String, String>>| {
+                assert_eq!(params.len(), 8);
+                assert_eq!(params["redirect_uri"], redirect);
+                assert_eq!(params["response_type"], "code");
+                assert_eq!(params["scope"], "openid");
+                assert_eq!(params["code_challenge_method"], "S256");
+                assert_eq!(params["client_id"], CLIENT_ID);
+                assert!(
+                    browser
+                        .lock()
+                        .unwrap()
+                        .replace(BrowserProof {
+                            nonce: params["nonce"].clone(),
+                            challenge: params["code_challenge"].clone(),
+                        })
+                        .is_none()
+                );
+                let mut callback = url::Url::parse(&redirect).unwrap();
+                callback
+                    .query_pairs_mut()
+                    .append_pair("code", "browser-fixture")
+                    .append_pair("state", &params["state"])
+                    .append_pair("iss", &issuer);
+                async move { (StatusCode::FOUND, [(header::LOCATION, String::from(callback))]) }
+            }),
+        )
+}
+
 fn has_session_headers(headers: &HeaderMap) -> bool {
     headers.contains_key(header::COOKIE)
         || headers.contains_key(header::REFERER)
@@ -155,6 +249,7 @@ fn token_reply(
     issuer: &str,
     origin: &str,
     live_ca: &Path,
+    browser: &Mutex<Option<BrowserProof>>,
 ) -> Response {
     assert!(!has_session_headers(headers));
     assert_eq!(headers[header::CONTENT_TYPE], "application/x-www-form-urlencoded");
@@ -168,7 +263,15 @@ fn token_reply(
     assert!(
         redirect == "redirect_uri" && uri == &format!("{origin}{}", callback_path(issuer).unwrap())
     );
-    assert!(verifier == "code_verifier" && proof == &URL_SAFE_NO_PAD.encode(VERIFIER));
+    assert_eq!(verifier, "code_verifier");
+    let nonce = if value == "browser-fixture" {
+        let browser = browser.lock().unwrap().take().unwrap();
+        assert_eq!(URL_SAFE_NO_PAD.encode(Sha256::digest(proof.as_bytes())), browser.challenge);
+        browser.nonce
+    } else {
+        assert_eq!(proof, &URL_SAFE_NO_PAD.encode(VERIFIER));
+        URL_SAFE_NO_PAD.encode(if value == "wrong-nonce" { [0; 32] } else { NONCE })
+    };
     match value.as_str() {
         "redirect" => {
             return (StatusCode::FOUND, [(header::LOCATION, "/unexpected")]).into_response();
@@ -186,16 +289,15 @@ fn token_reply(
                 .write_all(b"\n")
                 .unwrap();
         }
-        "verified+code" | "wrong-nonce" => (),
+        "verified+code" | "wrong-nonce" | "browser-fixture" => (),
         _ => panic!("unexpected fixture code"),
     }
-    let nonce = if value == "wrong-nonce" { [0; 32] } else { NONCE };
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":"test-signing-key","typ":"JWT"}"#);
     let claims = URL_SAFE_NO_PAD.encode(
         json!({
             "iss":issuer, "sub":"opaque-human", "aud":CLIENT_ID,"iat":now,"exp":now+60,
-            "nonce":URL_SAFE_NO_PAD.encode(nonce),
+            "nonce":nonce,
         })
         .to_string(),
     );

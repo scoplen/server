@@ -72,3 +72,25 @@ test("public key discovery is checked outside the API prefix", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("the HTML callback scope cannot exempt other routes from OpenAPI", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "scoplen-oidc-route-check-"));
+  try {
+    const sourceRoot = join(directory, "src");
+    await mkdir(sourceRoot);
+    const callback = "/auth/enterprise/oidc/{issuer_hash}/callback";
+    await writeFile(join(sourceRoot, "auth.rs"), `Router::new().route("/api/v1${callback}", get(callback))`);
+    const contract = join(directory, "contract.json");
+    const manifest = join(directory, "manifest.json");
+    await writeFile(contract, JSON.stringify({ openapi: "3.1.0", paths: {} }));
+    const route = { method: "GET", path: callback, protocol: "oidc-redirect" };
+    await writeFile(manifest, JSON.stringify([route]));
+    assert.equal(await checkControlPlaneRoutes(contract, manifest, sourceRoot), 1);
+    for (const entry of [{ ...route, method: "POST" }, { ...route, path: "/auth/other" }]) {
+      await writeFile(manifest, JSON.stringify([entry]));
+      await assert.rejects(checkControlPlaneRoutes(contract, manifest, sourceRoot), /route is missing from OpenAPI/);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

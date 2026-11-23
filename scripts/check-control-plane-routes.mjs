@@ -31,7 +31,10 @@ export async function checkControlPlaneRoutes(contractPath, manifestPath = defau
     }
     const method = entry.method.toLowerCase();
     if (!methods.test(method)) throw new Error(`unsupported route method: ${entry.method}`);
-    if (!contract.paths?.[entry.path]?.[method]) {
+    // This K-3 browser navigation is defined by the shared OIDC callback codec.
+    const browserCallback = entry.protocol === "oidc-redirect" && method === "get" &&
+      entry.path === "/auth/enterprise/oidc/{issuer_hash}/callback";
+    if (!browserCallback && !contract.paths?.[entry.path]?.[method]) {
       throw new Error(`route is missing from OpenAPI: ${method.toUpperCase()} ${entry.path}`);
     }
     const key = `${method.toUpperCase()} ${entry.path}`;
@@ -65,5 +68,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const [contractPath, manifestPath] = process.argv.slice(2);
   if (!contractPath) throw new Error("usage: node check-control-plane-routes.mjs <openapi-json-yaml> [manifest]");
   const count = await checkControlPlaneRoutes(contractPath, manifestPath);
-  console.log(`validated ${count} mounted control-plane routes against OpenAPI 3.1`);
+  console.log(`validated ${count} mounted routes against OpenAPI 3.1 and the browser callback contract`);
 }

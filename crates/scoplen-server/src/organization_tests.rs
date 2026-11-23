@@ -37,6 +37,7 @@ async fn mount(f: &mut Fixture, allow_creation: bool) {
         scoplen_sync::notify::NotificationHub::default(),
         crate::AccountSettings::default(),
         crate::OrganizationSettings { allow_creation },
+        crate::EnterpriseIdentitySettings::default(),
         crate::runtime::test_audit_verification_key(),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");

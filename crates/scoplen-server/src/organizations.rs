@@ -27,7 +27,7 @@ use scoplen_store::{
 use uuid::Uuid;
 
 use crate::{
-    OrganizationSettings,
+    EnterpriseIdentitySettings, OrganizationSettings,
     device_auth::{AuthBackend, json_body, matching_origin, response},
     personal_sync::PersonalSyncAuthenticator,
 };
@@ -35,6 +35,7 @@ use crate::{
 mod access_requests;
 mod audit;
 mod auth_connection_draft;
+mod auth_draft_login;
 mod grants;
 mod group_policy;
 mod inventory;
@@ -48,17 +49,20 @@ struct OrganizationState {
     account_auth: crate::account_actor::AccountActorAuthenticator,
     origin: String,
     policy: OrganizationSettings,
+    enterprise_identity: Arc<EnterpriseIdentitySettings>,
     notifications: scoplen_sync::notify::NotificationHub,
     read_limits: scoplen_api::sync::SyncReadLimits,
     kms: Arc<LocalKeyFile>,
     audit_verification_key: [u8; 32],
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn router(
     origin: String,
     backend: AuthBackend,
     kms: Arc<LocalKeyFile>,
     policy: OrganizationSettings,
+    enterprise_identity: EnterpriseIdentitySettings,
     notifications: scoplen_sync::notify::NotificationHub,
     read_body_limits: scoplen_sync::http::ReadBodyLimits,
     audit_verification_key: [u8; 32],
@@ -76,6 +80,7 @@ pub(crate) fn router(
         .route("/api/v1/orgs/{org}", patch(update))
         .merge(team::routes())
         .merge(auth_connection_draft::routes())
+        .merge(auth_draft_login::routes())
         .merge(inventory::routes())
         .merge(group_policy::routes())
         .merge(grants::routes())
@@ -88,6 +93,7 @@ pub(crate) fn router(
             account_auth,
             origin,
             policy,
+            enterprise_identity: Arc::new(enterprise_identity),
             notifications,
             kms,
             audit_verification_key,

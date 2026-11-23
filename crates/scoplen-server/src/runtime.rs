@@ -1375,6 +1375,7 @@ pub(crate) fn api_router_with_limits(
         NotificationHub::default(),
         crate::AccountSettings::default(),
         crate::OrganizationSettings::default(),
+        crate::EnterpriseIdentitySettings::default(),
         test_audit_verification_key(),
     )
 }
@@ -1392,6 +1393,7 @@ pub(crate) fn api_router_with_notifications(
     notifications: NotificationHub,
     accounts: crate::AccountSettings,
     organizations: crate::OrganizationSettings,
+    enterprise_identity: crate::EnterpriseIdentitySettings,
     audit_verification_key: [u8; 32],
 ) -> Router {
     let auth_backend = match &database {
@@ -1460,6 +1462,7 @@ pub(crate) fn api_router_with_notifications(
                 auth_backend.clone(),
                 key_management.clone(),
                 organizations,
+                enterprise_identity,
                 notifications.clone(),
                 read_body_limits,
                 audit_verification_key,
@@ -1534,6 +1537,7 @@ pub(crate) async fn run_public_listener(
         notifications.clone(),
         config.accounts,
         config.organizations,
+        config.enterprise_identity.clone(),
         audit_verification_key,
     )
     .merge(crate::console::router(&config.console.assets_dir, api_enabled).await)
@@ -2580,6 +2584,7 @@ mod tests {
                     server_notifications,
                     crate::AccountSettings::default(),
                     crate::OrganizationSettings::default(),
+                    crate::EnterpriseIdentitySettings::default(),
                     test_audit_verification_key(),
                 )
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
