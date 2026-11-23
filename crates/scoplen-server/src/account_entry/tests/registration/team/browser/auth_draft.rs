@@ -46,7 +46,7 @@ impl<'a> Writer<'a> {
     }
 }
 
-fn create_headers(key: &str) -> [(&str, &str); 4] {
+pub(super) fn create_headers(key: &str) -> [(&str, &str); 4] {
     [
         ("Idempotency-Key", key),
         ("If-None-Match", "*"),
@@ -59,7 +59,7 @@ fn cancel_headers<'a>(key: &'a str, tag: &'a str) -> [(&'a str, &'a str); 3] {
     [("Idempotency-Key", key), ("If-Match", tag), ("Origin", ORIGIN)]
 }
 
-fn resource(reply: &Reply, status: u16, org: Uuid) -> DraftResource {
+pub(super) fn resource(reply: &Reply, status: u16, org: Uuid) -> DraftResource {
     assert_eq!(reply.status, status);
     reply.private();
     assert_eq!(reply.header("content-type"), Some("application/json"));
