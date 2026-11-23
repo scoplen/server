@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! The exact pre-D-166 family ceilings remain usable after the new scope ships.
+//! Draft management and login testing leave existing family ceilings intact.
 
 use scoplen_api::{
     account_browser::INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE, auth::INITIAL_DEVICE_ACCESS_SCOPE,
@@ -7,10 +7,10 @@ use scoplen_api::{
 
 use super::*;
 
-fn previous_ceiling(current: &str) -> String {
+fn previous_ceiling(current: &str, added_scope: &str) -> String {
     let mut scopes: Vec<_> = current.split(' ').collect();
-    let draft = scopes.iter().position(|scope| *scope == "auth-drafts:manage").expect("new scope");
-    scopes.remove(draft);
+    let position = scopes.iter().position(|scope| *scope == added_scope).expect("new scope");
+    scopes.remove(position);
     scopes.join(" ")
 }
 
@@ -79,18 +79,21 @@ async fn retained_ceiling(f: &Fixture) {
     let expected = resource(&created, 201, org);
 
     // Model just the durable family ceilings written by the preceding release.
-    let old_browser = previous_ceiling(INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE);
+    let before_test = previous_ceiling(INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE, "auth-test:run");
+    let old_browser = previous_ceiling(&before_test, "auth-drafts:manage");
     let initial = scope::current_session(f, &browser).await.unwrap();
     assert_eq!(initial.scope, INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE);
     scope::set_scope(f, initial.family_id, &old_browser).await;
-    narrow(f, &mut owner, &previous_ceiling(INITIAL_DEVICE_ACCESS_SCOPE)).await;
+    assert!(!INITIAL_DEVICE_ACCESS_SCOPE.split(' ').any(|scope| scope == "auth-test:run"));
+    narrow(f, &mut owner, &previous_ceiling(INITIAL_DEVICE_ACCESS_SCOPE, "auth-drafts:manage"))
+        .await;
     rotate_browser(&tls, &mut browser).await;
     for writer in [Writer::device(&owner), Writer::browser(&browser)] {
         assert_old_writer(&tls, &writer, org, &expected).await;
     }
 
     let fresh_device = authenticate(f, &owner.registration).await;
-    let fresh_browser = login(f, &owner.registration).await;
+    let mut fresh_browser = login(f, &owner.registration).await;
     let fresh_family = scope::current_session(f, &fresh_browser).await.unwrap();
     assert_ne!(initial.family_id, fresh_family.family_id);
     assert_eq!(fresh_family.scope, INITIAL_ACCOUNT_BROWSER_ACCESS_SCOPE);
@@ -111,6 +114,15 @@ async fn retained_ceiling(f: &Fixture) {
         let reply = writer.send(&tls, "GET", &path, &[], &[]).await;
         assert_eq!(resource(&reply, 200, org), expected);
     }
+
+    // A family issued with D-166 can still manage drafts after refresh with its original ceiling.
+    scope::set_scope(f, fresh_family.family_id, &before_test).await;
+    rotate_browser(&tls, &mut fresh_browser).await;
+    let retained = scope::current_session(f, &fresh_browser).await.unwrap();
+    assert_eq!(retained.family_id, fresh_family.family_id);
+    assert_eq!(retained.scope, before_test);
+    let reply = Writer::browser(&fresh_browser).send(&tls, "GET", &path, &[], &[]).await;
+    assert_eq!(resource(&reply, 200, org), expected);
     assert_eq!(f.count("SELECT COUNT(*) FROM organization_auth_draft_receipts").await, 1);
 }
 

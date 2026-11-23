@@ -58,6 +58,6 @@ pedantic = "warn"
 
 [patch.crates-io]
 # Accept valid short ECDSA mpint scalars through the reviewed protocol dependency.
-ssh-key = { git = "https://github.com/scoplen/proto.git", rev = "fb8d241299b8e41c5c9277789d8625d194542d2e" }
+ssh-key = { git = "https://github.com/scoplen/proto.git", rev = "1d3817fe656a40e6840a42c9d7828881dcd928fe" }
 # Keep SQLx 0.8.6's driver unchanged while using the patched bundled SQLite.
 sqlx-sqlite = { path = "vendor/sqlx-sqlite-0.8.6" }

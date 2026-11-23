@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/fb8d241299b8e41c5c9277789d8625d194542d2e/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/1d3817fe656a40e6840a42c9d7828881dcd928fe/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -189,6 +189,10 @@ export interface components {
     GrantFields: GrantFields;
     AuthConnectionDraftCreate: AuthConnectionDraftCreate;
     AuthConnectionDraftResource: AuthConnectionDraftResource;
+    DraftLoginCredentials: DraftLoginCredentials;
+    DraftLoginAttempt: DraftLoginAttempt;
+    DraftLoginStarted: DraftLoginStarted;
+    OrganizationAuthProviderUnavailableProblem: OrganizationAuthProviderUnavailableProblem;
     GrantCreateRequest: GrantCreateRequest;
     GrantReplaceRequest: GrantReplaceRequest;
     GrantResource: GrantResource;
@@ -258,6 +262,26 @@ export interface AuthConnectionDraftResource {
   data: { organization_id: string; issuer: string; [key: string]: unknown };
   [key: string]: unknown;
 }
+export interface DraftLoginCredentials { client_id: string; client_secret: string }
+export interface DraftLoginAttempt {
+  id: string;
+  organization_id: string;
+  draft_generation: string;
+  status: "pending" | "verified" | "failed";
+  expires_at: string;
+  authorization_url?: never;
+  [key: string]: unknown;
+}
+export interface DraftLoginStarted {
+  id: string;
+  organization_id: string;
+  draft_generation: string;
+  status: "pending";
+  expires_at: string;
+  authorization_url: string;
+  [key: string]: unknown;
+}
+export type OrganizationAuthProviderUnavailableProblem = ProblemDetails & { status: 503; code: "organization.auth_provider_unavailable"; changed: false };
 // END GENERATED AuthConnectionDraft
 // BEGIN GENERATED AccessRequests
 export interface AccessRequestFields { host: string; remote_user: string; duration_seconds: number; reason: string; }
@@ -925,7 +949,7 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-drafts:manage inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-drafts:manage auth-test:run inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
@@ -1464,6 +1488,22 @@ export const accountBrowserOperations = [
       "auth-drafts:manage"
     ],
     "writerReceipt": true
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-connection-draft/test-login",
+    "scopes": [
+      "auth-test:run"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-connection-draft/test-login/{attempt}",
+    "scopes": [
+      "auth-test:run"
+    ],
+    "writerReceipt": false
   }
 ] as const;
 // END GENERATED AccountBrowser
