@@ -8,6 +8,8 @@ use scoplen_api::member_link::{
 
 use super::*;
 
+mod conflicts;
+
 #[cfg(feature = "postgres-integration")]
 mod recovery;
 
