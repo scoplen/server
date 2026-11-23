@@ -330,6 +330,55 @@ test("Account public transport confines routes and omits cookies while signing e
   assert.equal(calls, 1);
 });
 
+test("only the two Auth connection starts accept callback cookies in Account transport", async () => {
+  const client = new AccountClient(
+    origin,
+    loginBoundary(await AccountProofKey.create()),
+  );
+  await client.signIn("qa.owner", password());
+  const root = `/api/v1/orgs/${org}/auth-connection`;
+  const activations = `${root}/activations`;
+  const attempt = `${activations}/019a0000-0000-7000-8000-000000000002`;
+  const draftTest = `${root}-draft/test-login`;
+  const cases = [
+    ["POST", draftTest, true],
+    ["GET", root, false],
+    ["POST", activations, true],
+    ["POST", `${activations}?`, false],
+    ["POST", `${activations}?unexpected=1`, false],
+    ["GET", attempt, false],
+    ["DELETE", attempt, false],
+    ["POST", `${attempt}/confirm`, false],
+    ["POST", `${root}/suspend`, false],
+  ] as const;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+    requests.push({ url, init });
+    return response({});
+  });
+  for (const [method, path] of cases) await client.request(method, path);
+  assert.equal(requests.length, cases.length);
+  const proofs = new Set<string>();
+  for (const [index, [method, path, cookie]] of cases.entries()) {
+    const { url, init } = requests[index];
+    assert.equal(url, origin + path);
+    assert.equal(init?.method, method);
+    assert.equal(init?.credentials, cookie ? "same-origin" : "omit", path);
+    assert.equal(init?.redirect, "error");
+    assert.equal(init?.referrerPolicy, "no-referrer");
+    const headers = new Headers(init?.headers);
+    assert.equal(headers.get("Authorization"), `DPoP ${access(1)}`);
+    const proof = headers.get("DPoP")!;
+    proofs.add(proof);
+    const claims = JSON.parse(
+      Buffer.from(proof.split(".")[1], "base64url").toString(),
+    );
+    assert.equal(claims.htm, method);
+    assert.equal(claims.htu, origin + path.split("?")[0]);
+  }
+  assert.equal(proofs.size, cases.length);
+});
+
 test("same-tab actions serialize one cookie-only refresh through the Account Web Lock", async () => {
   const key = await AccountProofKey.create();
   const client = new AccountClient(origin, loginBoundary(key));

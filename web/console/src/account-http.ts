@@ -54,7 +54,8 @@ async function verifyEmptyBody(body: Response["body"]): Promise<void> {
     for (;;) {
       const part = await reader.read();
       if (part.done) return;
-      if (part.value.byteLength > 0) throw new Error("Unexpected response body.");
+      if (part.value.byteLength > 0)
+        throw new Error("Unexpected response body.");
     }
   } finally {
     reader.releaseLock();
@@ -143,13 +144,14 @@ export async function accountFetch({
   const proof = await key.proof(origin, path, method, token);
   current();
   const changed = method !== "GET" && operation !== "options";
+  const route = accountBrowserRoute(method, url.pathname)?.path;
   const acceptsCallbackCookie =
     operation === "request" &&
     token &&
     method === "POST" &&
-    !url.search &&
-    accountBrowserRoute(method, url.pathname)?.path ===
-      "/api/v1/orgs/{org}/auth-connection-draft/test-login";
+    !path.includes("?") &&
+    (route === "/api/v1/orgs/{org}/auth-connection-draft/test-login" ||
+      route === "/api/v1/orgs/{org}/auth-connection/activations");
   let response: Response;
   try {
     response = await fetch(url.href, {
@@ -163,7 +165,9 @@ export async function accountFetch({
         ...(token ? { Authorization: `DPoP ${token}` } : {}),
         ...(options.key ? { "Idempotency-Key": options.key } : {}),
         ...(options.etag ? { "If-Match": options.etag } : {}),
-        ...(options.ifNoneMatch ? { "If-None-Match": options.ifNoneMatch } : {}),
+        ...(options.ifNoneMatch
+          ? { "If-None-Match": options.ifNoneMatch }
+          : {}),
       },
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
