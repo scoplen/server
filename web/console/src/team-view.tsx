@@ -26,6 +26,7 @@ import { SimpleRuleEditor, type RuleGenerator } from "./rule-editor.tsx";
 import { requestFeedback } from "./feedback.ts";
 import { AuditPanel } from "./audit-view.tsx";
 import { GrantPanel } from "./grants-view.tsx";
+import { MemberLinkPanel } from "./member-link-view.tsx";
 import { SnippetPanel, type SnippetHandle } from "./snippets-view.tsx";
 import { AccessRequestPanel } from "./access-requests-view.tsx";
 import {
@@ -142,6 +143,7 @@ export function TeamWorkspace({
   const [importBusy, setImportBusy] = useState(false);
   const [snippetBusy, setSnippetBusy] = useState(false);
   const [issuerBusy, setIssuerBusy] = useState(false);
+  const [linkBusy, setLinkBusy] = useState(false);
   const [reviewedSettingsTeam, setReviewedSettingsTeam] = useState<string>();
   const [importReviewRequired, setImportReviewRequired] = useState(false);
   const [pendingVersion, setPendingVersion] = useState(0);
@@ -153,6 +155,7 @@ export function TeamWorkspace({
   const importHandle = useRef<InventoryImportHandle | null>(null);
   const snippetHandle = useRef<SnippetHandle | null>(null);
   const issuerHandle = useRef<IssuerDraftHandle | null>(null);
+  const linkHandle = useRef<{ hasLocalWork(): boolean } | null>(null);
   const pending = useRef<PendingReceipt | undefined>(undefined);
   const mounted = useRef(true);
   const running = useRef(false);
@@ -162,6 +165,7 @@ export function TeamWorkspace({
     importBusy ||
     snippetBusy ||
     issuerBusy ||
+    linkBusy ||
     session.busy ||
     session.blocked;
   const labels: Record<Section, string> = {
@@ -237,7 +241,8 @@ export function TeamWorkspace({
         importHandle.current?.hasPending() ||
         snippetHandle.current?.hasPending() ||
         snippetHandle.current?.hasDraft() ||
-        issuerHandle.current?.hasLocalWork()
+        issuerHandle.current?.hasLocalWork() ||
+        linkHandle.current?.hasLocalWork()
       ) {
         event.preventDefault();
         event.returnValue = "";
@@ -267,6 +272,16 @@ export function TeamWorkspace({
     }
   }
   async function guardLeave(): Promise<boolean> {
+    if (
+      linkHandle.current?.hasLocalWork() &&
+      !(await confirm(
+        t(
+          "Leave identity linking? This tab will lose the verification and any unresolved original confirmation.",
+          "要离开身份关联吗？此标签页将丢失验证及尚未核实的原确认请求。",
+        ),
+      ))
+    )
+      return false;
     if (
       issuerHandle.current?.hasLocalWork() &&
       !(await confirm(
@@ -632,6 +647,7 @@ export function TeamWorkspace({
               busy ||
               importBusy ||
               issuerBusy ||
+              linkBusy ||
               session.busy ||
               session.expired
             }
@@ -1153,75 +1169,97 @@ export function TeamWorkspace({
           ) : section === "members" ? (
             <>
               {memberEdit ? (
-                <form
-                  className="editor"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (pending.current) return;
-                    const current = memberEdit;
-                    void run(
-                      async () => {
-                        await api.updateMember(team.id, current, {
-                          roles: memberRoles,
-                          status: memberStatus,
-                        });
-                        setMemberEdit(undefined);
-                        await load("members");
-                      },
-                      t("Membership updated.", "成员资格已更新。"),
-                    );
-                  }}
-                >
-                  <h2>{memberEdit.data.username}</h2>
-                  <RoleOptions
-                    roles={memberRoles}
-                    onChange={setMemberRoles}
-                    ownerAllowed={owner}
-                    disabled={disabled}
-                  />
-                  <Field label={t("Status", "状态")}>
-                    <select
-                      value={memberStatus}
-                      onChange={(event) =>
-                        setMemberStatus(
-                          event.target.value as "active" | "suspended",
-                        )
-                      }
+                <>
+                  <form
+                    className="editor"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (pending.current) return;
+                      const current = memberEdit;
+                      void run(
+                        async () => {
+                          await api.updateMember(team.id, current, {
+                            roles: memberRoles,
+                            status: memberStatus,
+                          });
+                          setMemberEdit(undefined);
+                          await load("members");
+                        },
+                        t("Membership updated.", "成员资格已更新。"),
+                      );
+                    }}
+                  >
+                    <h2>{memberEdit.data.username}</h2>
+                    <RoleOptions
+                      roles={memberRoles}
+                      onChange={setMemberRoles}
+                      ownerAllowed={owner}
                       disabled={disabled}
-                    >
-                      <option value="active">{t("Active", "有效")}</option>
-                      <option value="suspended">
-                        {t("Suspended", "已停用")}
-                      </option>
-                    </select>
-                  </Field>
-                  <p className="caption">
-                    {t(
-                      "Only an Owner may change an Owner. At least one active Owner must remain. A removed membership requires a new invitation.",
-                      "仅所有者可以更改所有者。必须保留至少一名有效所有者。已移除的成员需要新邀请。",
+                    />
+                    <Field label={t("Status", "状态")}>
+                      <select
+                        value={memberStatus}
+                        onChange={(event) =>
+                          setMemberStatus(
+                            event.target.value as "active" | "suspended",
+                          )
+                        }
+                        disabled={disabled}
+                      >
+                        <option value="active">{t("Active", "有效")}</option>
+                        <option value="suspended">
+                          {t("Suspended", "已停用")}
+                        </option>
+                      </select>
+                    </Field>
+                    <p className="caption">
+                      {t(
+                        "Only an Owner may change an Owner. At least one active Owner must remain. A removed membership requires a new invitation.",
+                        "仅所有者可以更改所有者。必须保留至少一名有效所有者。已移除的成员需要新邀请。",
+                      )}
+                    </p>
+                    <div className="form-actions">
+                      <button
+                        className="primary-button"
+                        disabled={
+                          disabled ||
+                          Boolean(pending.current) ||
+                          memberRoles.length === 0
+                        }
+                      >
+                        {t("Save membership", "保存成员资格")}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={disabled}
+                        onClick={() => setMemberEdit(undefined)}
+                      >
+                        {t("Cancel", "取消")}
+                      </button>
+                    </div>
+                  </form>
+                  {owner &&
+                    profile &&
+                    memberEdit.data.status === "active" &&
+                    !session.blocked &&
+                    !session.expired && (
+                      <MemberLinkPanel
+                        key={`${team.id}:${memberEdit.id}:${profile.id}:${api.transport.sessionGeneration}`}
+                        api={api}
+                        organization={team.id}
+                        membership={memberEdit.id}
+                        named
+                        teamName={team.data.name}
+                        username={memberEdit.data.username}
+                        disabled={
+                          busy || session.busy || Boolean(pending.current)
+                        }
+                        handle={linkHandle}
+                        onBusy={setLinkBusy}
+                      />
                     )}
-                  </p>
-                  <div className="form-actions">
-                    <button
-                      className="primary-button"
-                      disabled={
-                        disabled ||
-                        Boolean(pending.current) ||
-                        memberRoles.length === 0
-                      }
-                    >
-                      {t("Save membership", "保存成员资格")}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      disabled={disabled}
-                      onClick={() => setMemberEdit(undefined)}
-                    >
-                      {t("Cancel", "取消")}
-                    </button>
-                  </div>
-                </form>
+                </>
               ) : (
                 <>
                   <p className="section-intro">
@@ -1398,6 +1436,27 @@ export function TeamWorkspace({
             </>
           ) : section === "settings" ? (
             <>
+              {profile &&
+                reviewedSettingsTeam === team.id &&
+                !session.blocked &&
+                !session.expired && (
+                  <MemberLinkPanel
+                    key={`${team.id}:${team.data.membership.id}:${profile.id}:${api.transport.sessionGeneration}`}
+                    api={api}
+                    organization={team.id}
+                    membership={team.data.membership.id}
+                    teamName={team.data.name}
+                    username={username}
+                    disabled={
+                      busy ||
+                      issuerBusy ||
+                      session.busy ||
+                      Boolean(pending.current)
+                    }
+                    handle={linkHandle}
+                    onBusy={setLinkBusy}
+                  />
+                )}
               <form
                 className="editor"
                 key={team.etag}
@@ -1448,7 +1507,12 @@ export function TeamWorkspace({
                     api={api}
                     organization={team.id}
                     teamName={team.data.name}
-                    disabled={busy || session.busy || Boolean(pending.current)}
+                    disabled={
+                      busy ||
+                      linkBusy ||
+                      session.busy ||
+                      Boolean(pending.current)
+                    }
                     manageConnection={owner}
                     handle={issuerHandle}
                     onBusy={setIssuerBusy}

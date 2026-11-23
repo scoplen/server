@@ -14,7 +14,7 @@ export interface AuthConnectionHandle {
   hasLocalWork(): boolean;
 }
 
-function ConnectionTarget({
+export function ConnectionTarget({
   data,
 }: {
   data: Pick<

@@ -57,7 +57,7 @@ function publicFields(fields: Record<string, unknown>) {
   return fields;
 }
 
-function target(fields: Record<string, unknown>): Target {
+export function connectionTarget(fields: Record<string, unknown>): Target {
   const client_id = text(fields.client_id),
     space_id = text(fields.space_id);
   if (!validCredential(client_id) || !spaceId(space_id))
@@ -82,7 +82,7 @@ function connection(
     const envelope = publicFields(object(reply.value));
     const item = resource(envelope, reply.etag);
     const fields = publicFields(item.data);
-    const settings = target(fields),
+    const settings = connectionTarget(fields),
       status = fields.status;
     if (
       "authorization_url" in envelope ||
@@ -119,7 +119,7 @@ function activation(reply: ApiResponse, org: string): AuthConnectionActivation {
   )
     throw new Error("Invalid activation.");
   return {
-    ...target(fields),
+    ...connectionTarget(fields),
     id: uuid(fields.id),
     organization_id: org,
     draft_generation: uuid(fields.draft_generation),
