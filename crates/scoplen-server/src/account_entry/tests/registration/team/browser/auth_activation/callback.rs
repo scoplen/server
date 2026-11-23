@@ -6,6 +6,9 @@ use axum::{body::Body, http::Request};
 use super::*;
 use crate::oidc::provider_test::TokenResponseGate;
 
+#[cfg(feature = "postgres-integration")]
+mod confirm_recovery;
+
 struct Navigation {
     attempt: Activation,
     target: String,
