@@ -479,6 +479,11 @@ cancel drafts while the issuer is offline. Native teams continue to use their ex
 sign-in and access policies. Organization binding, a linked browser
 login and activation of governance remain pending.
 
+In the team's **Audit** timeline, filter **Resource** by
+`auth_connection_draft:<generation>` to review who saved or cancelled that draft.
+The same filter works after a replacement is saved. The audit record contains the
+generation and the writer's Account and Device or browser-family ID.
+
 ## Repository shape
 
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.

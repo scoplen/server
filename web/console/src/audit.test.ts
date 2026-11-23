@@ -171,6 +171,20 @@ test("published Grant audit kinds remain distinct from unknown labels", () => {
     );
 });
 
+test("draft audit filtering retains the exact generation and writer", () => {
+  const created = {
+    ...event(),
+    event_class: "organization.auth_draft_created",
+    actor_device_id: actor,
+    resource: { kind: "auth_connection_draft", id: target },
+  };
+  const filters = { ...emptyAuditFilters(), resource: `auth_connection_draft:${target}` };
+  assert.deepEqual(parseAuditPage(page([created]), org, filters).items, [created]);
+  assert.throws(() =>
+    parseAuditPage(page([{ ...created, resource: { ...created.resource, id: actor } }]), org, filters),
+  );
+});
+
 test("access-request audit events survive timeline decoding and filtered Account HTTP paging", async () => {
   const items = ["created", "approved", "denied", "cancelled", "expired"].map(
     (action, index) => ({
