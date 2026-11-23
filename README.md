@@ -554,6 +554,20 @@ password proof remain current. An authenticated `DELETE /activations/{attempt}`
 abandons the candidate. Member linking and enforcement of selected external governance
 have separate setup and acceptance.
 
+Before enabling managed operations, use the deployed Auth server-plane origin and a dedicated API
+key. Use the client ID and Space from the reviewed Organization connection. The key needs by-ID
+subject assertions and only `auth.authz:check`, restricted to that exact Space without descendants.
+The application must have an active Space-wide installation there.
+
+```sh
+splctl auth check-governance --server-origin https://auth-server.example.org \
+  --client-id "$AUTH_CLIENT_ID" --space-id "$AUTH_SPACE_ID" < "$AUTH_KEY_FILE"
+```
+
+`AUTH_KEY_FILE` is the path to the protected key supplied by the deployment operator. For a private
+CA, add `--ca-certificate` with its PEM path. A successful preflight prints the application,
+installation and Space IDs. Governance enablement and live authorization have their own checks.
+
 ## Repository shape
 
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.

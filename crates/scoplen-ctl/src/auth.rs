@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 
 use crate::diagnostic_http::{diagnostic_client, read_body, request_failure};
 
+mod governance;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Check the instance's human sign-in metadata without registering a client.
@@ -29,6 +31,21 @@ pub enum Command {
         #[arg(long)]
         issuer: String,
     },
+    /// Verify the dedicated key and exact Space installation before enabling governance.
+    CheckGovernance {
+        /// Canonical HTTPS origin of the paired Auth server plane.
+        #[arg(long)]
+        server_origin: String,
+        /// Client ID from the reviewed human sign-in connection.
+        #[arg(long)]
+        client_id: String,
+        /// Exact Auth Space for the selected Organization.
+        #[arg(long)]
+        space_id: String,
+        /// Add a private PEM CA to system trust.
+        #[arg(long)]
+        ca_certificate: Option<PathBuf>,
+    },
 }
 
 pub async fn run(command: Command) -> ExitCode {
@@ -39,6 +56,9 @@ pub async fn run(command: Command) -> ExitCode {
             )
         }
         Command::RegistrationSettings { config, issuer } => registration_settings(&config, &issuer),
+        Command::CheckGovernance { server_origin, client_id, space_id, ca_certificate } => {
+            governance::check(&server_origin, &client_id, &space_id, ca_certificate.as_deref()).await
+        }
     };
     match result {
         Ok(report) => {
