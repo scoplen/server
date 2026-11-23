@@ -93,6 +93,8 @@ macro_rules! confirmations {
                 let provider: String = row.try_get("provider")?;
                 let now = now_ms()?;
                 if now >= expires_at { return Err(Error::NotFound); }
+                let context_changed = Self::auth_connection_head(&mut tx, organization).await?
+                    .is_some_and(|previous| previous.target != candidate.context.target);
                 let value = ConnectionResource {
                     id: revision, organization_id: organization, created_at: timestamp(now)?,
                     status: ConnectionStatus::Active, target: candidate.context.target,
@@ -114,6 +116,7 @@ macro_rules! confirmations {
                 if updated.rows_affected() != 1 { return Err(Error::PreconditionFailed); }
                 sqlx::query("DELETE FROM organization_auth_connection_activations WHERE organization_id=$1")
                     .bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
+                Self::fence_organization_auth_links(&mut tx, organization, None, context_changed).await?;
                 Self::record_transition_receipt(&mut tx, &receipt, &body, now).await?;
                 let event = actor_audit(session, serde_json::json!({
                     "action": "organization.auth_connection_activated",

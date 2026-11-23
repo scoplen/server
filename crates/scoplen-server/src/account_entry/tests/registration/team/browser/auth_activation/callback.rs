@@ -3,6 +3,7 @@
 
 use axum::{body::Body, http::Request};
 
+use super::super::auth_connection::seed_link_state;
 use super::*;
 use crate::oidc::provider_test::TokenResponseGate;
 
@@ -203,6 +204,9 @@ async fn verify_and_confirm(f: &Fixture) {
     assert_eq!(f.count("SELECT count(*) FROM organization_auth_connection_receipts").await, 1);
     assert_eq!(f.count("SELECT count(*) FROM audit_events").await, audit + 2);
 
+    let family = scope::current_session(f, &browser).await.unwrap().family_id;
+    let membership = current_team(f, &owner, org).await.membership.id;
+    seed_link_state(f, org, membership, family, first.id).await;
     let root = format!("/api/v1/orgs/{org}/auth-connection");
     let next =
         start_navigation(&tls, &browser, &provider, &draft, ExpectedRevision::Current(first.id))
@@ -223,6 +227,13 @@ async fn verify_and_confirm(f: &Fixture) {
     .await;
     let second = connection(&replacement, org, ConnectionStatus::Active);
     assert_ne!(second.id, first.id);
+    assert_eq!(second.target, first.target);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 1);
+    assert_eq!(
+        f.count("SELECT count(*) FROM organization_memberships WHERE auth_link_generation=1").await,
+        1
+    );
     let recovered = confirm(&tls, &browser, &navigation.attempt, empty, &key).await;
     assert_eq!(connection(&recovered, org, ConnectionStatus::Active), first);
     let current = send(&tls, &browser, "GET", &root, &[], &[]).await;
@@ -235,6 +246,46 @@ async fn verify_and_confirm(f: &Fixture) {
     );
     assert_eq!(f.count("SELECT count(*) FROM audit_events").await, audit + 5);
     assert_eq!(current_team(f, &owner, org).await.id, org);
+    provider.close().await;
+}
+
+async fn replacement_retires_changed_context(f: &Fixture) {
+    let provider = Provider::start(f.directory.join("activation-link-retirement"), ORIGIN).await;
+    let tls = TlsFixture::start_with_enterprise_identity(f, provider.settings.clone()).await;
+    let owner = actor(f, "activation-link-retirement").await;
+    let org = create_team(f, &owner).await;
+    let browser = login(f, &owner.registration).await;
+    // The previous fixture uses a different client ID at the same issuer and Space.
+    let previous = seed_active_connection(f, org.id, &provider.issuer).await;
+    let family = scope::current_session(f, &browser).await.unwrap().family_id;
+    seed_link_state(f, org.id, org.membership.id, family, previous).await;
+    let draft = save_draft(&tls, &browser, org.id, &provider.issuer).await;
+    let replacement =
+        start_navigation(&tls, &browser, &provider, &draft, ExpectedRevision::Current(previous))
+            .await;
+    check_callback(
+        &visit(&tls, &replacement.target, &replacement.cookie).await,
+        Some(replacement.cookie.split_once('=').unwrap().0),
+    );
+    let tag = format!("\"{previous}\"");
+    let key = Uuid::now_v7().to_string();
+    let condition = ("If-Match", tag.as_str());
+    f.audit_failure(true).await;
+    confirm(&tls, &browser, &replacement.attempt, condition, &key).await.problem(
+        503,
+        "organization.storage_unavailable",
+        true,
+    );
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 1);
+    f.audit_failure(false).await;
+    let installed = confirm(&tls, &browser, &replacement.attempt, condition, &key).await;
+    let installed = connection(&installed, org.id, ConnectionStatus::Active);
+    assert_ne!(installed.id, previous);
+    assert_ne!(installed.target.client_id, "review-client");
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_memberships WHERE status='active' AND auth_link_generation=2").await, 1);
     provider.close().await;
 }
 
@@ -322,6 +373,11 @@ browser_tests!(
     sqlite_auth_activation_https_verifies_installs_and_replaces,
     postgres_auth_activation_https_verifies_installs_and_replaces,
     verify_and_confirm
+);
+browser_tests!(
+    sqlite_auth_activation_https_retires_changed_member_link_context,
+    postgres_auth_activation_https_retires_changed_member_link_context,
+    replacement_retires_changed_context
 );
 browser_tests!(
     sqlite_auth_activation_https_abandonment_fences_callback,

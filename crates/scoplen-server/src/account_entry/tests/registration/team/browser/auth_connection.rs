@@ -39,6 +39,53 @@ pub(super) async fn seed_active_connection(f: &Fixture, organization: Uuid, issu
     revision
 }
 
+// The HTTP ceremony that creates these rows has its own acceptance. This fixture isolates
+// the effects of existing native and connection lifecycle operations on already-held links.
+pub(super) async fn seed_link_state(
+    f: &Fixture,
+    org: Uuid,
+    membership: Uuid,
+    family: [u8; 16],
+    revision: Uuid,
+) {
+    let link = Uuid::now_v7();
+    let attempt = Uuid::now_v7();
+    macro_rules! seed {
+        ($pool:expr) => {{
+            sqlx::query(
+                "UPDATE organization_memberships SET auth_link_generation=1 WHERE organization_id=$1 AND id=$2",
+            )
+            .bind(org.as_bytes().as_slice())
+            .bind(membership.as_bytes().as_slice())
+            .execute($pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO organization_auth_links(id,organization_id,membership_id,subject_comparison,created_at_ms)
+                         VALUES ($1,$2,$3,$4,1750000000000)")
+                .bind(link.as_bytes().as_slice())
+                .bind(org.as_bytes().as_slice())
+                .bind(membership.as_bytes().as_slice())
+                .bind([7_u8; 32].as_slice())
+                .execute($pool).await.unwrap();
+            sqlx::query("INSERT INTO organization_auth_link_attempts
+                (id,organization_id,membership_id,account_id,family_id,connection_revision,link_generation,state_digest,
+                browser_digest,nonce_digest,phase,subject_comparison,created_at_ms,expires_at_ms)
+                SELECT $1,organization_id,id,account_id,$2,$3,0,$4,$5,$6,'verified',$7,1750000000000,1750000300000
+                FROM organization_memberships WHERE id=$8 AND organization_id=$9")
+                .bind(attempt.as_bytes().as_slice()).bind(family.as_slice())
+                .bind(revision.as_bytes().as_slice()).bind([attempt.as_bytes().as_slice(); 2].concat())
+                .bind([2_u8; 32].as_slice())
+                .bind([3_u8; 32].as_slice()).bind([4_u8; 32].as_slice())
+                .bind(membership.as_bytes().as_slice()).bind(org.as_bytes().as_slice())
+                .execute($pool).await.unwrap();
+        }};
+    }
+    match &f.backend {
+        AuthBackend::Sqlite(store) => seed!(store.pool()),
+        AuthBackend::Postgres(store) => seed!(store.pool()),
+    }
+}
+
 pub(super) async fn send(
     tls: &TlsFixture,
     browser: &Browser,
@@ -103,6 +150,8 @@ async fn lifecycle(f: &Fixture) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("https://{}/tenant", listener.local_addr().unwrap());
     let revision = seed_active_connection(f, org, &issuer).await;
+    let membership = current_team(f, &owner, org).await.membership.id;
+    seed_link_state(f, org, membership, origin_session.family_id, revision).await;
     let active = connection(
         &send(&tls, &browser, "GET", &path, &[], &[]).await,
         org,
@@ -145,6 +194,12 @@ async fn lifecycle(f: &Fixture) {
         .problem(409, "organization.conflict", false);
     assert_eq!(f.count("SELECT count(*) FROM organization_auth_connections WHERE status='suspended' AND credential IS NULL AND provider IS NULL AND trust_fingerprint IS NULL").await, 1);
     assert_eq!(f.count("SELECT count(*) FROM organization_auth_connection_receipts").await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 1);
+    assert_eq!(
+        f.count("SELECT count(*) FROM organization_memberships WHERE auth_link_generation=1").await,
+        1
+    );
     assert_eq!(f.count("SELECT count(*) FROM audit_events").await, audit + 1);
     assert_eq!(f.revision(org).await, before);
     assert_eq!(current_team(f, &owner, org).await.id, org);
@@ -173,6 +228,52 @@ async fn lifecycle(f: &Fixture) {
     );
     assert_eq!(send(&tls, &browser, "GET", &root, &[], &[]).await.status, 200);
 }
+
+async fn native_member_removal(f: &Fixture) {
+    use super::super::inventory::enroll_member;
+
+    let owner = actor(f, "link-fence-owner").await;
+    let member = actor(f, "link-fence-member").await;
+    let team = create_team(f, &owner).await.id;
+    let other = create_team(f, &owner).await.id;
+    let removed = enroll_member(f, &owner, &member, team).await;
+    let retained = enroll_member(f, &owner, &member, other).await;
+    for (org, membership) in [(team, removed), (other, retained)] {
+        let family = login(f, &member.registration).await;
+        let family = scope::current_session(f, &family).await.unwrap().family_id;
+        let revision = seed_active_connection(f, org, "https://login.example.test").await;
+        seed_link_state(f, org, membership, family, revision).await;
+    }
+    let tls = TlsFixture::start(f).await;
+    let browser = login(f, &owner.registration).await;
+    let path = format!("/api/v1/orgs/{team}/members/{removed}");
+    let reply = tls.get(&owner, &path).await;
+    let target = scoplen_api::team::TeamMemberResource::from_json(&reply.body).unwrap();
+    let delete = || {
+        TlsFixture::signed(&browser.key, &browser.access, "DELETE", &path)
+            .header("Origin", ORIGIN)
+            .header("Content-Type", "application/json")
+            .header("If-Match", &target.etag)
+            .body(Body::empty())
+            .unwrap()
+    };
+    f.audit_failure(true).await;
+    tls.send(delete()).await.problem(503, "organization.storage_unavailable", true);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 2);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 2);
+    f.audit_failure(false).await;
+    assert_eq!(tls.send(delete()).await.status, 204);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM organization_memberships WHERE status='deprovisioned' AND auth_link_generation=2").await, 1);
+    assert_eq!(current_team(f, &member, other).await.membership.id, retained);
+}
+
+browser_tests!(
+    sqlite_native_member_removal_fences_link_state_in_only_one_organization,
+    postgres_native_member_removal_fences_link_state_in_only_one_organization,
+    native_member_removal
+);
 
 browser_tests!(
     sqlite_auth_connection_https_owner_suspends_once_with_original_family,

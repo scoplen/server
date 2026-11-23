@@ -188,6 +188,30 @@ macro_rules! auth_connections {
                 Ok(value)
             }
 
+            // Call under the same Organization lock as the change that invalidates the proof.
+            pub(super) async fn fence_organization_auth_links(
+                tx: &mut Transaction<'_, $db>,
+                organization: Uuid,
+                membership: Option<Uuid>,
+                retire_links: bool,
+            ) -> Result<(), Error> {
+                let organization = organization.as_bytes().as_slice();
+                let membership = membership.as_ref().map(|id| id.as_bytes().as_slice());
+                sqlx::query("DELETE FROM organization_auth_link_attempts WHERE organization_id=$1 AND membership_id=COALESCE($2,membership_id)")
+                    .bind(organization).bind(membership).execute(&mut **tx).await?;
+                if retire_links {
+                    sqlx::query(
+                        "UPDATE organization_memberships SET auth_link_generation=auth_link_generation+1
+                         WHERE organization_id=$1 AND id IN
+                           (SELECT membership_id FROM organization_auth_links
+                            WHERE organization_id=$1 AND membership_id=COALESCE($2,membership_id))"
+                    ).bind(organization).bind(membership).execute(&mut **tx).await?;
+                    sqlx::query("DELETE FROM organization_auth_links WHERE organization_id=$1 AND membership_id=COALESCE($2,membership_id)")
+                        .bind(organization).bind(membership).execute(&mut **tx).await?;
+                }
+                Ok(())
+            }
+
             /// Suspend the expected active revision and retire all candidates, or recover the
             /// original public result for the same eligible browser request.
             ///
@@ -235,6 +259,7 @@ macro_rules! auth_connections {
                 }
                 sqlx::query("DELETE FROM organization_auth_connection_activations WHERE organization_id=$1")
                     .bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
+                Self::fence_organization_auth_links(&mut tx, organization, None, false).await?;
                 Self::record_transition_receipt(&mut tx, &receipt, &body, now).await?;
                 let event = actor_audit(session, serde_json::json!({
                     "action": "organization.auth_connection_suspended",
