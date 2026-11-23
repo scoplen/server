@@ -8,6 +8,7 @@ use super::super::tls::TlsFixture;
 use super::*;
 
 mod audit_projection;
+mod login_attempt;
 mod retained_scope;
 
 struct Writer<'a> {

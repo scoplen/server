@@ -30,6 +30,7 @@ pub(crate) use actor::{postgres_actor, sqlite_actor};
 pub mod access_requests;
 mod audit;
 mod auth_draft;
+pub mod auth_draft_login;
 pub mod grants;
 pub mod group_policy;
 pub mod inventory;

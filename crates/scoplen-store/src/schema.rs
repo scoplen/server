@@ -3098,6 +3098,96 @@ const ORGANIZATION_AUTH_DRAFT_RECEIPTS: TableSpec = TableSpec {
     }],
 };
 
+const ORGANIZATION_AUTH_DRAFT_TESTS: TableSpec = TableSpec {
+    name: "organization_auth_draft_tests",
+    columns: &[
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "generation",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "state_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "browser_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "nonce_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trust_fingerprint",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "provider",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "phase", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "credentials",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "generation",
+            target_table: "organization_auth_drafts",
+            target_column: "generation",
+        },
+        ForeignKey {
+            source_column: "family_id",
+            target_table: "account_browser_families",
+            target_column: "family_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "organization_auth_draft_tests_state", columns: &["state_digest"] },
+        IndexSpec { name: "organization_auth_draft_tests_live_family", columns: &["family_id"] },
+        IndexSpec { name: "organization_auth_draft_tests_family", columns: &["family_id"] },
+        IndexSpec { name: "organization_auth_draft_tests_generation", columns: &["generation"] },
+        IndexSpec {
+            name: "organization_auth_draft_tests_expiry",
+            columns: &["expires_at_ms", "id"],
+        },
+    ],
+};
+
 const ORGANIZATION_INVENTORY_RECEIPTS: TableSpec = TableSpec {
     name: "organization_inventory_receipts",
     columns: &[
@@ -3795,6 +3885,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_INVENTORY_RECEIPTS,
     ORGANIZATION_AUTH_DRAFTS,
     ORGANIZATION_AUTH_DRAFT_RECEIPTS,
+    ORGANIZATION_AUTH_DRAFT_TESTS,
     ORGANIZATION_INVENTORY_ACKS,
     ORGANIZATION_GROUPS,
     ORGANIZATION_GROUP_MEMBERS,
@@ -4392,6 +4483,10 @@ mod tests {
         include_str!("../migrations/sqlite/20261123000000_organization_auth_drafts.sql");
     const POSTGRES_AUTH_DRAFTS: &str =
         include_str!("../migrations/postgres/20261123000000_organization_auth_drafts.sql");
+    const SQLITE_AUTH_DRAFT_TESTS: &str =
+        include_str!("../migrations/sqlite/20261123010000_organization_auth_draft_tests.sql");
+    const POSTGRES_AUTH_DRAFT_TESTS: &str =
+        include_str!("../migrations/postgres/20261123010000_organization_auth_draft_tests.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4454,6 +4549,7 @@ mod tests {
             SQLITE_PASSWORD_CHANGE,
             SQLITE_BROWSER_TOKEN_INDEXES,
             SQLITE_AUTH_DRAFTS,
+            SQLITE_AUTH_DRAFT_TESTS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4495,12 +4591,17 @@ mod tests {
             POSTGRES_ACCESS_REQUESTS,
             POSTGRES_PASSWORD_CHANGE,
             POSTGRES_AUTH_DRAFTS,
+            POSTGRES_AUTH_DRAFT_TESTS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
         let postgres = postgres.join("\n");
         validate_migration_source(&postgres, true)
             .expect("PostgreSQL migration set matches schema");
+        assert_invalid_postgres_generation_type_is_rejected(&postgres);
+    }
+
+    fn assert_invalid_postgres_generation_type_is_rejected(postgres: &str) {
         assert!(
             validate_migration_source(
                 &postgres.replace(

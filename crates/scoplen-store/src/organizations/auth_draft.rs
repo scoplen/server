@@ -80,6 +80,26 @@ fn resource(
 macro_rules! issuer_drafts {
     ($store:ty, $db:ty, $begin:literal, $lock:ident, $actor:ident, $audit:ident, $org_lock:literal) => {
         impl $store {
+            pub(super) async fn authorize_auth_draft(
+                tx: &mut Transaction<'_, $db>,
+                account: &[u8; 16],
+                organization: Uuid,
+            ) -> Result<i64, Error> {
+                sqlx::query(concat!(
+                    "SELECT o.id FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id ",
+                    "WHERE o.id=$1 AND m.account_id=$2 AND o.dissolved_at_ms IS NULL AND m.status='active'", $org_lock
+                ))
+                    .bind(organization.as_bytes().as_slice()).bind(account.as_slice())
+                    .fetch_optional(&mut **tx).await?.ok_or(Error::NotFound)?;
+                let current = Self::read_organization_in_transaction(tx, account, organization.as_bytes()).await?;
+                if !current.membership.roles.iter().any(|role| matches!(role.as_str(), "owner" | "administrator")) {
+                    return Err(Error::PermissionDenied);
+                }
+                let now = now_ms()?;
+                Self::authorize_organization_action(tx, &current, now, "manage_organization").await?;
+                Ok(now)
+            }
+
             /// Read, create or cancel an untested issuer after checking the current actor,
             /// active membership, role floor and Organization Cedar policies. The HTTP
             /// caller must first verify scope, token-bound proof, Origin and mutation admission.
@@ -102,25 +122,7 @@ macro_rules! issuer_drafts {
                 // The Account lock also serializes reuse of one key across different tenants.
                 $lock(&mut tx, &account, mutation.is_some()).await?;
                 $actor(&mut tx, expected, expires_at).await?;
-                sqlx::query(concat!(
-                    "SELECT o.id FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id ",
-                    "WHERE o.id=$1 AND m.account_id=$2 AND o.dissolved_at_ms IS NULL AND m.status='active'", $org_lock
-                ))
-                    .bind(organization.as_bytes().as_slice()).bind(account.as_slice())
-                    .fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
-                let current =
-                    Self::read_organization_in_transaction(&mut tx, &account, organization.as_bytes())
-                        .await?;
-                if !current
-                    .membership
-                    .roles
-                    .iter()
-                    .any(|role| matches!(role.as_str(), "owner" | "administrator"))
-                {
-                    return Err(Error::PermissionDenied);
-                }
-                let now = now_ms()?;
-                Self::authorize_organization_action(&mut tx, &current, now, "manage_organization").await?;
+                let now = Self::authorize_auth_draft(&mut tx, &account, organization).await?;
                 let Some(mutation) = mutation else {
                     let row = sqlx::query("SELECT generation,issuer,created_at_ms FROM organization_auth_drafts WHERE organization_id=$1")
                         .bind(organization.as_bytes().as_slice()).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
