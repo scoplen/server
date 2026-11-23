@@ -38,6 +38,27 @@ test("team issuer settings start closed to writes until the selected organizatio
     html,
     /<input|<a |Save draft|Cancel this draft|type="password"/,
   );
+  assert.doesNotMatch(html, /Organization connection/);
+});
+
+test("Owner connection controls require a reviewed current revision before writing", () => {
+  const html = renderToStaticMarkup(
+    createElement(panel, {
+      api: {},
+      organization: "team",
+      teamName: "Team",
+      handle: { current: null },
+      disabled: false,
+      manageConnection: true,
+      onBusy() {},
+    }),
+  );
+  assert.match(html, /Organization connection/);
+  assert.match(html, /Read connection status/);
+  assert.doesNotMatch(
+    html,
+    /Suspend connection|Activate connection|Start candidate verification|type="password"/,
+  );
 });
 
 test("current draft renders the exact issuer as inert text and names its generation for review", () => {

@@ -1449,6 +1449,7 @@ export function TeamWorkspace({
                     organization={team.id}
                     teamName={team.data.name}
                     disabled={busy || session.busy || Boolean(pending.current)}
+                    manageConnection={owner}
                     handle={issuerHandle}
                     onBusy={setIssuerBusy}
                   />

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  AuthConnectionPanel,
+  type AuthConnectionHandle,
+} from "./auth-connection-view.tsx";
 import { Field } from "./editors.tsx";
 import { requestFeedback } from "./feedback.ts";
 import type {
@@ -267,6 +271,7 @@ export function IssuerDraftPanel({
   organization,
   teamName,
   disabled,
+  manageConnection = false,
   handle,
   onBusy,
 }: {
@@ -274,12 +279,15 @@ export function IssuerDraftPanel({
   organization: string;
   teamName: string;
   disabled: boolean;
+  manageConnection?: boolean;
   handle: RefObject<IssuerDraftHandle | null>;
   onBusy: (busy: boolean) => void;
 }) {
   const { t } = useLocale();
   const workflow = useRef<IssuerDraftActions | null>(null),
     running = useRef(false);
+  const connection = useRef<AuthConnectionHandle | null>(null);
+  const [connectionBusy, setConnectionBusy] = useState(false);
   const typed = useRef(false);
   const [issuer, setIssuer] = useState(""),
     [busy, setBusy] = useState(true);
@@ -296,7 +304,11 @@ export function IssuerDraftPanel({
   const current = workflow.current?.current,
     pending = workflow.current?.pending,
     login = workflow.current?.login;
-  const blocked = disabled || busy;
+  const blocked = disabled || busy || connectionBusy;
+  useEffect(() => {
+    onBusy(busy || connectionBusy);
+  }, [busy, connectionBusy, onBusy]);
+  useEffect(() => () => onBusy(false), [onBusy]);
   useEffect(() => {
     const actions = new IssuerDraftActions(api, organization);
     workflow.current = actions;
@@ -304,12 +316,12 @@ export function IssuerDraftPanel({
       hasLocalWork: () =>
         typed.current ||
         Boolean(actions.pending) ||
+        Boolean(connection.current?.hasLocalWork()) ||
         (actions.login?.kind === "attempt" &&
           actions.login.attempt.status === "pending"),
     };
     running.current = true;
     setBusy(true);
-    onBusy(true);
     void actions
       .read()
       .catch((error: unknown) => {
@@ -319,16 +331,14 @@ export function IssuerDraftPanel({
         if (workflow.current === actions) {
           running.current = false;
           setBusy(false);
-          onBusy(false);
         }
       });
     return () => {
       workflow.current = null;
       actions.dispose();
       handle.current = null;
-      onBusy(false);
     };
-  }, [api, organization, handle, onBusy]);
+  }, [api, organization, handle]);
   useEffect(() => {
     if (!pending) return;
     const timer = window.setInterval(() => tick((value) => value + 1), 30_000);
@@ -352,7 +362,7 @@ export function IssuerDraftPanel({
     operation: "read" | "create" | "cancel" | "confirm" | "discard",
   ) {
     const actions = workflow.current;
-    if (!actions || running.current || disabled) return;
+    if (!actions || running.current || blocked) return;
     if (
       operation === "cancel" &&
       (!review ||
@@ -363,7 +373,6 @@ export function IssuerDraftPanel({
     if (operation === "discard" && !(review && "discard" in review)) return;
     running.current = true;
     setBusy(true);
-    onBusy(true);
     setFailure(undefined);
     setTestFailure(undefined);
     setReview(undefined);
@@ -395,18 +404,16 @@ export function IssuerDraftPanel({
       if (workflow.current === actions) {
         running.current = false;
         setBusy(false);
-        onBusy(false);
       }
     }
   }
 
   async function runTest(credentials?: DraftLoginCredentials) {
     const actions = workflow.current;
-    if (!actions || running.current || disabled || !actions.current || review)
+    if (!actions || running.current || blocked || !actions.current || review)
       return;
     running.current = true;
     setBusy(true);
-    onBusy(true);
     setTestFailure(undefined);
     try {
       if (credentials) await actions.startLogin(credentials);
@@ -418,7 +425,6 @@ export function IssuerDraftPanel({
       if (workflow.current === actions) {
         running.current = false;
         setBusy(false);
-        onBusy(false);
       }
     }
   }
@@ -475,7 +481,7 @@ export function IssuerDraftPanel({
     <section
       className="issuer-draft"
       aria-labelledby="issuer-draft-heading"
-      aria-busy={busy}
+      aria-busy={busy || connectionBusy}
     >
       <h2 id="issuer-draft-heading">
         {t("Connect Plystra Auth", "连接 Plystra Auth")}
@@ -509,6 +515,16 @@ export function IssuerDraftPanel({
           issuer={current.data.issuer}
         />
       )}
+      {manageConnection && (
+        <AuthConnectionPanel
+          api={api}
+          organization={organization}
+          draft={current && !pending && !review ? current : undefined}
+          disabled={disabled || busy || Boolean(review) || Boolean(pending)}
+          handle={connection}
+          onBusy={setConnectionBusy}
+        />
+      )}
       {current && !pending && !review && (
         <>
           {testFailure && (
@@ -520,7 +536,7 @@ export function IssuerDraftPanel({
             key={current.id}
             login={login}
             busy={busy}
-            disabled={disabled}
+            disabled={disabled || connectionBusy}
             onStart={(credentials) => void runTest(credentials)}
             onRead={() => void runTest()}
           />

@@ -467,6 +467,22 @@ OIDC settings for your Auth administrator. The Console derives them from the ver
 session's HTTPS origin and the issuer as saved, including its path and trailing slash.
 The same settings are available through `splctl auth registration-settings`.
 
+Once the confidential application is registered and the deployment trusts the issuer,
+sign in with the Scoplen Account password as the team's Owner. Under **Organization
+connection**, choose **Read connection status**. With the saved draft, enter the exact
+client ID, secret and Auth Space ID. Start verification, open Auth sign-in in a second
+tab, then return and check verification. Review the verified issuer, client and Space
+before activating or replacing the connection. The original password sign-in must still
+be within five minutes when starting and confirming. The active revision remains in use
+until the Owner confirms the verified replacement.
+
+Review and confirm **Suspend connection** to pause an active revision. If activation or
+suspension reports an unconfirmed result, keep the initiating tab open and choose
+**Recover original result** while the original session remains eligible. Use **Read
+connection status** to see the current revision. A lost start response can leave a
+candidate active for up to five minutes. Wait for expiry before starting again if its ID
+is unavailable.
+
 Deployment operators can prepare `[[enterprise_identity.trusted_issuers]]` entries with
 the exact issuer, the approved IPv4 or IPv6 CIDRs, and an optional `ca_certificate` PEM
 bundle. Use identical entries on all API replicas. Run `spl-server --validate-config`
@@ -521,8 +537,8 @@ candidate. Confirm using the same condition, a new UUIDv7 idempotency key, the o
 browser family and fresh native password proof. The original writer can recover an
 uncertain confirm with the same request and a new DPoP proof while its authority and
 password proof remain current. An authenticated `DELETE /activations/{attempt}`
-abandons the candidate. The Console activation workflow, member linking and enforcement
-of selected external governance still have their own acceptance gates.
+abandons the candidate. Member linking and enforcement of selected external governance
+have separate setup and acceptance.
 
 ## Repository shape
 

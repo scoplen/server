@@ -87,7 +87,7 @@ type LoginTest =
   | { kind: "wait"; until: number }
   | { kind: "unavailable" | "expired" };
 
-function validCredential(value: string): boolean {
+export function validCredential(value: string): boolean {
   return (
     Boolean(value) &&
     value.isWellFormed() &&
@@ -119,7 +119,7 @@ function loginAttempt(
   };
 }
 
-function providerNavigation(value: unknown, issuer: string): string {
+export function providerNavigation(value: unknown, issuer: string): string {
   const location = text(value);
   const authority = /^https:\/\/([^/?]+)/i.exec(location)?.[1];
   if (
