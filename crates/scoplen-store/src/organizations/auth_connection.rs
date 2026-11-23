@@ -8,7 +8,9 @@ pub use activation::{
 mod activation_callback;
 pub use activation_callback::{ActivationClaim, ClaimedActivation};
 mod activation_confirm;
+pub(super) use activation::require_fresh;
 pub use activation_confirm::ActivationConfirmation;
+pub(super) use activation_confirm::installed_aad;
 
 use scoplen_api::{
     account_browser::AccountBrowserAccessScope,
@@ -29,7 +31,7 @@ use super::{
     timestamp,
 };
 
-struct TransitionReceipt {
+pub(super) struct TransitionReceipt {
     account: [u8; 16],
     key: Uuid,
     origin_digest: [u8; 32],
@@ -37,7 +39,7 @@ struct TransitionReceipt {
 }
 
 impl TransitionReceipt {
-    fn new(
+    pub(super) fn new(
         session: &CurrentAccountBrowserSession,
         key: Uuid,
         path: &str,
@@ -107,7 +109,7 @@ macro_rules! auth_connections {
                 Self::authorize_auth_settings(tx, &session.account_id, organization, &["owner"]).await
             }
 
-            async fn auth_connection_head(
+            pub(super) async fn auth_connection_head(
                 tx: &mut Transaction<'_, $db>,
                 organization: Uuid,
             ) -> Result<Option<ConnectionResource>, Error> {
@@ -142,6 +144,13 @@ macro_rules! auth_connections {
                 organization: Uuid,
                 status: ConnectionStatus,
             ) -> Result<Option<ConnectionResource>, Error> {
+                Self::transition_receipt_bytes(tx, receipt).await?
+                    .map(|bytes| original_transition(&bytes, organization, status)).transpose()
+            }
+
+            pub(super) async fn transition_receipt_bytes(
+                tx: &mut Transaction<'_, $db>, receipt: &TransitionReceipt,
+            ) -> Result<Option<Vec<u8>>, Error> {
                 let row = sqlx::query("SELECT request_digest,response_json,created_at_ms,expires_at_ms FROM organization_auth_connection_receipts WHERE account_id=$1 AND origin_digest=$2 AND idempotency_key=$3")
                     .bind(receipt.account.as_slice()).bind(receipt.origin_digest.as_slice())
                     .bind(receipt.key.as_bytes().as_slice()).fetch_optional(&mut **tx).await?;
@@ -155,10 +164,10 @@ macro_rules! auth_connections {
                     return Err(Error::Conflict);
                 }
                 let bytes: Vec<u8> = row.try_get("response_json")?;
-                original_transition(&bytes, organization, status).map(Some)
+                Ok(Some(bytes))
             }
 
-            async fn record_transition_receipt(
+            pub(super) async fn record_transition_receipt(
                 tx: &mut Transaction<'_, $db>, receipt: &TransitionReceipt, body: &[u8], now: i64,
             ) -> Result<(), Error> {
                 let ttl_ms = i64::try_from(ORGANIZATION_CREATION_RECEIPT_SECONDS * 1000)

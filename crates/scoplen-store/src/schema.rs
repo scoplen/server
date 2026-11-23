@@ -3585,6 +3585,30 @@ const ORGANIZATION_AUTH_LINK_ATTEMPTS: TableSpec = TableSpec {
     ],
 };
 
+const ORGANIZATION_AUTH_LINK_COMPARISON_KEYS: TableSpec = TableSpec {
+    name: "organization_auth_link_comparison_keys",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "encrypted_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
+};
+
 const ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS: TableSpec = TableSpec {
     name: "organization_auth_activation_preflights",
     columns: &[
@@ -4376,6 +4400,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_AUTH_CONNECTIONS,
     ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS,
     ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS,
+    ORGANIZATION_AUTH_LINK_COMPARISON_KEYS,
     ORGANIZATION_AUTH_LINKS,
     ORGANIZATION_AUTH_LINK_ATTEMPTS,
     ORGANIZATION_AUTH_CONNECTION_RECEIPTS,
@@ -5001,6 +5026,11 @@ mod tests {
     const POSTGRES_AUTH_MEMBER_LINKS: &str =
         include_str!("../migrations/postgres/20261123050000_organization_auth_member_links.sql");
 
+    const SQLITE_AUTH_LINK_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261123060000_organization_auth_link_admission.sql");
+    const POSTGRES_AUTH_LINK_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261123060000_organization_auth_link_admission.sql");
+
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).expect("create isolated test directory");
@@ -5019,9 +5049,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn migration_pairs_match_the_logical_schema() {
-        let sqlite = [
+    fn sqlite_migration_source() -> String {
+        [
             SQLITE_ORGANIZATIONS,
             SQLITE_AUDIT,
             SQLITE_DEPLOYMENT_AUDIT,
@@ -5067,8 +5096,16 @@ mod tests {
             SQLITE_AUTH_CONNECTIONS,
             SQLITE_AUTH_ACTIVATION_PREFLIGHTS,
             SQLITE_AUTH_MEMBER_LINKS,
-        ];
-        let postgres = [
+            SQLITE_AUTH_LINK_ADMISSION,
+            include_str!(
+                "../migrations/sqlite/20261123070000_organization_auth_link_comparison_keys.sql"
+            ),
+        ]
+        .join("\n")
+    }
+
+    fn postgres_migration_source() -> String {
+        [
             POSTGRES_ORGANIZATIONS,
             POSTGRES_AUDIT,
             POSTGRES_DEPLOYMENT_AUDIT,
@@ -5113,10 +5150,19 @@ mod tests {
             POSTGRES_AUTH_CONNECTIONS,
             POSTGRES_AUTH_ACTIVATION_PREFLIGHTS,
             POSTGRES_AUTH_MEMBER_LINKS,
-        ];
-        validate_migration_source(&sqlite.join("\n"), false)
+            POSTGRES_AUTH_LINK_ADMISSION,
+            include_str!(
+                "../migrations/postgres/20261123070000_organization_auth_link_comparison_keys.sql"
+            ),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn migration_pairs_match_the_logical_schema() {
+        validate_migration_source(&sqlite_migration_source(), false)
             .expect("SQLite migration set matches schema");
-        let postgres = postgres.join("\n");
+        let postgres = postgres_migration_source();
         validate_migration_source(&postgres, true)
             .expect("PostgreSQL migration set matches schema");
         assert_invalid_postgres_generation_type_is_rejected(&postgres);

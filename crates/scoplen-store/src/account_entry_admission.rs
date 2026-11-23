@@ -75,6 +75,11 @@ pub enum AccountEntryEndpoint {
     OrganizationAuthActivationConfirm = 55,
     OrganizationAuthActivationAbandon = 56,
     OrganizationAuthConnectionSuspend = 57,
+    OrganizationAuthLinkStart = 58,
+    OrganizationAuthLinkAbandon = 59,
+    OrganizationAuthLinkConfirm = 60,
+    OrganizationAuthLinkUnlink = 61,
+    OrganizationAuthLinkWithdraw = 62,
 }
 
 /// Non-identifying admission result; the delay always uses the common 1..300 range.

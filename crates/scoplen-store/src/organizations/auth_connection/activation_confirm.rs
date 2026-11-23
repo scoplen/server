@@ -19,7 +19,11 @@ use super::{
 };
 use crate::{account_browser_sessions::CurrentAccountBrowserSession, kms::KeyManagementService};
 
-fn installed_aad(organization: Uuid, revision: Uuid, usage: u8) -> Vec<u8> {
+pub(in crate::organizations) fn installed_aad(
+    organization: Uuid,
+    revision: Uuid,
+    usage: u8,
+) -> Vec<u8> {
     let mut aad = b"spl-organization-auth-connection-credential\0v1\0".to_vec();
     aad.push(usage);
     aad.extend_from_slice(organization.as_bytes());

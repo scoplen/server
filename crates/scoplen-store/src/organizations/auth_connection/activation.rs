@@ -110,7 +110,7 @@ fn candidate_audit(
     )
 }
 
-pub(super) fn require_fresh(created_at: i64, now: i64) -> Result<i64, Error> {
+pub(in crate::organizations) fn require_fresh(created_at: i64, now: i64) -> Result<i64, Error> {
     let deadline = created_at.checked_add(PASSWORD_FRESH_MS).ok_or(Error::StorageUnavailable)?;
     if !(created_at..deadline).contains(&now) {
         return Err(Error::PermissionDenied);

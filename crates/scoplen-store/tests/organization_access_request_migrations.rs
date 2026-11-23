@@ -111,6 +111,7 @@ macro_rules! constraints {
 const PASSWORD_CHANGE: i64 = 20_261_117_020_000;
 const AUTH_DRAFTS: i64 = 20_261_123_000_000;
 const AUTH_DRAFT_TEST_ADMISSION: i64 = 20_261_123_020_000;
+const AUTH_LINK_ADMISSION: i64 = 20_261_123_060_000;
 const AUTH_CONNECTIONS: i64 = 20_261_123_030_000;
 
 macro_rules! upgrade_admission {
@@ -151,6 +152,13 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     let ids = populate!(&pool);
     upgrade_admission!(&pool, "./migrations/sqlite");
     let families = auth_connection_migration::sqlite::existing_browser_families(&pool).await;
+    apply_admission_migration!(
+        &pool,
+        "./migrations/sqlite",
+        AUTH_LINK_ADMISSION,
+        58_i64..=62,
+        [0_i64, 63]
+    );
     pool.close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
@@ -158,7 +166,7 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=57);
+    assert_retained_admission!(store.pool(), 46_i64..=62);
     member_link_migration::sqlite::check(store.pool(), ids.0, ids.1, ids.3, families[0]).await;
     auth_connection_migration::sqlite::check_preflights(store.pool(), families).await;
     auth_connection_migration::sqlite::check(store.pool(), ids.0, ids.3).await;
@@ -191,6 +199,13 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     let ids = populate!(&pool);
     upgrade_admission!(&pool, "./migrations/postgres");
     let families = auth_connection_migration::postgres::existing_browser_families(&pool).await;
+    apply_admission_migration!(
+        &pool,
+        "./migrations/postgres",
+        AUTH_LINK_ADMISSION,
+        58_i64..=62,
+        [0_i64, 63]
+    );
     pool.close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
@@ -198,7 +213,7 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     store.pool().close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=57);
+    assert_retained_admission!(store.pool(), 46_i64..=62);
     member_link_migration::postgres::check(store.pool(), ids.0, ids.1, ids.3, families[0]).await;
     auth_connection_migration::postgres::check_preflights(store.pool(), families).await;
     auth_connection_migration::postgres::check(store.pool(), ids.0, ids.3).await;
