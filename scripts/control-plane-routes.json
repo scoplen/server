@@ -9,6 +9,8 @@
   {"method": "PATCH", "path": "/orgs/{org}"},
   {"method": "GET", "path": "/orgs/{org}/audit-events"},
   {"method": "GET", "path": "/orgs/{org}/audit-events/verify"},
+  {"method": "GET", "path": "/orgs/{org}/auth-connection"},
+  {"method": "POST", "path": "/orgs/{org}/auth-connection/suspend"},
   {"method": "POST", "path": "/orgs/{org}/auth-connection-draft"},
   {"method": "GET", "path": "/orgs/{org}/auth-connection-draft"},
   {"method": "DELETE", "path": "/orgs/{org}/auth-connection-draft"},

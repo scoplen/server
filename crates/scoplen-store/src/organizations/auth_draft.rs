@@ -85,6 +85,15 @@ macro_rules! issuer_drafts {
                 account: &[u8; 16],
                 organization: Uuid,
             ) -> Result<i64, Error> {
+                Self::authorize_auth_settings(tx, account, organization, &["owner", "administrator"]).await
+            }
+
+            pub(super) async fn authorize_auth_settings(
+                tx: &mut Transaction<'_, $db>,
+                account: &[u8; 16],
+                organization: Uuid,
+                required_roles: &[&str],
+            ) -> Result<i64, Error> {
                 sqlx::query(concat!(
                     "SELECT o.id FROM organizations o JOIN organization_memberships m ON m.organization_id=o.id ",
                     "WHERE o.id=$1 AND m.account_id=$2 AND o.dissolved_at_ms IS NULL AND m.status='active'", $org_lock
@@ -92,7 +101,7 @@ macro_rules! issuer_drafts {
                     .bind(organization.as_bytes().as_slice()).bind(account.as_slice())
                     .fetch_optional(&mut **tx).await?.ok_or(Error::NotFound)?;
                 let current = Self::read_organization_in_transaction(tx, account, organization.as_bytes()).await?;
-                if !current.membership.roles.iter().any(|role| matches!(role.as_str(), "owner" | "administrator")) {
+                if !current.membership.roles.iter().any(|role| required_roles.contains(&role.as_str())) {
                     return Err(Error::PermissionDenied);
                 }
                 let now = now_ms()?;

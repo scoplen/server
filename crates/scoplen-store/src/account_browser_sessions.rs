@@ -101,6 +101,13 @@ pub struct CurrentAccountBrowserSession {
     origin: String,
     credential_generation: u64,
 }
+
+impl CurrentAccountBrowserSession {
+    pub(crate) fn trusted_origin(&self) -> &str {
+        &self.origin
+    }
+}
+
 impl fmt::Debug for CurrentAccountBrowserSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("CurrentAccountBrowserSession([REDACTED])")

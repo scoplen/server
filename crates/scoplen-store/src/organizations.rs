@@ -29,6 +29,7 @@ pub(crate) use actor::{postgres_actor, sqlite_actor};
 
 pub mod access_requests;
 mod audit;
+mod auth_connection;
 mod auth_draft;
 pub mod auth_draft_login;
 pub mod grants;
@@ -233,8 +234,10 @@ macro_rules! organizations {
                     .bind(now).execute(&mut *tx).await?.rows_affected();
                 let draft_results_retired = sqlx::query("UPDATE organization_auth_draft_receipts SET request_digest=NULL,generation=NULL,created_at_ms=NULL,expires_at_ms=NULL WHERE (account_id,origin_digest,idempotency_key) IN (SELECT account_id,origin_digest,idempotency_key FROM organization_auth_draft_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
                     .bind(now).execute(&mut *tx).await?.rows_affected();
+                let connection_results_retired = sqlx::query("UPDATE organization_auth_connection_receipts SET request_digest=NULL,response_json=NULL,created_at_ms=NULL,expires_at_ms=NULL WHERE (account_id,origin_digest,idempotency_key) IN (SELECT account_id,origin_digest,idempotency_key FROM organization_auth_connection_receipts WHERE expires_at_ms<=$1 ORDER BY expires_at_ms LIMIT 100) AND expires_at_ms<=$1")
+                    .bind(now).execute(&mut *tx).await?.rows_affected();
                 tx.commit().await?;
-                Ok(removed + lifecycle_removed + inventory_removed + draft_results_retired)
+                Ok(removed + lifecycle_removed + inventory_removed + draft_results_retired + connection_results_retired)
             }
 
             /// Atomically create a team, its sole initial owner, audit and 24-hour receipt.

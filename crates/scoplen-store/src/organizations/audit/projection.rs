@@ -65,10 +65,17 @@ pub(super) fn project(
         if actor_kind != ActorKind::System {
             let device = recorded_id(&fields, "device_id");
             let browser = recorded_id(&fields, "browser_family_id");
-            if device.is_none() || browser.is_none() {
+            let unambiguous = if actor_kind == ActorKind::Browser {
+                device.is_none() && browser.is_some()
+            } else {
+                device.is_none() || browser.is_none()
+            };
+            if unambiguous {
                 event.actor_account_id = recorded_id(&fields, "account_id");
-                event.actor_device_id = device;
-                if actor_kind == ActorKind::Either {
+                if actor_kind != ActorKind::Browser {
+                    event.actor_device_id = device;
+                }
+                if matches!(actor_kind, ActorKind::Either | ActorKind::Browser) {
                     event.actor_browser_family_id = browser;
                 }
             }
@@ -82,6 +89,7 @@ pub(super) fn project(
 enum ActorKind {
     Either,
     Device,
+    Browser,
     System,
 }
 
@@ -137,6 +145,9 @@ fn classification(
         | "organization.auth_draft_test_started"
         | "organization.auth_draft_test_finished" => {
             (Scoplen, "generation", Some(Kind::AuthConnectionDraft), ActorKind::Either)
+        }
+        "organization.auth_connection_suspended" => {
+            (AccountChange, "organization_id", Some(Kind::Organization), ActorKind::Browser)
         }
         "organization.user_ca_krl_activated" => {
             (Authorization, "authority_id", Some(Kind::CertificateAuthority), ActorKind::System)
@@ -348,6 +359,32 @@ mod tests {
         assert_eq!(system.category, AuditCategory::Authorization);
         assert!(system.actor_account_id.is_none());
         assert!(system.actor_device_id.is_none());
+    }
+
+    #[test]
+    fn connection_suspension_projects_only_browser_attribution() {
+        let fields = json!({
+            "action":"organization.auth_connection_suspended","account_id":id(2),
+            "browser_family_id":id(3),"organization_id":id(1),
+            "previous_revision":id(4),"revision":id(5),
+        });
+        let event = from_bytes(&serde_json::to_vec(&fields).unwrap());
+        assert_eq!(event.category, AuditCategory::AccountChange);
+        assert_eq!(event.outcome, AuditOutcome::Success);
+        assert_eq!(event.actor_account_id, Some(id(2)));
+        assert_eq!(event.actor_browser_family_id, Some(id(3)));
+        assert!(event.actor_device_id.is_none());
+        assert_eq!(
+            event.resource,
+            Some(AuditResource { kind: AuditResourceKind::Organization, id: id(1) })
+        );
+
+        let mut ambiguous = fields;
+        ambiguous["device_id"] = json!(id(6));
+        let event = from_bytes(&serde_json::to_vec(&ambiguous).unwrap());
+        assert!(event.actor_account_id.is_none());
+        assert!(event.actor_browser_family_id.is_none());
+        assert!(event.actor_device_id.is_none());
     }
 
     #[test]

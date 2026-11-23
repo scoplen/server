@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/1d3817fe656a40e6840a42c9d7828881dcd928fe/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/4a09dfb6e5665674a5fbcb5c7b135a155520ce64/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -189,6 +189,12 @@ export interface components {
     GrantFields: GrantFields;
     AuthConnectionDraftCreate: AuthConnectionDraftCreate;
     AuthConnectionDraftResource: AuthConnectionDraftResource;
+    AuthConnectionResource: AuthConnectionResource;
+    AuthConnectionActiveResource: AuthConnectionActiveResource;
+    AuthConnectionSuspendedResource: AuthConnectionSuspendedResource;
+    AuthConnectionCandidate: AuthConnectionCandidate;
+    AuthConnectionActivation: AuthConnectionActivation;
+    AuthConnectionActivationStarted: AuthConnectionActivationStarted;
     DraftLoginCredentials: DraftLoginCredentials;
     DraftLoginAttempt: DraftLoginAttempt;
     DraftLoginStarted: DraftLoginStarted;
@@ -283,6 +289,37 @@ export interface DraftLoginStarted {
 }
 export type OrganizationAuthProviderUnavailableProblem = ProblemDetails & { status: 503; code: "organization.auth_provider_unavailable"; changed: false };
 // END GENERATED AuthConnectionDraft
+// BEGIN GENERATED AuthConnection
+export interface AuthConnectionCandidate {
+  draft_generation: string; client_id: string; client_secret: string; space_id: string;
+}
+export type AuthConnectionCondition =
+  | { "If-None-Match": "*"; "If-Match"?: never }
+  | { "If-Match": string; "If-None-Match"?: never };
+interface PublicConnectionFields {
+  client_secret?: never; access_token?: never; refresh_token?: never; id_token?: never; claims?: never;
+  [extension: string]: unknown;
+}
+export interface AuthConnectionResource extends PublicConnectionFields {
+  id: string; etag: string; created_at: string; updated_at: string; authorization_url?: never;
+  data: PublicConnectionFields & {
+    organization_id: string; status: "active" | "suspended"; issuer: string; client_id: string; space_id: string;
+    authorization_url?: never;
+  };
+}
+export type AuthConnectionActiveResource = AuthConnectionResource & { data: { status: "active" } };
+export type AuthConnectionSuspendedResource = AuthConnectionResource & { data: { status: "suspended" } };
+interface ActivationFields extends PublicConnectionFields {
+  id: string; organization_id: string; draft_generation: string; expected_revision: string | null;
+  issuer: string; client_id: string; space_id: string; expires_at: string;
+}
+export interface AuthConnectionActivation extends ActivationFields {
+  status: "pending" | "verified" | "failed"; authorization_url?: never;
+}
+export interface AuthConnectionActivationStarted extends ActivationFields {
+  status: "pending"; authorization_url: string;
+}
+// END GENERATED AuthConnection
 // BEGIN GENERATED AccessRequests
 export interface AccessRequestFields { host: string; remote_user: string; duration_seconds: number; reason: string; }
 export interface AccessRequestCheckRequest { data: AccessRequestFields; }
@@ -949,7 +986,7 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-drafts:manage auth-test:run inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-connection:manage auth-drafts:manage auth-test:run inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
@@ -1504,6 +1541,54 @@ export const accountBrowserOperations = [
       "auth-test:run"
     ],
     "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-connection",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-connection/activations",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-connection/activations/{attempt}",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/auth-connection/activations/{attempt}",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-connection/activations/{attempt}/confirm",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-connection/suspend",
+    "scopes": [
+      "auth-connection:manage"
+    ],
+    "writerReceipt": true
   }
 ] as const;
 // END GENERATED AccountBrowser

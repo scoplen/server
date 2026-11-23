@@ -496,6 +496,17 @@ In the team's **Audit** timeline, filter **Resource** by
 The same filter works after a replacement is saved. The audit record contains the
 generation and the writer's Account and Device or browser-family ID.
 
+The connection management API uses `GET /api/v1/orgs/{org}/auth-connection` to read
+the current revision, or returns `404` when the slot is empty. An Owner uses an
+Account-browser session with `auth-connection:manage`, a fresh DPoP proof, and current
+Organization policy permission. To suspend an active revision, send an empty `POST` to
+`/api/v1/orgs/{org}/auth-connection/suspend` with the trusted Origin, its strong
+`If-Match` tag, and a UUIDv7 `Idempotency-Key`. Suspension works during an issuer
+outage and retires the installed credential. Native team access continues. After an
+uncertain response, submit the exact original request with a fresh proof in the
+original browser family within 24 hours to recover the original result. Use GET to
+read the current revision. Activation and member linking remain pending.
+
 ## Repository shape
 
 The Cargo workspace contains the server supervisor and one crate boundary for each server role.

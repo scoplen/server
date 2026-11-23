@@ -13,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 reqwest.workspace = true
-scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "1d3817fe656a40e6840a42c9d7828881dcd928fe" }
+scoplen-api = { git = "https://github.com/scoplen/proto.git", rev = "4a09dfb6e5665674a5fbcb5c7b135a155520ce64" }
 scoplen-server = { path = "../scoplen-server" }
 serde.workspace = true
 serde_json.workspace = true
