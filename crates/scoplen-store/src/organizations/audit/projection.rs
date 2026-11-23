@@ -146,7 +146,11 @@ fn classification(
         | "organization.auth_draft_test_finished" => {
             (Scoplen, "generation", Some(Kind::AuthConnectionDraft), ActorKind::Either)
         }
-        "organization.auth_connection_suspended" => {
+        "organization.auth_activation_started"
+        | "organization.auth_activation_finished"
+        | "organization.auth_activation_abandoned"
+        | "organization.auth_connection_activated"
+        | "organization.auth_connection_suspended" => {
             (AccountChange, "organization_id", Some(Kind::Organization), ActorKind::Browser)
         }
         "organization.user_ca_krl_activated" => {
@@ -385,6 +389,29 @@ mod tests {
         assert!(event.actor_account_id.is_none());
         assert!(event.actor_browser_family_id.is_none());
         assert!(event.actor_device_id.is_none());
+    }
+
+    #[test]
+    fn activation_lifecycle_projects_the_organization_and_original_family() {
+        for action in [
+            "organization.auth_activation_started",
+            "organization.auth_activation_abandoned",
+            "organization.auth_activation_finished",
+            "organization.auth_connection_activated",
+        ] {
+            let fields = json!({"action":action,"account_id":id(2),"browser_family_id":id(3),
+                "organization_id":id(1),"attempt_id":id(4),"draft_generation":id(5)});
+            let event = from_bytes(&serde_json::to_vec(&fields).unwrap());
+            assert_eq!(event.category, AuditCategory::AccountChange);
+            assert_eq!(event.outcome, AuditOutcome::Success);
+            assert_eq!(event.actor_account_id, Some(id(2)));
+            assert_eq!(event.actor_browser_family_id, Some(id(3)));
+            assert!(event.actor_device_id.is_none());
+            assert_eq!(
+                event.resource,
+                Some(AuditResource { kind: AuditResourceKind::Organization, id: id(1) })
+            );
+        }
     }
 
     #[test]

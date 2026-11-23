@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Organization connection revisions and original-writer suspension receipts.
+//! Organization connection candidates, installed revisions and original-writer receipts.
+
+mod activation;
+pub use activation::ConnectionActivationStart;
 
 use scoplen_api::{
     account_browser::AccountBrowserAccessScope,
