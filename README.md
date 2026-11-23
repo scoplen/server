@@ -1270,6 +1270,24 @@ as CI does; both Personal suites use the same test deployment key and may share 
 Operator HTTP quota fixtures set both the exhausted count and a fresh full window, clearing
 failure cooldowns so quota-before-parsing assertions remain valid across minute boundaries.
 
+The D-164 deployed-issuer acceptance cases use a disposable Plystra Auth deployment over
+certificate-verified HTTPS. Register a confidential human-login client for Scoplen's
+issuer-specific callback with the test router origin `https://example.com`. Prepare distinct
+disposable password Accounts for the two stores to stay within the issuer's login limits.
+Pass the path of a private JSON fixture in `SCOPLEN_ACCEPTANCE_ISSUER_FIXTURE`. It carries
+`issuer`, `ca_certificate` (PEM path), `allowed_address` (CIDR), `space_id`, `client_id`,
+`client_secret`, and `sqlite_login` and `postgres_login`, each with `email` and `password`.
+Use an owned disposable database in `SCOPLEN_TEST_DATABASE_URL`.
+
+```sh
+cargo test -p scoplen-server --lib --features postgres-integration deployed_issuer_native_boundary -- --ignored --test-threads=1
+```
+
+The cases exercise the public Auth interaction API and Scoplen's mounted callback, explicit
+activation, member-controlled linking and unlinking, native Account and Device access, JWKS
+and retired endpoint boundaries on SQLite and PostgreSQL. Hosted login navigation and the
+full managed-access profile have separate acceptance.
+
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before SQLite-backed
 roles start, and a migration failure stops startup. Before a pooled SQLite connection becomes
 available to another request, any remaining tracked transaction is rolled back; failed cleanup

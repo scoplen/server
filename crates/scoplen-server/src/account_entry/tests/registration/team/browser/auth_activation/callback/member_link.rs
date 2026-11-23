@@ -14,7 +14,7 @@ mod suspension;
 #[cfg(feature = "postgres-integration")]
 mod recovery;
 
-fn metadata(reply: &Reply) -> LinkResponseHeaders<'_> {
+pub(super) fn metadata(reply: &Reply) -> LinkResponseHeaders<'_> {
     LinkResponseHeaders {
         etag: reply.header("etag"),
         cache_control: reply.header("cache-control"),
@@ -51,6 +51,18 @@ async fn begin_link(
     provider: &Provider,
     membership: LinkMembership,
 ) -> LinkNavigation {
+    let (start, cookie) = start_link(tls, browser, membership).await;
+    let url = std::str::from_utf8(start.authorization_url.as_bytes()).unwrap();
+    let redirect = provider.navigate(url).await;
+    let target = format!("{}?{}", redirect.path(), redirect.query().unwrap());
+    LinkNavigation { attempt: start.attempt, target, cookie }
+}
+
+pub(super) async fn start_link(
+    tls: &TlsFixture,
+    browser: &Browser,
+    membership: LinkMembership,
+) -> (LinkAttemptStarted, String) {
     let root = format!("/api/v1/orgs/{}/auth-link", membership.organization_id);
     let status = send(tls, browser, "GET", &root, &[], &[]).await;
     assert_eq!(status.status, 200);
@@ -73,21 +85,18 @@ async fn begin_link(
     let start =
         LinkAttemptStarted::from_http_json(&reply.body, membership, &connection, metadata(&reply))
             .unwrap();
-    let url = std::str::from_utf8(start.authorization_url.as_bytes()).unwrap();
-    let redirect = provider.navigate(url).await;
-    let target = format!("{}?{}", redirect.path(), redirect.query().unwrap());
     let cookie = reply.header("set-cookie").unwrap();
     assert!(cookie.contains("; Path=/; HttpOnly; Secure; SameSite=Lax; Expires="));
     let cookie = cookie.split(';').next().unwrap().to_owned();
     assert!(cookie.starts_with("__Host-spl-auth-link-"));
-    LinkNavigation { attempt: start.attempt, target, cookie }
+    (start, cookie)
 }
 
 fn attempt_path(attempt: &LinkAttempt) -> String {
     format!("/api/v1/orgs/{}/auth-link/attempts/{}", attempt.membership.organization_id, attempt.id)
 }
 
-async fn confirm_link(
+pub(super) async fn confirm_link(
     tls: &TlsFixture,
     browser: &Browser,
     attempt: &LinkAttempt,

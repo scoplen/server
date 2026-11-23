@@ -7,6 +7,7 @@ use super::super::auth_connection::seed_link_state;
 use super::*;
 use crate::oidc::provider_test::TokenResponseGate;
 
+mod deployed_issuer;
 mod member_link;
 
 #[cfg(feature = "postgres-integration")]
