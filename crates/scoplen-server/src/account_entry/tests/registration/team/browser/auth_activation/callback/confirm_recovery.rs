@@ -6,34 +6,45 @@ use std::sync::atomic::Ordering;
 use super::*;
 use crate::test_lost_commit::LostCommitProxy;
 
-async fn lose_receipt_commit_ack(
+pub(super) async fn lose_commit_ack_at_write(
     pool: &sqlx::PgPool,
     application: &str,
     proxy: &LostCommitProxy,
-    confirm: impl Future<Output = Reply>,
+    lock_table: &str,
+    write_query: &str,
+    request: impl Future<Output = Reply>,
 ) -> Reply {
     let mut lock = pool.begin().await.unwrap();
-    // SHARE permits receipt lookup and blocks the subsequent receipt INSERT.
-    sqlx::query("LOCK TABLE organization_auth_connection_receipts IN SHARE MODE")
-        .execute(&mut *lock)
-        .await
-        .unwrap();
+    sqlx::query(lock_table).execute(&mut *lock).await.unwrap();
+    let holder: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *lock).await.unwrap();
+    let dropped = proxy.dropped.load(Ordering::SeqCst);
     let release = async {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let writing: bool = sqlx::query_scalar(
                     "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name=$1
-                     AND wait_event_type='Lock' AND query LIKE 'INSERT INTO organization_auth_connection_receipts %')"
-                ).bind(application).fetch_one(pool).await.unwrap();
-                if writing { break; }
+                     AND $2=ANY(pg_blocking_pids(pid)) AND starts_with(query,$3))",
+                )
+                .bind(application)
+                .bind(holder)
+                .bind(write_query)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if writing {
+                    break;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("confirmation reached its receipt INSERT after installing the revision");
+        })
+        .await
+        .expect("request reached its gated business write");
         proxy.armed.store(true, Ordering::SeqCst);
         lock.commit().await.unwrap();
     };
-    let (reply, ()) = tokio::join!(confirm, release);
-    assert_eq!(proxy.dropped.load(Ordering::SeqCst), 1);
+    let (reply, ()) = tokio::join!(request, release);
+    assert_eq!(proxy.dropped.load(Ordering::SeqCst), dropped + 1);
     reply
 }
 
@@ -77,10 +88,12 @@ async fn postgres_auth_activation_https_lost_confirm_commit_recovers_original_re
     let key = Uuid::now_v7().to_string();
     let empty = ("If-None-Match", "*");
     let attempt = &navigation.attempt;
-    let unconfirmed = lose_receipt_commit_ack(
+    let unconfirmed = lose_commit_ack_at_write(
         store.pool(),
         &application,
         &proxy,
+        "LOCK TABLE organization_auth_connection_receipts IN SHARE MODE",
+        "INSERT INTO organization_auth_connection_receipts ",
         confirm(&tls, &browser, attempt, empty, &key),
     )
     .await;

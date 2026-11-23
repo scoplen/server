@@ -8,6 +8,9 @@ use scoplen_api::member_link::{
 
 use super::*;
 
+#[cfg(feature = "postgres-integration")]
+mod recovery;
+
 fn metadata(reply: &Reply) -> LinkResponseHeaders<'_> {
     LinkResponseHeaders {
         etag: reply.header("etag"),
