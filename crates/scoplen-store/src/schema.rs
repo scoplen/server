@@ -3393,6 +3393,39 @@ const ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS: TableSpec = TableSpec {
     ],
 };
 
+const ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS: TableSpec = TableSpec {
+    name: "organization_auth_activation_preflights",
+    columns: &[
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "reservation_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "family_id",
+        target_table: "account_browser_families",
+        target_column: "family_id",
+    }],
+    indexes: &[IndexSpec {
+        name: "organization_auth_activation_preflights_expiry",
+        columns: &["expires_at_ms", "family_id"],
+    }],
+};
+
 const ORGANIZATION_AUTH_CONNECTION_RECEIPTS: TableSpec = TableSpec {
     name: "organization_auth_connection_receipts",
     columns: &[
@@ -4150,6 +4183,7 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_AUTH_DRAFT_TESTS,
     ORGANIZATION_AUTH_CONNECTIONS,
     ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS,
+    ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS,
     ORGANIZATION_AUTH_CONNECTION_RECEIPTS,
     ORGANIZATION_INVENTORY_ACKS,
     ORGANIZATION_GROUPS,
@@ -4762,6 +4796,12 @@ mod tests {
         include_str!("../migrations/sqlite/20261123030000_organization_auth_connections.sql");
     const POSTGRES_AUTH_CONNECTIONS: &str =
         include_str!("../migrations/postgres/20261123030000_organization_auth_connections.sql");
+    const SQLITE_AUTH_ACTIVATION_PREFLIGHTS: &str = include_str!(
+        "../migrations/sqlite/20261123040000_organization_auth_activation_preflights.sql"
+    );
+    const POSTGRES_AUTH_ACTIVATION_PREFLIGHTS: &str = include_str!(
+        "../migrations/postgres/20261123040000_organization_auth_activation_preflights.sql"
+    );
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4827,6 +4867,7 @@ mod tests {
             SQLITE_AUTH_DRAFT_TESTS,
             SQLITE_AUTH_DRAFT_TEST_ADMISSION,
             SQLITE_AUTH_CONNECTIONS,
+            SQLITE_AUTH_ACTIVATION_PREFLIGHTS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4871,6 +4912,7 @@ mod tests {
             POSTGRES_AUTH_DRAFT_TESTS,
             POSTGRES_AUTH_DRAFT_TEST_ADMISSION,
             POSTGRES_AUTH_CONNECTIONS,
+            POSTGRES_AUTH_ACTIVATION_PREFLIGHTS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
