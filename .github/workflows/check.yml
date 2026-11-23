@@ -177,7 +177,8 @@ jobs:
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration account_entry::
           -- --skip registration::team::browser::auth_draft::
-          --skip registration::team::browser::auth_connection --test-threads=2
+          --skip registration::team::browser::auth_connection
+          --skip registration::team::browser::auth_activation --test-threads=2
       - name: Check Organization issuer draft storage on SQLite and PostgreSQL
         run: >-
           cargo test --locked -p scoplen-store --features postgres-integration
@@ -190,6 +191,10 @@ jobs:
         run: >-
           cargo test --locked -p scoplen-server --lib --features postgres-integration
           registration::team::browser::auth_connection -- --test-threads=1
+      - name: Check Organization connection activation over HTTPS on SQLite and PostgreSQL
+        run: >-
+          cargo test --locked -p scoplen-server --lib --features postgres-integration
+          registration::team::browser::auth_activation -- --test-threads=1
       - name: Export verified TLS KRL downloads from both stores
         env:
           SCOPLEN_KRL_ACCEPTANCE_DIRECTORY: ${{ runner.temp }}/krl-acceptance

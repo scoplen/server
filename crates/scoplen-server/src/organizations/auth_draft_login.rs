@@ -16,7 +16,9 @@ use scoplen_api::{
     account_browser::AccountBrowserAccessOperation,
     auth_connection_draft::{
         DraftRequestError,
-        callback::{Callback, IssuerIdentification, callback_path},
+        callback::{
+            Callback, IssuerIdentification, activation_cookie_name_from_query, callback_path,
+        },
         test_login::{DraftLoginCredentials, DraftLoginRequest, DraftLoginStarted},
     },
     organization::parse_organization_idempotency_key,
@@ -27,6 +29,7 @@ use scoplen_store::{
     account_entry_admission::AccountEntryEndpoint,
     organizations::{
         OrganizationStoreError as StoreError,
+        auth_connection::ActivationClaim,
         auth_draft_login::{
             DraftLoginClaim, DraftLoginMaterial, DraftLoginOutcome, DraftLoginProvider,
             DraftLoginStart,
@@ -47,7 +50,10 @@ use super::{
 };
 use crate::{
     device_auth::AuthBackend,
-    oidc::{DiscoveryError, DraftExchangeError, TrustedIssuer, verify_claimed_draft_login},
+    oidc::{
+        DiscoveryError, DraftExchangeError, ProviderMetadata, TrustedIssuer,
+        verify_claimed_activation, verify_claimed_draft_login,
+    },
 };
 
 const COOKIE: &str = "__Host-spl-auth-test";
@@ -185,19 +191,13 @@ async fn start_attempt(
         return store_problem(StoreError::StorageUnavailable, id);
     };
     let material = DraftLoginMaterial { credentials, verifier };
-    let provider = DraftLoginProvider {
-        authorization_endpoint: metadata.authorization_endpoint,
-        token_endpoint: metadata.token_endpoint,
-        userinfo_endpoint: metadata.userinfo_endpoint,
-        jwks_uri: metadata.jwks_uri,
-        response_issuer_required: metadata.issuer_identification
-            == IssuerIdentification::ResponseParameter,
-    };
+    let provider = login_provider(metadata);
     let Some(authorization_url) = authorization_url(
         &state.origin,
         &issuer,
         &provider.authorization_endpoint,
-        &material,
+        &material.credentials.client_id,
+        &material.verifier,
         &state_proof,
         &nonce,
     ) else {
@@ -237,7 +237,7 @@ async fn start_attempt(
         }
         Err(error) => return store_problem(error, id),
     };
-    let Some(cookie) = callback_cookie(&browser_binding, &attempt.expires_at) else {
+    let Some(cookie) = callback_cookie(COOKIE, &browser_binding, &attempt.expires_at) else {
         return store_problem(StoreError::StorageUnavailable, id);
     };
     let Ok(body) = (DraftLoginStarted { attempt, authorization_url }).to_json(&issuer) else {
@@ -248,18 +248,30 @@ async fn start_attempt(
     response
 }
 
-fn authorization_url(
+pub(super) fn login_provider(metadata: ProviderMetadata) -> DraftLoginProvider {
+    DraftLoginProvider {
+        authorization_endpoint: metadata.authorization_endpoint,
+        token_endpoint: metadata.token_endpoint,
+        userinfo_endpoint: metadata.userinfo_endpoint,
+        jwks_uri: metadata.jwks_uri,
+        response_issuer_required: metadata.issuer_identification
+            == IssuerIdentification::ResponseParameter,
+    }
+}
+
+pub(super) fn authorization_url(
     origin: &str,
     issuer: &str,
     endpoint: &str,
-    material: &DraftLoginMaterial,
+    client_id: &SecretVec,
+    verifier: &SecretBytes<32>,
     state: &SecretBytes<32>,
     nonce: &SecretBytes<32>,
 ) -> Option<SecretVec> {
     let mut url = Url::parse(endpoint).ok()?;
     let callback = format!("{origin}{}", callback_path(issuer).ok()?);
-    let client = std::str::from_utf8(material.credentials.client_id.as_bytes()).ok()?;
-    let verifier = URL_SAFE_NO_PAD.encode(material.verifier.as_bytes());
+    let client = std::str::from_utf8(client_id.as_bytes()).ok()?;
+    let verifier = URL_SAFE_NO_PAD.encode(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -274,7 +286,11 @@ fn authorization_url(
         .then(|| SecretVec::new(String::from(url).into_bytes()))
 }
 
-fn callback_cookie(binding: &SecretBytes<32>, expires_at: &str) -> Option<HeaderValue> {
+pub(super) fn callback_cookie(
+    name: &str,
+    binding: &SecretBytes<32>,
+    expires_at: &str,
+) -> Option<HeaderValue> {
     let expires = OffsetDateTime::parse(expires_at, &Rfc3339)
         .ok()?
         .replace_nanosecond(0)
@@ -282,7 +298,7 @@ fn callback_cookie(binding: &SecretBytes<32>, expires_at: &str) -> Option<Header
         .format(&Rfc2822)
         .ok()?;
     HeaderValue::from_str(&format!(
-        "{COOKIE}={}; {COOKIE_ATTRIBUTES}; Expires={} GMT",
+        "{name}={}; {COOKIE_ATTRIBUTES}; Expires={} GMT",
         URL_SAFE_NO_PAD.encode(binding.as_bytes()),
         expires.strip_suffix(" +0000")?
     ))
@@ -319,13 +335,13 @@ async fn status(State(state): State<OrganizationState>, request: Request<Body>) 
     }
 }
 
-fn fingerprint(state: &OrganizationState, issuer: &str) -> Option<[u8; 32]> {
+pub(super) fn fingerprint(state: &OrganizationState, issuer: &str) -> Option<[u8; 32]> {
     TrustedIssuer::from_settings(&state.enterprise_identity, issuer)
         .ok()
         .map(|entry| entry.fingerprint())
 }
 
-fn discovery_problem(error: DiscoveryError, id: &Uuid) -> Response {
+pub(super) fn discovery_problem(error: DiscoveryError, id: &Uuid) -> Response {
     if error == DiscoveryError::Untrusted {
         return store_problem(StoreError::PermissionDenied, id);
     }
@@ -378,49 +394,71 @@ fn callback_target(origin: &str, uri: &Uri, headers: &HeaderMap) -> bool {
         && headers.get_all("sec-fetch-dest").iter().all(|value| value == "document")
 }
 
-fn callback_binding(headers: &HeaderMap, query_len: usize) -> Option<&str> {
+fn callback_binding<'a>(
+    headers: &'a HeaderMap,
+    cookie_name: &str,
+    query_len: usize,
+) -> Result<Option<&'a str>, ()> {
     let mut total = query_len;
     let mut binding = None;
     for value in headers.get_all(header::COOKIE) {
         total += value.as_bytes().len();
         if total > 8192 {
-            return None;
+            return Err(());
         }
-        for cookie in value.to_str().ok()?.split(';') {
-            let (name, value) = cookie.trim().split_once('=')?;
-            if name == COOKIE && binding.replace(value).is_some() {
-                return None;
+        for cookie in value.to_str().map_err(|_| ())?.split(';') {
+            let (name, value) = cookie.trim().split_once('=').ok_or(())?;
+            if name == cookie_name && binding.replace(value).is_some() {
+                return Err(());
             }
         }
     }
-    binding
+    Ok(binding)
 }
 
 async fn callback(State(state): State<OrganizationState>, request: Request<Body>) -> Response {
     let id = Uuid::new_v4();
     let (parts, body) = request.into_parts();
     let query = parts.uri.query().unwrap_or_default();
-    let binding = callback_binding(&parts.headers, query.len());
     if !callback_target(&state.origin, &parts.uri, &parts.headers)
         || to_bytes(body, 0).await.is_err()
     {
-        return callback_page(false, &id);
+        return callback_page(None, &id);
     }
-    let Ok(callback) =
-        Callback::parse(parts.method.as_str(), parts.uri.path(), query, binding.into_iter())
-    else {
-        return callback_page(false, &id);
+    let Ok(activation_cookie) = activation_cookie_name_from_query(query) else {
+        return callback_page(None, &id);
     };
+    let cookie = match callback_binding(&parts.headers, &activation_cookie, query.len()) {
+        Ok(Some(value)) => Some((activation_cookie.as_str(), value)),
+        Ok(None) => match callback_binding(&parts.headers, COOKIE, query.len()) {
+            Ok(Some(value)) => Some((COOKIE, value)),
+            _ => None,
+        },
+        Err(()) => None,
+    };
+    let Some((name, binding)) = cookie else { return callback_page(None, &id) };
+    let Ok(callback) =
+        Callback::parse(parts.method.as_str(), parts.uri.path(), query, [binding].into_iter())
+    else {
+        return callback_page(None, &id);
+    };
+    if name != COOKIE {
+        return activation_callback(&state, callback, name, &id).await;
+    }
+    draft_callback(&state, callback, &id).await
+}
+
+async fn draft_callback(state: &OrganizationState, callback: Callback<'_>, id: &Uuid) -> Response {
     match store_call!(
         state,
         claim_organization_auth_draft_login(
             &state.origin,
             callback,
-            |issuer| fingerprint(&state, issuer),
+            |issuer| fingerprint(state, issuer),
             state.kms.as_ref()
         )
     ) {
-        Ok(DraftLoginClaim::Denied) => callback_page(true, &id),
+        Ok(DraftLoginClaim::Denied) => callback_page(Some(COOKIE), id),
         Ok(DraftLoginClaim::Exchange(mut attempt)) => {
             let outcome =
                 match verify_claimed_draft_login(&state.enterprise_identity, &mut attempt).await {
@@ -433,19 +471,60 @@ async fn callback(State(state): State<OrganizationState>, request: Request<Body>
                 finish_organization_auth_draft_login(
                     &state.origin,
                     &attempt,
-                    |issuer| fingerprint(&state, issuer),
+                    |issuer| fingerprint(state, issuer),
                     outcome
                 )
             );
-            callback_page(true, &id)
+            callback_page(Some(COOKIE), id)
         }
-        Err(_) => callback_page(false, &id),
+        Err(_) => callback_page(None, id),
     }
 }
 
-fn callback_page(claimed: bool, id: &Uuid) -> Response {
-    let status = if claimed { StatusCode::OK } else { StatusCode::BAD_REQUEST };
-    let mut response = reply(status, "text/html; charset=utf-8", b"<!doctype html><html lang=en><meta charset=utf-8><title>Draft login test</title><p>Return to the original team tab to check the result.</p></html>".to_vec(), id);
+async fn activation_callback(
+    state: &OrganizationState,
+    callback: Callback<'_>,
+    cookie_name: &str,
+    id: &Uuid,
+) -> Response {
+    match store_call!(
+        state,
+        claim_organization_auth_activation(
+            &state.origin,
+            callback,
+            |issuer| fingerprint(state, issuer),
+            state.kms.as_ref()
+        )
+    ) {
+        Ok(ActivationClaim::Denied) => callback_page(Some(cookie_name), id),
+        Ok(ActivationClaim::Exchange(mut attempt)) => {
+            let outcome =
+                match verify_claimed_activation(&state.enterprise_identity, &mut attempt).await {
+                    Ok(()) => DraftLoginOutcome::Verified,
+                    Err(DraftExchangeError::InvalidIdentity) => DraftLoginOutcome::InvalidIdentity,
+                    Err(_) => DraftLoginOutcome::ExchangeFailed,
+                };
+            let _ = store_call!(
+                state,
+                finish_organization_auth_activation(
+                    &attempt,
+                    |issuer| fingerprint(state, issuer),
+                    outcome
+                )
+            );
+            callback_page(Some(cookie_name), id)
+        }
+        Err(_) => callback_page(None, id),
+    }
+}
+
+fn callback_page(cookie_name: Option<&str>, id: &Uuid) -> Response {
+    let (status, title) = match cookie_name {
+        Some(COOKIE) => (StatusCode::OK, "Draft login test"),
+        Some(_) => (StatusCode::OK, "Connection activation"),
+        None => (StatusCode::BAD_REQUEST, "Draft login test"),
+    };
+    let mut response = reply(status, "text/html; charset=utf-8", format!("<!doctype html><html lang=en><meta charset=utf-8><title>{title}</title><p>Return to the original team tab to check the result.</p></html>").into_bytes(), id);
     response.headers_mut().insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"),
@@ -453,13 +532,11 @@ fn callback_page(claimed: bool, id: &Uuid) -> Response {
     response
         .headers_mut()
         .insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    if claimed {
-        response.headers_mut().insert(
-            header::SET_COOKIE,
-            HeaderValue::from_static(
-                "__Host-spl-auth-test=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-            ),
-        );
+    if let Some(name) = cookie_name
+        && let Ok(value) =
+            HeaderValue::from_str(&format!("{name}=; {COOKIE_ATTRIBUTES}; Max-Age=0"))
+    {
+        response.headers_mut().insert(header::SET_COOKIE, value);
     }
     response
 }

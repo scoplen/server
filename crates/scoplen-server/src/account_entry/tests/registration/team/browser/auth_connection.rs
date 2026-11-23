@@ -39,7 +39,7 @@ pub(super) async fn seed_active_connection(f: &Fixture, organization: Uuid, issu
     revision
 }
 
-async fn send(
+pub(super) async fn send(
     tls: &TlsFixture,
     browser: &Browser,
     method: &str,
@@ -58,7 +58,11 @@ fn suspension_headers<'a>(key: &'a str, tag: &'a str) -> [(&'a str, &'a str); 3]
     [("Origin", ORIGIN), ("If-Match", tag), ("Idempotency-Key", key)]
 }
 
-fn connection(reply: &Reply, organization: Uuid, status: ConnectionStatus) -> ConnectionResource {
+pub(super) fn connection(
+    reply: &Reply,
+    organization: Uuid,
+    status: ConnectionStatus,
+) -> ConnectionResource {
     assert_eq!(reply.status, 200);
     reply.private();
     Uuid::parse_str(reply.header("x-request-id").unwrap()).unwrap();

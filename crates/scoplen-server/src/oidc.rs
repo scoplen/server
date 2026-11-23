@@ -10,6 +10,7 @@ mod id_token;
 #[cfg(test)]
 pub(crate) mod provider_test;
 mod trust;
+pub(crate) use exchange::verify_claimed_activation;
 pub use exchange::{DraftExchangeError, verify_claimed_draft_login};
 pub use trust::{DiscoveryError, TrustedIssuer};
 

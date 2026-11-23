@@ -202,13 +202,13 @@ macro_rules! activations {
                 Ok(result)
             }
 
-            async fn family_activation(
+            pub(super) async fn family_activation(
                 tx: &mut Transaction<'_, $db>, session: &CurrentAccountBrowserSession, organization: Uuid, id: Uuid,
             ) -> Result<(Activation, i64, [u8; 32]), Error> {
                 scoplen_model::validate_uuid_v7(id).map_err(|_| Error::InvalidRequest)?;
                 let row = sqlx::query("SELECT a.draft_generation,a.expected_revision,a.phase,a.expires_at_ms,a.issuer,a.client_id,a.space_id,a.trust_fingerprint
                     FROM organization_auth_connection_activations a JOIN organization_auth_drafts d
-                    ON d.organization_id=a.organization_id AND d.generation=a.draft_generation
+                    ON d.organization_id=a.organization_id AND d.generation=a.draft_generation AND d.issuer=a.issuer
                     LEFT JOIN organization_auth_connections c ON c.organization_id=a.organization_id
                     WHERE a.id=$1 AND a.organization_id=$2 AND a.family_id=$3 AND a.created_at_ms<=$4 AND a.expires_at_ms>$4
                     AND (a.expected_revision=c.revision OR (a.expected_revision IS NULL AND c.revision IS NULL))")

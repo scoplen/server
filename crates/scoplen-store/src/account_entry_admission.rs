@@ -71,6 +71,9 @@ pub enum AccountEntryEndpoint {
     OrganizationAuthDraftCreate = 51,
     OrganizationAuthDraftCancel = 52,
     OrganizationAuthDraftTestStart = 53,
+    OrganizationAuthActivationStart = 54,
+    OrganizationAuthActivationConfirm = 55,
+    OrganizationAuthActivationAbandon = 56,
     OrganizationAuthConnectionSuspend = 57,
 }
 

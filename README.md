@@ -489,7 +489,7 @@ write, its original writer can confirm the exact request within 24 hours using t
 and a fresh proof. A later `GET` reports the current generation. Scoplen can save and
 cancel drafts while the issuer is offline. Native teams continue to use their existing
 sign-in and access policies. Organization binding, a linked browser
-login and activation of governance remain pending.
+login and external governance have separate setup and acceptance.
 
 In the team's **Audit** timeline, filter **Resource** by
 `auth_connection_draft:<generation>` to review who saved or cancelled that draft.
@@ -505,7 +505,22 @@ Organization policy permission. To suspend an active revision, send an empty `PO
 outage and retires the installed credential. Native team access continues. After an
 uncertain response, submit the exact original request with a fresh proof in the
 original browser family within 24 hours to recover the original result. Use GET to
-read the current revision. Activation and member linking remain pending.
+read the current revision.
+
+With a saved issuer draft and a registered confidential client, the same Owner can
+stage a connection through `POST /api/v1/orgs/{org}/auth-connection/activations`.
+Supply the draft generation, client credentials and selected Space in the JSON body.
+Use `If-None-Match: *` for an empty slot or the strong current `If-Match` tag for a
+replacement. The original password sign-in must still be within five minutes.
+Retain the response cookie in the original browser and open the one-time authorization
+URL in a second tab. Read the candidate on the initiating tab. Only an explicit empty
+`POST /activations/{attempt}/confirm` under the connection path installs a verified
+candidate. Confirm using the same condition, a new UUIDv7 idempotency key, the original
+browser family and fresh native password proof. The original writer can recover an
+uncertain confirm with the same request and a new DPoP proof while its authority and
+password proof remain current. An authenticated `DELETE /activations/{attempt}`
+abandons the candidate. The Console activation workflow, member linking and enforcement
+of selected external governance still have their own acceptance gates.
 
 ## Repository shape
 

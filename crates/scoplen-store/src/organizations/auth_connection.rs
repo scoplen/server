@@ -3,6 +3,10 @@
 
 mod activation;
 pub use activation::ConnectionActivationStart;
+mod activation_callback;
+pub use activation_callback::{ActivationClaim, ClaimedActivation};
+mod activation_confirm;
+pub use activation_confirm::ActivationConfirmation;
 
 use scoplen_api::{
     account_browser::AccountBrowserAccessScope,
@@ -23,23 +27,24 @@ use super::{
     timestamp,
 };
 
-struct SuspensionReceipt {
+struct TransitionReceipt {
+    account: [u8; 16],
+    key: Uuid,
     origin_digest: [u8; 32],
     request_digest: [u8; 32],
 }
 
-impl SuspensionReceipt {
+impl TransitionReceipt {
     fn new(
         session: &CurrentAccountBrowserSession,
-        organization: Uuid,
-        expected_revision: Uuid,
         key: Uuid,
+        path: &str,
+        condition: &str,
+        purpose: &[u8],
     ) -> Self {
         let origin = session.trusted_origin().as_bytes();
-        let path = format!("/api/v1/orgs/{organization}/auth-connection/suspend");
-        let condition = format!("\"{expected_revision}\"");
         let mut digest = Sha256::new();
-        digest.update(b"spl-organization-auth-connection-suspend-v1\0");
+        digest.update(purpose);
         for field in [
             origin,
             &session.account_id,
@@ -53,13 +58,19 @@ impl SuspensionReceipt {
             digest.update(field);
         }
         Self {
+            account: session.account_id,
+            key,
             origin_digest: Sha256::digest(origin).into(),
             request_digest: digest.finalize().into(),
         }
     }
 }
 
-fn original_suspension(bytes: &[u8], organization: Uuid) -> Result<ConnectionResource, Error> {
+fn original_transition(
+    bytes: &[u8],
+    organization: Uuid,
+    status: ConnectionStatus,
+) -> Result<ConnectionResource, Error> {
     #[derive(Deserialize)]
     struct ReceiptTag {
         etag: String,
@@ -68,7 +79,7 @@ fn original_suspension(bytes: &[u8], organization: Uuid) -> Result<ConnectionRes
     ConnectionResource::from_http_json(
         bytes,
         organization,
-        Some(ConnectionStatus::Suspended),
+        Some(status),
         Some(&tag.etag),
         Some("no-store"),
         Some("no-cache"),
@@ -123,6 +134,41 @@ macro_rules! auth_connections {
                 }).transpose()
             }
 
+            async fn read_transition_receipt(
+                tx: &mut Transaction<'_, $db>,
+                receipt: &TransitionReceipt,
+                organization: Uuid,
+                status: ConnectionStatus,
+            ) -> Result<Option<ConnectionResource>, Error> {
+                let row = sqlx::query("SELECT request_digest,response_json,created_at_ms,expires_at_ms FROM organization_auth_connection_receipts WHERE account_id=$1 AND origin_digest=$2 AND idempotency_key=$3")
+                    .bind(receipt.account.as_slice()).bind(receipt.origin_digest.as_slice())
+                    .bind(receipt.key.as_bytes().as_slice()).fetch_optional(&mut **tx).await?;
+                let Some(row) = row else { return Ok(None); };
+                let Some(created_at) = row.try_get::<Option<i64>, _>("created_at_ms")? else {
+                    return Err(Error::Conflict);
+                };
+                let expires_at: i64 = row.try_get("expires_at_ms")?;
+                let digest: Vec<u8> = row.try_get("request_digest")?;
+                if !(created_at..expires_at).contains(&now_ms()?) || digest != receipt.request_digest {
+                    return Err(Error::Conflict);
+                }
+                let bytes: Vec<u8> = row.try_get("response_json")?;
+                original_transition(&bytes, organization, status).map(Some)
+            }
+
+            async fn record_transition_receipt(
+                tx: &mut Transaction<'_, $db>, receipt: &TransitionReceipt, body: &[u8], now: i64,
+            ) -> Result<(), Error> {
+                let ttl_ms = i64::try_from(ORGANIZATION_CREATION_RECEIPT_SECONDS * 1000)
+                    .map_err(|_| Error::StorageUnavailable)?;
+                let expires_at = now.checked_add(ttl_ms).ok_or(Error::StorageUnavailable)?;
+                sqlx::query("INSERT INTO organization_auth_connection_receipts (account_id,origin_digest,idempotency_key,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+                    .bind(receipt.account.as_slice()).bind(receipt.origin_digest.as_slice())
+                    .bind(receipt.key.as_bytes().as_slice()).bind(receipt.request_digest.as_slice())
+                    .bind(body).bind(now).bind(expires_at).execute(&mut **tx).await?;
+                Ok(())
+            }
+
             /// Read the current public connection revision with live browser and Owner authority.
             ///
             /// # Errors
@@ -160,24 +206,10 @@ macro_rules! auth_connections {
                 scoplen_model::validate_uuid_v7(key).map_err(|_| Error::InvalidRequest)?;
                 let mut tx = self.pool.begin_with($begin).await?;
                 Self::check_auth_connection_management(&mut tx, session, organization, true).await?;
-                let receipt = SuspensionReceipt::new(session, organization, expected_revision, key);
-                let account = session.account_id.as_slice();
-                let key = key.as_bytes().as_slice();
-                let origin_digest = receipt.origin_digest.as_slice();
-                let row = sqlx::query("SELECT request_digest,response_json,created_at_ms,expires_at_ms FROM organization_auth_connection_receipts WHERE account_id=$1 AND origin_digest=$2 AND idempotency_key=$3")
-                    .bind(account).bind(origin_digest).bind(key).fetch_optional(&mut *tx).await?;
-                let now = now_ms()?;
-                if let Some(row) = row {
-                    let Some(created_at) = row.try_get::<Option<i64>, _>("created_at_ms")? else {
-                        return Err(Error::Conflict);
-                    };
-                    let expires_at: i64 = row.try_get("expires_at_ms")?;
-                    let digest: Vec<u8> = row.try_get("request_digest")?;
-                    if !(created_at..expires_at).contains(&now) || digest != receipt.request_digest {
-                        return Err(Error::Conflict);
-                    }
-                    let bytes: Vec<u8> = row.try_get("response_json")?;
-                    let result = original_suspension(&bytes, organization)?;
+                let path = format!("/api/v1/orgs/{organization}/auth-connection/suspend");
+                let condition = format!("\"{expected_revision}\"");
+                let receipt = TransitionReceipt::new(session, key, &path, &condition, b"spl-organization-auth-connection-suspend-v1\0");
+                if let Some(result) = Self::read_transition_receipt(&mut tx, &receipt, organization, ConnectionStatus::Suspended).await? {
                     $actor(&mut tx, session, 0).await?;
                     tx.commit().await?;
                     return Ok(result);
@@ -190,6 +222,7 @@ macro_rules! auth_connections {
                 }
                 value.id = Uuid::now_v7();
                 value.status = ConnectionStatus::Suspended;
+                let now = now_ms()?;
                 value.created_at = timestamp(now)?;
                 let body = value.to_json().map_err(|_| Error::StorageUnavailable)?;
                 let changed = sqlx::query("UPDATE organization_auth_connections SET revision=$1,status='suspended',provider=NULL,trust_fingerprint=NULL,credential=NULL,created_at_ms=$2 WHERE organization_id=$3 AND revision=$4 AND status='active'")
@@ -200,12 +233,7 @@ macro_rules! auth_connections {
                 }
                 sqlx::query("DELETE FROM organization_auth_connection_activations WHERE organization_id=$1")
                     .bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
-                let ttl_ms = i64::try_from(ORGANIZATION_CREATION_RECEIPT_SECONDS * 1000)
-                    .map_err(|_| Error::StorageUnavailable)?;
-                let expires_at = now.checked_add(ttl_ms).ok_or(Error::StorageUnavailable)?;
-                sqlx::query("INSERT INTO organization_auth_connection_receipts (account_id,origin_digest,idempotency_key,request_digest,response_json,created_at_ms,expires_at_ms) VALUES ($1,$2,$3,$4,$5,$6,$7)")
-                    .bind(account).bind(origin_digest).bind(key).bind(receipt.request_digest.as_slice())
-                    .bind(&body).bind(now).bind(expires_at).execute(&mut *tx).await?;
+                Self::record_transition_receipt(&mut tx, &receipt, &body, now).await?;
                 let event = actor_audit(session, serde_json::json!({
                     "action": "organization.auth_connection_suspended",
                     "account_id": Uuid::from_bytes(session.account_id),

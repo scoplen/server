@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! One provider exchange for an already claimed draft login.
+//! One provider exchange for an already claimed Organization login.
 
 use axum::body::Bytes;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::header;
 use scoplen_api::auth_connection_draft::callback::callback_path;
-use scoplen_crypto::{SecretVec, validate_server_origin};
-use scoplen_store::organizations::auth_draft_login::{ClaimedDraftLogin, DraftLoginExchange};
+use scoplen_crypto::{SecretBytes, SecretVec, validate_server_origin};
+use scoplen_store::organizations::{
+    auth_connection::ClaimedActivation,
+    auth_draft_login::{ClaimedDraftLogin, DraftLoginExchange, DraftLoginProvider},
+};
 use serde::Deserialize;
 use thiserror::Error;
 use url::form_urlencoded;
@@ -51,17 +54,27 @@ impl Drop for TokenResponse {
     }
 }
 
-fn current_trust(
-    settings: &EnterpriseIdentitySettings,
-    attempt: &ClaimedDraftLogin,
-) -> Result<TrustedIssuer, DraftExchangeError> {
-    let _ = current_time(attempt.expires_at_ms())?;
-    let trust = TrustedIssuer::from_settings(settings, attempt.provider().0)
-        .map_err(|_| DraftExchangeError::Stale)?;
-    if trust.fingerprint() != attempt.trust_fingerprint() {
-        return Err(DraftExchangeError::Stale);
+struct LoginTarget<'a> {
+    origin: &'a str,
+    issuer: &'a str,
+    provider: &'a DraftLoginProvider,
+    fingerprint: [u8; 32],
+    expires_at_ms: i64,
+}
+
+impl LoginTarget<'_> {
+    fn current_trust(
+        &self,
+        settings: &EnterpriseIdentitySettings,
+    ) -> Result<TrustedIssuer, DraftExchangeError> {
+        let _ = current_time(self.expires_at_ms)?;
+        let trust = TrustedIssuer::from_settings(settings, self.issuer)
+            .map_err(|_| DraftExchangeError::Stale)?;
+        if trust.fingerprint() != self.fingerprint {
+            return Err(DraftExchangeError::Stale);
+        }
+        Ok(trust)
     }
-    Ok(trust)
 }
 
 fn current_time(expires_at_ms: i64) -> Result<i64, DraftExchangeError> {
@@ -83,21 +96,53 @@ pub async fn verify_claimed_draft_login(
     attempt: &mut ClaimedDraftLogin,
 ) -> Result<(), DraftExchangeError> {
     let exchange = attempt.take_exchange().ok_or(DraftExchangeError::Stale)?;
-    let origin = attempt.origin();
     let (issuer, provider) = attempt.provider();
+    let target = LoginTarget {
+        origin: attempt.origin(),
+        issuer,
+        provider,
+        fingerprint: attempt.trust_fingerprint(),
+        expires_at_ms: attempt.expires_at_ms(),
+    };
+    verify_login(settings, &target, &exchange, |nonce| attempt.matches_nonce(nonce)).await
+}
+
+pub(crate) async fn verify_claimed_activation(
+    settings: &EnterpriseIdentitySettings,
+    attempt: &mut ClaimedActivation,
+) -> Result<(), DraftExchangeError> {
+    let exchange = attempt.take_exchange().ok_or(DraftExchangeError::Stale)?;
+    let (issuer, provider) = attempt.provider();
+    let target = LoginTarget {
+        origin: attempt.origin(),
+        issuer,
+        provider,
+        fingerprint: attempt.trust_fingerprint(),
+        expires_at_ms: attempt.expires_at_ms(),
+    };
+    verify_login(settings, &target, &exchange, |nonce| attempt.matches_nonce(nonce)).await
+}
+
+async fn verify_login(
+    settings: &EnterpriseIdentitySettings,
+    target: &LoginTarget<'_>,
+    exchange: &DraftLoginExchange,
+    matches_nonce: impl FnOnce(&SecretBytes<32>) -> bool + Send,
+) -> Result<(), DraftExchangeError> {
+    let LoginTarget { origin, issuer, provider, expires_at_ms, .. } = *target;
     if !origin.starts_with("https://") || validate_server_origin(origin).is_err() {
         return Err(DraftExchangeError::Stale);
     }
     let path = callback_path(issuer).map_err(|_| DraftExchangeError::Stale)?;
     let redirect_uri = format!("{origin}{path}");
-    let trust = current_trust(settings, attempt)?;
-    let _ = current_time(attempt.expires_at_ms())?;
-    let reply = exchange_code(&trust, &provider.token_endpoint, &redirect_uri, &exchange).await?;
+    let trust = target.current_trust(settings)?;
+    let _ = current_time(expires_at_ms)?;
+    let reply = exchange_code(&trust, &provider.token_endpoint, &redirect_uri, exchange).await?;
     let id = IdToken::parse(&reply.id_token)?;
-    let trust = current_trust(settings, attempt)?;
-    let _ = current_time(attempt.expires_at_ms())?;
+    let trust = target.current_trust(settings)?;
+    let _ = current_time(expires_at_ms)?;
     let keys = signing_keys(&trust, &provider.jwks_uri).await?;
-    let now = current_time(attempt.expires_at_ms())?;
+    let now = current_time(expires_at_ms)?;
     let client = std::str::from_utf8(exchange.material.credentials.client_id.as_bytes())
         .map_err(|_| DraftExchangeError::ExchangeFailed)?;
     id.verify(
@@ -109,7 +154,7 @@ pub async fn verify_claimed_draft_login(
             code: exchange.code.as_bytes(),
             now,
         },
-        |nonce| attempt.matches_nonce(nonce),
+        matches_nonce,
     )
 }
 
