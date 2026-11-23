@@ -1034,7 +1034,7 @@ test("recovery probe follows the latest SQLite migration and preserves its old-i
   );
 });
 
-test("actual SQLite recovery inspection preserves old rows and requires current Grant, request, draft, browser and KRL tables", async () => {
+test("actual SQLite recovery inspection preserves old rows and requires current Grant, request, draft login, browser and KRL tables", async () => {
   const directory = await mkdtemp(join(tmpdir(), "scoplen-recovery-schema-"));
   const path = join(directory, "scoplen.sqlite");
   const database = new DatabaseSync(path);
@@ -1084,6 +1084,7 @@ test("actual SQLite recovery inspection preserves old rows and requires current 
       "organization_access_requests",
       "organization_auth_drafts",
       "organization_auth_draft_receipts",
+      "organization_auth_draft_tests",
     ]) {
       database.exec(`CREATE TABLE ${table} (id BLOB PRIMARY KEY)`);
       assert.throws(() => inspectDatabase(path, false), {
@@ -1099,6 +1100,7 @@ test("actual SQLite recovery inspection preserves old rows and requires current 
       "organization_access_requests",
       "organization_auth_drafts",
       "organization_auth_draft_receipts",
+      "organization_auth_draft_tests",
       "account_browser_families",
       "organization_user_ca_krl_activation",
     ]) {

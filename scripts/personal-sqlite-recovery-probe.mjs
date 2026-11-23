@@ -60,7 +60,7 @@ if (invoked) {
 }
 
 const oldMigration = 20261024030000;
-const newMigration = 20261123000000;
+const newMigration = 20261123010000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -240,7 +240,7 @@ export function inspectDatabase(path, current) {
     );
     const accessTables = database
       .prepare(
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_access_requests', 'organization_auth_draft_receipts', 'organization_auth_drafts', 'organization_grants') ORDER BY name",
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_access_requests', 'organization_auth_draft_receipts', 'organization_auth_draft_tests', 'organization_auth_drafts', 'organization_grants') ORDER BY name",
       )
       .all()
       .map((row) => row.name);
@@ -250,6 +250,7 @@ export function inspectDatabase(path, current) {
         ? [
             "organization_access_requests",
             "organization_auth_draft_receipts",
+            "organization_auth_draft_tests",
             "organization_auth_drafts",
             "organization_grants",
           ]
