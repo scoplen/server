@@ -10,6 +10,9 @@ use rustls::{
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+mod personal;
+pub(super) use personal::personal_sync_after_revocation;
+
 pub(super) struct TlsFixture {
     address: SocketAddr,
     roots: RootCertStore,
