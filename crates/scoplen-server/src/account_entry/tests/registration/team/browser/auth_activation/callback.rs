@@ -128,14 +128,61 @@ fn check_callback(reply: &Reply, cleared_cookie: Option<&str>) {
     assert_eq!(reply.header("set-cookie"), expected.as_deref());
 }
 
+async fn assert_native_identity_boundary(
+    tls: &TlsFixture,
+    owner: &Actor,
+    browser: &Browser,
+    connected_org: Uuid,
+    native_org: Uuid,
+) {
+    for org in [connected_org, native_org] {
+        let path = format!("/api/v1/orgs/{org}");
+        for reply in [tls.get(owner, &path).await, send(tls, browser, "GET", &path, &[], &[]).await]
+        {
+            assert_eq!(reply.status, 200);
+            assert_eq!(OrganizationResource::from_json(&reply.body).unwrap().id, org);
+        }
+    }
+    let jwks = tls
+        .send(
+            Request::get("/.well-known/jwks.json")
+                .header("Host", "example.com")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(jwks.status, 200);
+    let jwks: serde_json::Value = serde_json::from_slice(&jwks.body).unwrap();
+    assert!(jwks["keys"].as_array().is_some_and(|keys| !keys.is_empty()));
+
+    let providers = format!("/api/v1/orgs/{connected_org}/identity-providers");
+    let provider = format!("{providers}/{}", Uuid::now_v7());
+    for (method, path) in [
+        ("GET", providers.as_str()),
+        ("POST", providers.as_str()),
+        ("GET", provider.as_str()),
+        ("PATCH", provider.as_str()),
+        ("DELETE", provider.as_str()),
+        ("GET", "/scim/v2/Users"),
+        ("POST", "/scim/v2/Users"),
+        ("GET", "/scim/v2/Groups"),
+        ("POST", "/scim/v2/Groups"),
+    ] {
+        let reply = send(tls, browser, method, path, &[("Origin", ORIGIN)], &[]).await;
+        assert_eq!(reply.status, 404, "{method} {path}");
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn verify_and_confirm(f: &Fixture) {
     let provider = Provider::start(f.directory.join("activation-verification"), ORIGIN).await;
     let tls = TlsFixture::start_with_enterprise_identity(f, provider.settings.clone()).await;
-    let owner = actor(f, "activation-callback-owner").await;
+    let mut owner = actor(f, "activation-callback-owner").await;
     let org = create_team(f, &owner).await.id;
+    let native_org = create_team(f, &owner).await.id;
     let browser = login(f, &owner.registration).await;
     let other_browser = login(f, &owner.registration).await;
+    assert_native_identity_boundary(&tls, &owner, &browser, org, native_org).await;
     let draft = save_draft(&tls, &browser, org, &provider.issuer).await;
     let navigation =
         start_navigation(&tls, &browser, &provider, &draft, ExpectedRevision::Empty).await;
@@ -247,7 +294,16 @@ async fn verify_and_confirm(f: &Fixture) {
         1
     );
     assert_eq!(f.count("SELECT count(*) FROM audit_events").await, audit + 5);
-    assert_eq!(current_team(f, &owner, org).await.id, org);
+    owner.token = authenticate(f, &owner.registration).await;
+    let browser = login(f, &owner.registration).await;
+    assert_native_identity_boundary(&tls, &owner, &browser, org, native_org).await;
+    let native_connection = format!("/api/v1/orgs/{native_org}/auth-connection");
+    send(&tls, &browser, "GET", &native_connection, &[], &[]).await.problem(
+        404,
+        "organization.not_found",
+        false,
+    );
+    assert_eq!(provider.counts(), [2, 2, 0]);
     provider.close().await;
 }
 
