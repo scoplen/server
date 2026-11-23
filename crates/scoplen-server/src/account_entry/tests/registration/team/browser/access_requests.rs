@@ -16,6 +16,8 @@ use scoplen_api::{
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod offboarding;
+
 async fn transport(
     f: &Fixture,
     native: &Actor,

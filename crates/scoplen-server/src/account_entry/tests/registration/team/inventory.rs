@@ -88,7 +88,7 @@ fn policy(reply: &Reply, status: u16) -> PolicyResource {
     )
     .expect("shared Policy")
 }
-fn sync_problem(reply: &Reply, status: u16, code: &str) {
+pub(super) fn sync_problem(reply: &Reply, status: u16, code: &str) {
     assert_eq!(reply.status, status, "{}", String::from_utf8_lossy(&reply.body));
     reply.private();
     assert_eq!(reply.header("content-type"), Some("application/problem+cbor"));
