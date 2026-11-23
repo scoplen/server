@@ -7,6 +7,7 @@ use scoplen_api::auth_connection_draft::{DraftCreate, DraftResource};
 use super::super::tls::TlsFixture;
 use super::*;
 
+mod audit_projection;
 mod retained_scope;
 
 struct Writer<'a> {

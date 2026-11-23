@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/326b2d2d7f097c9707e29acd69bbc22fec3cd87d/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/fb8d241299b8e41c5c9277789d8625d194542d2e/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -282,7 +282,7 @@ export interface AccessRequestListQuery { view: AccessRequestView; limit?: numbe
 export type AccessRequestBodyTooLargeProblem = ProblemDetails & { status: 413; code: "organization.invalid_request"; changed: false; retryable: false; };
 // END GENERATED AccessRequests
 // BEGIN GENERATED Audit
-export type AuditResourceKind = "organization" | "invitation" | "membership" | "host" | "host_group" | "access_profile" | "route" | "trust_record" | "snippet" | "gateway_network" | "group" | "policy" | "grant" | "access_request" | "certificate_authority" | "certificate";
+export type AuditResourceKind = "organization" | "invitation" | "membership" | "host" | "host_group" | "access_profile" | "route" | "trust_record" | "snippet" | "gateway_network" | "group" | "policy" | "grant" | "access_request" | "auth_connection_draft" | "certificate_authority" | "certificate";
 export type AuditCategory = "authentication" | "authorization" | "account_change" | "scoplen" | "unknown";
 export type AuditOutcome = "success" | "failure" | "unknown";
 export interface AuditResource { kind: AuditResourceKind; id: string; [extension: string]: unknown; }

@@ -60,6 +60,7 @@ const resourceKinds: AuditResourceKind[] = [
   "policy",
   "grant",
   "access_request",
+  "auth_connection_draft",
   "certificate_authority",
   "certificate",
 ];

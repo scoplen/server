@@ -132,6 +132,9 @@ fn classification(
         "organization.access_request_expired" => {
             (Authorization, "request_id", Some(Kind::AccessRequest), ActorKind::System)
         }
+        "organization.auth_draft_created" | "organization.auth_draft_cancelled" => {
+            (Scoplen, "generation", Some(Kind::AuthConnectionDraft), ActorKind::Either)
+        }
         "organization.user_ca_krl_activated" => {
             (Authorization, "authority_id", Some(Kind::CertificateAuthority), ActorKind::System)
         }
