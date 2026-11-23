@@ -63,19 +63,54 @@ pub struct DraftLoginStart<'a> {
 pub struct ClaimedDraftLogin {
     binding: AttemptBinding,
     nonce_digest: SecretBytes<32>,
-    /// Latest time to begin exchange, bounded by the attempt and original family's lifetime.
-    pub expires_at_ms: i64,
-    pub issuer: String,
-    pub provider: DraftLoginProvider,
+    trust_fingerprint: [u8; 32],
+    expires_at_ms: i64,
+    issuer: String,
+    provider: DraftLoginProvider,
+    origin: String,
+    exchange: Option<DraftLoginExchange>,
+}
+
+/// In-memory material for the single outbound exchange.
+pub struct DraftLoginExchange {
     pub code: SecretVec,
     pub material: DraftLoginMaterial,
 }
 
 impl ClaimedDraftLogin {
+    /// The exact issuer and discovered endpoints bound to the original draft.
+    #[must_use]
+    pub fn provider(&self) -> (&str, &DraftLoginProvider) {
+        (&self.issuer, &self.provider)
+    }
+
+    /// The HTTPS origin of the original browser family.
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Exchange deadline, bounded by the attempt and original browser family's lifetime.
+    #[must_use]
+    pub const fn expires_at_ms(&self) -> i64 {
+        self.expires_at_ms
+    }
+
     /// Compare the original unencoded nonce with the provider's decoded nonce.
     #[must_use]
     pub fn matches_nonce(&self, nonce: &SecretBytes<32>) -> bool {
         self.nonce_digest == digest(nonce)
+    }
+
+    /// Trust admitted at initiation and confirmed by the claim transaction.
+    #[must_use]
+    pub const fn trust_fingerprint(&self) -> [u8; 32] {
+        self.trust_fingerprint
+    }
+
+    /// Remove the request credentials before sending the one permitted exchange.
+    pub fn take_exchange(&mut self) -> Option<DraftLoginExchange> {
+        self.exchange.take()
     }
 }
 
@@ -273,7 +308,8 @@ macro_rules! draft_login {
                     .bind(binding.id.as_bytes().as_slice()).bind(now).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
                 let issuer: String = row.try_get("issuer")?;
                 let fingerprint: Vec<u8> = row.try_get("trust_fingerprint")?;
-                if trust(&issuer).as_ref().map(<[u8;32]>::as_slice) != Some(fingerprint.as_slice()) {
+                let trust_fingerprint: [u8; 32] = fingerprint.try_into().map_err(|_| Error::StorageUnavailable)?;
+                if trust(&issuer) != Some(trust_fingerprint) {
                     return Err(Error::NotFound);
                 }
                 let provider: DraftLoginProvider = serde_json::from_str(row.try_get("provider")?).map_err(|_| Error::StorageUnavailable)?;
@@ -294,7 +330,8 @@ macro_rules! draft_login {
                         let material = envelope::open(binding.id, binding.generation, &encrypted, kms)?;
                         let nonce: Vec<u8> = row.try_get("nonce_digest")?;
                         let nonce_digest = SecretBytes::from_slice(&nonce).ok_or(Error::StorageUnavailable)?;
-                        DraftLoginClaim::Exchange(Box::new(ClaimedDraftLogin { binding, nonce_digest, expires_at_ms, issuer, provider, code, material }))
+                        DraftLoginClaim::Exchange(Box::new(ClaimedDraftLogin { binding, nonce_digest, trust_fingerprint,
+                            expires_at_ms, issuer, provider, origin: origin.to_owned(), exchange: Some(DraftLoginExchange { code, material }) }))
                     }
                 };
                 if now_ms()? >= expires_at_ms { return Err(Error::NotFound); }

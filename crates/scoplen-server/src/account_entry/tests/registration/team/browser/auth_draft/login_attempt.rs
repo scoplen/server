@@ -10,11 +10,17 @@ use scoplen_api::auth_connection_draft::{
 use scoplen_store::organizations::{
     OrganizationStoreError as Error,
     auth_draft_login::{
-        DraftLoginClaim, DraftLoginMaterial, DraftLoginOutcome, DraftLoginProvider, DraftLoginStart,
+        ClaimedDraftLogin, DraftLoginClaim, DraftLoginMaterial, DraftLoginOutcome,
+        DraftLoginProvider, DraftLoginStart,
     },
 };
 
 use super::*;
+use crate::oidc::{
+    DraftExchangeError, TrustedIssuer,
+    provider_test::{NONCE, Provider},
+    verify_claimed_draft_login,
+};
 
 const ISSUER: &str = "https://identity.example.test/tenant/";
 const TRUST: [u8; 32] = [13; 32];
@@ -109,12 +115,14 @@ async fn lifecycle(f: &Fixture) {
             }
             assert!(matches!(store.claim_organization_auth_draft_login(ORIGIN, callback(&path, &state, &browser_binding, code), |_| Some([11; 32]), kms.as_ref()).await, Err(Error::NotFound)));
             let (a, b) = tokio::join!(claim(), claim());
-            let ((Ok(DraftLoginClaim::Exchange(claimed)), Err(Error::NotFound))
-                | (Err(Error::NotFound), Ok(DraftLoginClaim::Exchange(claimed)))) = (a, b) else {
+            let ((Ok(DraftLoginClaim::Exchange(mut claimed)), Err(Error::NotFound))
+                | (Err(Error::NotFound), Ok(DraftLoginClaim::Exchange(mut claimed)))) = (a, b) else {
                 panic!("one concurrent callback may exchange");
             };
-            assert_eq!(claimed.material, material);
-            assert_eq!(claimed.code.as_bytes(), b"fixture-code");
+            let exchange = claimed.take_exchange().unwrap();
+            assert_eq!(exchange.material, material);
+            assert_eq!(exchange.code.as_bytes(), b"fixture-code");
+            assert!(claimed.take_exchange().is_none());
             assert!(claimed.matches_nonce(&nonce));
             assert!(!claimed.matches_nonce(&state));
             assert_eq!(status(attempt.id).await.unwrap().status, DraftLoginStatus::Pending);
@@ -165,4 +173,134 @@ browser_tests!(
     sqlite_draft_login_attempt_is_durable_and_single_use,
     postgres_draft_login_attempt_is_durable_and_single_use,
     lifecycle
+);
+
+async fn provider_outcome(
+    provider: &Provider,
+    claimed: &mut ClaimedDraftLogin,
+    scenario: u8,
+    expected: Result<(), DraftExchangeError>,
+    counts: [usize; 3],
+) -> (DraftLoginOutcome, DraftLoginStatus) {
+    let untrusted = crate::EnterpriseIdentitySettings::default();
+    let settings = if scenario == 5 { &untrusted } else { &provider.settings };
+    let observed = verify_claimed_draft_login(settings, claimed).await;
+    assert_eq!(observed, expected);
+    if scenario == 6 {
+        provider.restore_ca();
+    }
+    assert_eq!(
+        verify_claimed_draft_login(&provider.settings, claimed).await,
+        Err(DraftExchangeError::Stale)
+    );
+    assert_eq!(provider.counts(), counts);
+    match observed {
+        Ok(()) => (DraftLoginOutcome::Verified, DraftLoginStatus::Verified),
+        Err(DraftExchangeError::InvalidIdentity) => {
+            (DraftLoginOutcome::InvalidIdentity, DraftLoginStatus::Failed)
+        }
+        Err(_) => (DraftLoginOutcome::ExchangeFailed, DraftLoginStatus::Failed),
+    }
+}
+
+async fn provider_exchange(f: &Fixture) {
+    let provider = Provider::start(f.directory.join("oidc-provider"), ORIGIN).await;
+    let owner = actor(f, "draft-exchange-owner").await;
+    let organization = create_team(f, &owner).await.id;
+    let browser = login(f, &owner.registration).await;
+    let token = AccountBrowserAccessToken::parse(&browser.access).unwrap();
+    let kms = test_kms();
+    let issuer = &provider.issuer;
+    let trust = |issuer: &str| {
+        TrustedIssuer::from_settings(&provider.settings, issuer)
+            .ok()
+            .map(|entry| entry.fingerprint())
+    };
+    let fingerprint = trust(issuer).unwrap();
+    let path = callback_path(issuer).unwrap();
+    let metadata = provider.metadata();
+    let browser_binding = SecretBytes::new([41; 32]);
+    let nonce = SecretBytes::new(NONCE);
+    let material = Provider::login_material();
+    macro_rules! verify {
+        ($store:expr) => {{
+            let store = $store;
+            let session =
+                store.current_account_browser_session(&token, ORIGIN).await.unwrap().unwrap();
+            let draft = store
+                .organization_auth_draft(
+                    &session,
+                    0,
+                    ORIGIN,
+                    organization,
+                    &DraftRequest::Create(Uuid::now_v7(), DraftCreate { issuer: issuer.clone() }),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            for (value, code, expected, counts) in [
+                (1, "verified%2Bcode", Ok(()), [1, 1, 0]),
+                (2, "wrong-nonce", Err(DraftExchangeError::InvalidIdentity), [2, 2, 0]),
+                (3, "redirect", Err(DraftExchangeError::ExchangeFailed), [3, 2, 0]),
+                (4, "large", Err(DraftExchangeError::ExchangeFailed), [4, 2, 0]),
+                (5, "verified%2Bcode", Err(DraftExchangeError::Stale), [4, 2, 0]),
+                (6, "updated-ca", Err(DraftExchangeError::Stale), [5, 2, 0]),
+            ] {
+                let state = SecretBytes::new([value; 32]);
+                let start = DraftLoginStart {
+                    organization,
+                    if_match: &draft.etag(),
+                    issuer,
+                    provider: &metadata,
+                    trust_fingerprint: fingerprint,
+                    state: &state,
+                    browser_binding: &browser_binding,
+                    nonce: &nonce,
+                    material: &material,
+                };
+                let attempt = store
+                    .start_organization_auth_draft_login(&session, &start, trust, kms.as_ref())
+                    .await
+                    .unwrap();
+                let code = format!("code={code}");
+                let claimed = store
+                    .claim_organization_auth_draft_login(
+                        ORIGIN,
+                        callback(&path, &state, &browser_binding, &code),
+                        trust,
+                        kms.as_ref(),
+                    )
+                    .await
+                    .unwrap();
+                let DraftLoginClaim::Exchange(mut claimed) = claimed else {
+                    panic!("expected one code claim");
+                };
+                let (outcome, status) =
+                    provider_outcome(&provider, &mut claimed, value, expected, counts).await;
+                store
+                    .finish_organization_auth_draft_login(ORIGIN, &claimed, trust, outcome)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    store
+                        .organization_auth_draft_login_status(&session, organization, attempt.id)
+                        .await
+                        .unwrap()
+                        .status,
+                    status
+                );
+            }
+        }};
+    }
+    match &f.backend {
+        AuthBackend::Sqlite(store) => verify!(store),
+        AuthBackend::Postgres(store) => verify!(store),
+    }
+    provider.close().await;
+}
+
+browser_tests!(
+    sqlite_draft_login_uses_one_verified_tls_exchange,
+    postgres_draft_login_uses_one_verified_tls_exchange,
+    provider_exchange
 );

@@ -5,7 +5,12 @@ use scoplen_api::auth_connection_draft::callback::IssuerIdentification;
 use serde::Deserialize;
 use url::{Origin, Url};
 
+mod exchange;
+mod id_token;
+#[cfg(test)]
+pub(crate) mod provider_test;
 mod trust;
+pub use exchange::{DraftExchangeError, verify_claimed_draft_login};
 pub use trust::{DiscoveryError, TrustedIssuer};
 
 /// Endpoints and issuer identification accepted for a single draft login attempt.

@@ -4,15 +4,16 @@
 use std::{io, net::IpAddr, sync::Arc, time::Duration};
 
 use ipnet::IpNet;
-use reqwest::{Certificate, Client, StatusCode, dns, header};
+use reqwest::{Certificate, Client, RequestBuilder, StatusCode, dns, header};
 use scoplen_api::auth_connection_draft::validate_issuer;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::{Host, Url};
+use zeroize::Zeroizing;
 
 use crate::EnterpriseIdentitySettings;
 
-use super::{ProviderMetadata, parse_discovery};
+use super::{ProviderMetadata, https_url, parse_discovery};
 
 const DISCOVERY_LIMIT: usize = 65_536;
 
@@ -38,7 +39,7 @@ pub struct TrustedIssuer {
     issuer: String,
     url: Url,
     fingerprint: [u8; 32],
-    client: Client,
+    pub(super) client: Client,
 }
 
 impl TrustedIssuer {
@@ -106,45 +107,61 @@ impl TrustedIssuer {
     pub async fn discover(&self) -> Result<ProviderMetadata, DiscoveryError> {
         let discovery =
             format!("{}/.well-known/openid-configuration", self.issuer.trim_end_matches('/'));
-        let mut response = self
-            .client
-            .get(discovery)
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .send()
-            .await
-            .map_err(|_| DiscoveryError::Unavailable)?;
-        let status = response.status();
-        if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(DiscoveryError::Unavailable);
-        }
-        if status != StatusCode::OK || !json_content_type(response.headers()) {
-            return Err(DiscoveryError::Incompatible);
-        }
-        if response.content_length().is_some_and(|length| length > DISCOVERY_LIMIT as u64) {
-            return Err(DiscoveryError::Incompatible);
-        }
-        let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| DiscoveryError::Unavailable)? {
-            if chunk.len() > DISCOVERY_LIMIT - body.len() {
-                return Err(DiscoveryError::Incompatible);
-            }
-            body.extend_from_slice(&chunk);
-        }
+        let body = read_json(self.client.get(discovery), DISCOVERY_LIMIT, false).await?;
         let document = parse_discovery(&body).map_err(|_| DiscoveryError::Incompatible)?;
         document
             .check(&self.issuer, Some(&self.url.origin()))
             .map_err(|_| DiscoveryError::Incompatible)?;
         Ok(document.into_metadata())
     }
+
+    pub(super) fn pinned_endpoint(&self, endpoint: &str) -> Option<Url> {
+        https_url(endpoint).filter(|url| url.origin() == self.url.origin() && url.query().is_none())
+    }
 }
 
-fn json_content_type(headers: &header::HeaderMap) -> bool {
-    headers
+pub(super) async fn read_json(
+    request: RequestBuilder,
+    limit: usize,
+    jwks: bool,
+) -> Result<Zeroizing<Vec<u8>>, DiscoveryError> {
+    let accept =
+        if jwks { "application/jwk-set+json, application/json" } else { "application/json" };
+    let mut response = request
+        .header(header::ACCEPT, accept)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .send()
+        .await
+        .map_err(|_| DiscoveryError::Unavailable)?;
+    let status = response.status();
+    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(DiscoveryError::Unavailable);
+    }
+    let headers = response.headers();
+    let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        .map(str::trim);
+    if status != StatusCode::OK
+        || headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+        || !content_type.is_some_and(|value| {
+            value.eq_ignore_ascii_case("application/json")
+                || jwks && value.eq_ignore_ascii_case("application/jwk-set+json")
+        })
+        || headers.get_all(header::CONTENT_ENCODING).iter().any(|value| value != "identity")
+        || response.content_length().is_some_and(|length| length > limit as u64)
+    {
+        return Err(DiscoveryError::Incompatible);
+    }
+    let mut body = Zeroizing::new(Vec::new());
+    while let Some(chunk) = response.chunk().await.map_err(|_| DiscoveryError::Unavailable)? {
+        if chunk.len() > limit - body.len() {
+            return Err(DiscoveryError::Incompatible);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 fn fingerprint(issuer: &str, networks: &[IpNet], ca: Option<&[u8]>) -> [u8; 32] {
