@@ -467,6 +467,12 @@ OIDC settings for your Auth administrator. The Console derives them from the ver
 session's HTTPS origin and the issuer as saved, including its path and trailing slash.
 The same settings are available through `splctl auth registration-settings`.
 
+Deployment operators can prepare `[[enterprise_identity.trusted_issuers]]` entries with
+the exact issuer, the approved IPv4 or IPv6 CIDRs, and an optional `ca_certificate` PEM
+bundle. Use identical entries on all API replicas. Run `spl-server --validate-config`
+to check these settings locally. The browser test still requires the server-side provider
+exchange and callback.
+
 API clients use `/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
 `auth-drafts:manage` and a fresh DPoP proof. Current Organization policy must permit the
 operation. A browser mutation also needs the deployment's trusted Origin.

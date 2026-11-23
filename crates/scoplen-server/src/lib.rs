@@ -42,8 +42,9 @@ mod test_pool_close;
 mod test_support;
 
 pub use config::{
-    AccountSettings, BackupSettings, Config, ConfigError, ConsoleSettings, KmsSettings,
-    ObjectStorageSettings, OrganizationSettings, SecretValue, StorageSettings, TlsMode,
+    AccountSettings, BackupSettings, Config, ConfigError, ConsoleSettings,
+    EnterpriseIdentitySettings, KmsSettings, ObjectStorageSettings, OrganizationSettings,
+    SecretValue, StorageSettings, TlsMode, TrustedIssuerSettings,
 };
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};

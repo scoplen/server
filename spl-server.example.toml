@@ -35,6 +35,13 @@ used_account_id_limit = 1048576
 # Explicitly enable Account self-service team creation. Existing team discovery stays available.
 allow_creation = false
 
+# Optional issuer trust for Organization draft login tests. With no entries, tests are disabled.
+# Use the same entries on every API replica. List only networks assigned to the issuer.
+# [[enterprise_identity.trusted_issuers]]
+# issuer = "https://auth.example.test/issuer"
+# addresses = ["192.0.2.10/32", "2001:db8::10/128"]
+# ca_certificate = "./issuer-ca.pem"
+
 [backup]
 # Worker-only scheduling; UTC HH:MM, with configuration changes applied after restart.
 enabled = false

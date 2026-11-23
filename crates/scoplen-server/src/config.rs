@@ -15,6 +15,9 @@ use thiserror::Error;
 
 use crate::roles::resolve_roles;
 
+mod enterprise_identity;
+pub use enterprise_identity::{EnterpriseIdentitySettings, TrustedIssuerSettings};
+
 /// Server configuration loaded from TOML and environment overrides.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -33,6 +36,8 @@ pub struct Config {
     pub accounts: AccountSettings,
     /// Explicit deployment policy for Account self-service team creation.
     pub organizations: OrganizationSettings,
+    /// Operator-controlled trust policy for optional Organization login tests.
+    pub enterprise_identity: EnterpriseIdentitySettings,
     /// API-role browser console assets.
     pub console: ConsoleSettings,
     /// Optional daily encrypted local SQLite archives run by Worker.
@@ -224,6 +229,7 @@ impl Config {
         self.sync.write_body_limits()?;
         self.sync.read_body_limits()?;
         self.accounts.validate()?;
+        self.enterprise_identity.validate()?;
         self.backup.validate()?;
         if self.backup.enabled {
             crate::backup::validate_schedule(self)
