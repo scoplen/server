@@ -4,6 +4,8 @@
 mod admission_migrations;
 #[path = "support/auth_connection_migration.rs"]
 mod auth_connection_migration;
+#[path = "support/member_link_migration.rs"]
+mod member_link_migration;
 mod support;
 
 use admission_migrations::{apply_admission_migration, assert_retained_admission};
@@ -157,6 +159,7 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
     assert_retained_admission!(store.pool(), 46_i64..=57);
+    member_link_migration::sqlite::check(store.pool(), ids.0, ids.1, ids.3, families[0]).await;
     auth_connection_migration::sqlite::check_preflights(store.pool(), families).await;
     auth_connection_migration::sqlite::check(store.pool(), ids.0, ids.3).await;
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
@@ -196,6 +199,7 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
     assert_retained_admission!(store.pool(), 46_i64..=57);
+    member_link_migration::postgres::check(store.pool(), ids.0, ids.1, ids.3, families[0]).await;
     auth_connection_migration::postgres::check_preflights(store.pool(), families).await;
     auth_connection_migration::postgres::check(store.pool(), ids.0, ids.3).await;
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
