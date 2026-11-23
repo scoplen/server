@@ -533,9 +533,12 @@ macro_rules! teams {
                 if next_status!=TeamMemberStatus::Active {Self::revoke_user_ca_serials(&mut tx,organization,Some(current.account_id),now).await?;}
                 sqlx::query("UPDATE organization_memberships SET status=$1,roles_json=$2,updated_at_ms=CASE WHEN updated_at_ms>=$3 THEN updated_at_ms+1 ELSE $3 END WHERE organization_id=$4 AND id=$5")
                     .bind(status).bind(roles_json(next_roles)?).bind(now).bind(organization.as_bytes().as_slice()).bind(id.as_bytes().as_slice()).execute(&mut *tx).await?;
-                if next_status!=TeamMemberStatus::Active {Self::clear_organization_groups(&mut tx,organization,Some(id),now).await?;}
-                if next_status!=TeamMemberStatus::Active {Self::withdraw_organization_grants(&mut tx,organization,Some(id),now).await?;}
-                if next_status!=TeamMemberStatus::Active {Self::fence_organization_auth_links(&mut tx,organization,Some(id),true).await?;}
+                if next_status!=TeamMemberStatus::Active {
+                    Self::clear_organization_groups(&mut tx,organization,Some(id),now).await?;
+                    Self::withdraw_organization_grants(&mut tx,organization,Some(id),now).await?;
+                    Self::fence_organization_auth_links(&mut tx,organization,Some(id),true).await?;
+                    Self::revoke_shared_vault_recipients(&mut tx,organization,Some(id)).await?;
+                }
                 Self::team_revision(&mut tx,organization,now).await?;
                 Self::team_audit(&mut tx,expected,organization,if request.is_some() {"organization.member_updated"} else {"organization.member_removed"},id,now).await?;
                 Self::queue_memberships_notification(&mut tx,current.account_id.into_bytes()).await?;
@@ -588,6 +591,7 @@ macro_rules! teams {
                 Self::clear_organization_groups(&mut tx,organization,None,now).await?;
                 Self::withdraw_organization_grants(&mut tx,organization,None,now).await?;
                 Self::fence_organization_auth_links(&mut tx,organization,None,true).await?;
+                Self::revoke_shared_vault_recipients(&mut tx,organization,None).await?;
                 sqlx::query("UPDATE organization_invitations SET status='revoked',updated_at_ms=$1 WHERE organization_id=$2 AND status IN ('pending','locked')")
                     .bind(now).bind(organization.as_bytes().as_slice()).execute(&mut *tx).await?;
                 Self::team_audit(&mut tx,expected,organization,"organization.dissolved",organization,now).await?;
@@ -596,6 +600,33 @@ macro_rules! teams {
                 Self::save_team_receipt(&mut tx,&expected.account_id(),organization,key,3,&request_digest,None,&response,now).await?;
                 $principal(&mut tx, expected, expires_at).await?;
                 tx.commit().await.map_err(|_|OrganizationStoreError::CommitOutcomeUnknown)?; Ok(receipt)
+            }
+
+            // The team lock and membership writes are already held. Native withdrawal
+            // cannot depend on the departing recipient still being a vault admin.
+            async fn revoke_shared_vault_recipients(
+                tx: &mut Transaction<'_, $db>, organization: Uuid, membership: Option<Uuid>,
+            ) -> Result<(), OrganizationStoreError> {
+                let membership = membership.as_ref().map(|id| id.as_bytes().as_slice());
+                if let Some(membership) = membership {
+                    sqlx::query("UPDATE sync_vaults SET rotation_pending=TRUE WHERE vault_id IN (
+                        SELECT departing.vault_id FROM organization_shared_vault_recipients departing
+                        WHERE departing.organization_id=$1 AND departing.membership_id=$2
+                        AND EXISTS (
+                            SELECT 1 FROM organization_shared_vault_recipients remaining
+                            JOIN organization_memberships m ON m.organization_id=remaining.organization_id
+                                AND m.id=remaining.membership_id AND m.account_id=remaining.account_id
+                            WHERE remaining.vault_id=departing.vault_id AND m.status='active'
+                        )
+                    )")
+                    .bind(organization.as_bytes().as_slice()).bind(membership).execute(&mut **tx).await?;
+                }
+                sqlx::query("DELETE FROM sync_vault_members WHERE (vault_id,account_id) IN (
+                    SELECT vault_id,account_id FROM organization_shared_vault_recipients
+                    WHERE organization_id=$1 AND (membership_id=$2 OR $2 IS NULL)
+                )")
+                .bind(organization.as_bytes().as_slice()).bind(membership).execute(&mut **tx).await?;
+                Ok(())
             }
         }
     };

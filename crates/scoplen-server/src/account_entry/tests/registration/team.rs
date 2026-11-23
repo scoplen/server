@@ -21,6 +21,7 @@ use super::*;
 
 mod browser;
 mod inventory;
+mod shared_vaults;
 mod tls;
 
 struct Fixture {
@@ -475,6 +476,18 @@ async fn lifecycle(f: &Fixture) {
     let accepted_body = reply.body;
     assert_eq!(f.revision(org).await, 2);
     assert_eq!(current_team(f, &b, org).await.membership.id, receipt.membership_id);
+    let recipients = [
+        (team.membership.account_id, team.membership.id, "member"),
+        (receipt.account_id, receipt.membership_id, "admin"),
+    ];
+    let vault = shared_vaults::ScopedVault::seed(f, org, &recipients).await;
+    let unrelated = shared_vaults::ScopedVault::seed(
+        f,
+        other.id,
+        &[(other.membership.account_id, other.membership.id, "admin")],
+    )
+    .await;
+    vault.reject_foreign_membership(f, receipt.account_id, other.membership.id).await;
     let creation_confirmation = call(
         f,
         &a,
@@ -532,6 +545,8 @@ async fn lifecycle(f: &Fixture) {
     assert_eq!(reply.status, 200);
     let suspended = TeamMemberResource::from_json(&reply.body).expect("suspended Resource");
     assert_eq!(suspended.status, TeamMemberStatus::Suspended);
+    vault.assert_state(f, true, Some(team.membership.account_id)).await;
+    unrelated.assert_state(f, false, Some(other.membership.account_id)).await;
     problem(&call(f, &b, "GET", &root, &[], &[]).await, 404, "organization.not_found");
     assert_eq!(
         call(
@@ -554,6 +569,7 @@ async fn lifecycle(f: &Fixture) {
         call(f, &a, "PATCH", &member_path, &activate, &[("If-Match", &suspended.etag)]).await;
     assert_eq!(reply.status, 200);
     let active = TeamMemberResource::from_json(&reply.body).expect("active Resource");
+    vault.assert_state(f, true, Some(team.membership.account_id)).await;
     let before = f.count("SELECT COUNT(*) FROM audit_events").await;
     let revision = f.revision(org).await;
     assert_eq!(
@@ -562,11 +578,13 @@ async fn lifecycle(f: &Fixture) {
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM audit_events").await, before);
     assert_eq!(f.revision(org).await, revision);
+    let leave_vault = shared_vaults::ScopedVault::seed(f, org, &recipients).await;
     let own = current_team(f, &b, org).await;
     assert_eq!(
         call(f, &b, "DELETE", &member_path, &[], &[("If-Match", &own.etag)]).await.status,
         204
     );
+    leave_vault.assert_state(f, true, Some(team.membership.account_id)).await;
     assert_eq!(f.revision(org).await, revision + 1);
     assert_eq!(
         call(
@@ -628,6 +646,9 @@ async fn lifecycle(f: &Fixture) {
     let headers = [("If-Match", current.etag.as_str()), ("Idempotency-Key", key.as_str())];
     let reply = call(f, &a, "POST", &format!("{root}/dissolve"), &dissolve, &headers).await;
     assert_eq!(reply.status, 200);
+    vault.assert_state(f, true, None).await;
+    leave_vault.assert_state(f, true, None).await;
+    unrelated.assert_state(f, false, Some(other.membership.account_id)).await;
     assert_eq!(
         TeamDissolutionReceipt::from_json(&reply.body)
             .expect("dissolution receipt")
