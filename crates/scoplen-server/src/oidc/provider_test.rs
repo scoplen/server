@@ -30,6 +30,7 @@ use scoplen_crypto::{P256SigningKey, SecretBytes, SecretVec};
 use scoplen_store::organizations::auth_draft_login::{DraftLoginMaterial, DraftLoginProvider};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use tokio::sync::Notify;
 use url::form_urlencoded;
 
 use crate::{EnterpriseIdentitySettings, TrustedIssuerSettings};
@@ -42,6 +43,12 @@ const CLIENT_SECRET: &str = " secret:+% ";
 pub(crate) const NONCE: [u8; 32] = [31; 32];
 const VERIFIER: [u8; 32] = [32; 32];
 
+#[derive(Default)]
+pub(crate) struct TokenResponseGate {
+    pub(crate) request_received: Notify,
+    pub(crate) release_response: Notify,
+}
+
 pub(crate) struct Provider {
     directory: PathBuf,
     server: tokio::task::JoinHandle<()>,
@@ -53,6 +60,14 @@ pub(crate) struct Provider {
 
 impl Provider {
     pub(crate) async fn start(directory: PathBuf, origin: &'static str) -> Self {
+        Self::start_with_token_gate(directory, origin, None).await
+    }
+
+    pub(crate) async fn start_with_token_gate(
+        directory: PathBuf,
+        origin: &'static str,
+        token_gate: Option<Arc<TokenResponseGate>>,
+    ) -> Self {
         std::fs::create_dir(&directory).unwrap();
         let requests = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
         let counts = Arc::clone(&requests);
@@ -78,7 +93,12 @@ impl Provider {
                         let key = Arc::clone(&key);
                         let live_ca = live_ca.clone();
                         let browser = Arc::clone(&browser);
+                        let token_gate = token_gate.clone();
                         async move {
+                            if let Some(gate) = token_gate {
+                                gate.request_received.notify_one();
+                                gate.release_response.notified().await;
+                            }
                             token_reply(&headers, &body, &key, &issuer, origin, &live_ca, &browser)
                         }
                     }),

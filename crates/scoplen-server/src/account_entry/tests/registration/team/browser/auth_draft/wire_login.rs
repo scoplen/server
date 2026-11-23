@@ -6,7 +6,7 @@ use scoplen_api::auth_connection_draft::test_login::{
 };
 
 use super::*;
-use crate::oidc::provider_test::Provider;
+use crate::oidc::provider_test::{Provider, TokenResponseGate};
 
 async fn callback(tls: &TlsFixture, target: &str, host: &str, cookie: &str, mode: &str) -> Reply {
     tls.send(
@@ -99,6 +99,19 @@ async fn read_status(
     .status
 }
 
+fn started_draft(reply: &Reply, organization: Uuid, draft: &DraftResource) -> DraftLoginStarted {
+    assert_eq!(reply.status, 201);
+    bound_response(reply);
+    DraftLoginStarted::from_http_json(
+        &reply.body,
+        (organization, draft.id),
+        &draft.issuer,
+        reply.header("cache-control"),
+        reply.header("pragma"),
+    )
+    .unwrap()
+}
+
 async fn mounted_login(f: &Fixture) {
     let provider = Provider::start(f.directory.join("oidc-browser"), ORIGIN).await;
     let tls = TlsFixture::start_with_enterprise_identity(f, provider.settings.clone()).await;
@@ -144,16 +157,7 @@ async fn mounted_login(f: &Fixture) {
     );
     assert_eq!(provider.discoveries(), 0);
     let response = browser.send(&tls, "POST", &start_path, request.as_bytes(), &headers).await;
-    assert_eq!(response.status, 201);
-    bound_response(&response);
-    let started = DraftLoginStarted::from_http_json(
-        &response.body,
-        (organization, draft.id),
-        &provider.issuer,
-        response.header("cache-control"),
-        response.header("pragma"),
-    )
-    .unwrap();
+    let started = started_draft(&response, organization, &draft);
     let cookie = response.header("set-cookie").unwrap();
     assert!(cookie.starts_with("__Host-spl-auth-test="));
     assert!(cookie.contains("; Path=/; HttpOnly; Secure; SameSite=Lax; Expires="));
@@ -183,8 +187,104 @@ async fn mounted_login(f: &Fixture) {
     provider.close().await;
 }
 
+async fn replacement_during_exchange(f: &Fixture) {
+    let gate = Arc::new(TokenResponseGate::default());
+    let provider = Provider::start_with_token_gate(
+        f.directory.join("oidc-browser-replacement"),
+        ORIGIN,
+        Some(gate.clone()),
+    )
+    .await;
+    let tls = TlsFixture::start_with_enterprise_identity(f, provider.settings.clone()).await;
+    let owner = actor(f, "mounted-replacement-owner").await;
+    let organization = create_team(f, &owner).await.id;
+    let revision = f.revision(organization).await;
+    let session = login(f, &owner.registration).await;
+    let browser = Writer::browser(&session);
+    let device = Writer::device(&owner);
+    let path = format!("/api/v1/orgs/{organization}/auth-connection-draft");
+    let body = DraftCreate { issuer: provider.issuer.clone() }.to_json().unwrap();
+    let create = async |key: &str| {
+        resource(
+            &device.send(&tls, "POST", &path, &body, &create_headers(key)).await,
+            201,
+            organization,
+        )
+    };
+    let draft = create(&Uuid::now_v7().to_string()).await;
+    let audit_before = f.count("SELECT count(*) FROM audit_events").await;
+    let request = Provider::login_material().credentials.to_json().unwrap();
+    let start_path = format!("{path}/test-login");
+    let tag = draft.etag();
+    let reply = browser
+        .send(
+            &tls,
+            "POST",
+            &start_path,
+            request.as_bytes(),
+            &[("Origin", ORIGIN), ("If-Match", &tag), ("Content-Type", "application/json")],
+        )
+        .await;
+    let started = started_draft(&reply, organization, &draft);
+    let cookie = reply.header("set-cookie").unwrap().split(';').next().unwrap();
+    let navigation = std::str::from_utf8(started.authorization_url.as_bytes()).unwrap();
+    let redirected = provider.navigate(navigation).await;
+    let target = format!("{}?{}", redirected.path(), redirected.query().unwrap());
+    let status_path = format!("{start_path}/{}", started.attempt.id);
+
+    let (response, replacement) = tokio::join!(
+        callback(&tls, &target, "example.com", cookie, "navigate"),
+        async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(6),
+                gate.request_received.notified(),
+            )
+            .await
+            .expect("provider received the claimed exchange");
+            assert_eq!(provider.counts()[0], 1);
+            assert_eq!(
+                f.count("SELECT count(*) FROM organization_auth_draft_tests WHERE credentials IS NOT NULL")
+                    .await,
+                0,
+            );
+            cancelled(
+                &device
+                    .send(
+                        &tls,
+                        "DELETE",
+                        &path,
+                        &[],
+                        &cancel_headers(&Uuid::now_v7().to_string(), &tag),
+                    )
+                    .await,
+            );
+            let replacement = create(&Uuid::now_v7().to_string()).await;
+            assert_ne!(replacement.id, draft.id);
+            gate.release_response.notify_one();
+            replacement
+        }
+    );
+    private_callback(&response, 200, true);
+    denied(&browser.send(&tls, "GET", &status_path, &[], &[]).await, 404, "organization.not_found");
+    private_callback(&callback(&tls, &target, "example.com", cookie, "navigate").await, 400, false);
+    assert_eq!(provider.counts()[0], 1);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_draft_tests").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM audit_events").await, audit_before + 3);
+    assert_eq!(f.revision(organization).await, revision);
+    assert_eq!(
+        resource(&browser.send(&tls, "GET", &path, &[], &[]).await, 200, organization),
+        replacement
+    );
+    provider.close().await;
+}
+
 browser_tests!(
     sqlite_draft_login_mounted_https_round_trip,
     postgres_draft_login_mounted_https_round_trip,
     mounted_login
+);
+browser_tests!(
+    sqlite_draft_login_replacement_fences_in_flight_exchange,
+    postgres_draft_login_replacement_fences_in_flight_exchange,
+    replacement_during_exchange
 );
