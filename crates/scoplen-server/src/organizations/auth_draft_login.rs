@@ -41,7 +41,10 @@ use time::{
 use url::Url;
 use uuid::Uuid;
 
-use super::{OrganizationState, invalid, problem, reply, specific_problem, store_problem, team};
+use super::{
+    OrganizationState, browser_authority, invalid, problem, reply, specific_problem, store_problem,
+    team, valid_encoding,
+};
 use crate::{
     device_auth::AuthBackend,
     oidc::{DiscoveryError, DraftExchangeError, TrustedIssuer, verify_claimed_draft_login},
@@ -68,30 +71,6 @@ macro_rules! store_call {
     };
 }
 
-async fn browser_authority(
-    state: &OrganizationState,
-    operation: AccountBrowserAccessOperation,
-    parts: &Parts,
-    id: &Uuid,
-) -> Result<CurrentAccountBrowserSession, Box<Response>> {
-    state
-        .account_auth
-        .authenticate_browser_request(operation, &parts.method, &parts.uri, &parts.headers)
-        .await
-        .map_err(|error| {
-            Box::new(problem(
-                error.status,
-                match error.status {
-                    StatusCode::FORBIDDEN => "policy.denied",
-                    StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
-                    _ => "auth.authentication_required",
-                },
-                false,
-                id,
-            ))
-        })
-}
-
 fn path_ids(uri: &Uri) -> Option<(Uuid, Option<Uuid>)> {
     let mut segments = uri.path().strip_prefix("/api/v1/orgs/")?.split('/');
     let organization = parse_organization_idempotency_key(segments.next()?).ok()?;
@@ -103,11 +82,6 @@ fn path_ids(uri: &Uri) -> Option<(Uuid, Option<Uuid>)> {
         None => None,
     };
     segments.next().is_none().then_some((organization, attempt))
-}
-
-fn valid_encoding(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(header::CONTENT_ENCODING).iter();
-    values.next().is_none_or(|value| value == "identity") && values.next().is_none()
 }
 
 fn decode_request<'a>(

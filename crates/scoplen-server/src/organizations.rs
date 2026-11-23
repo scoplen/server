@@ -7,12 +7,13 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{Query, State},
-    http::{Request, StatusCode, header},
+    http::{HeaderMap, Request, StatusCode, header, request::Parts},
     response::Response,
     routing::{get, patch, post},
 };
 use scoplen_api::{
     ErrorCode, ProblemDetails,
+    account_browser::AccountBrowserAccessOperation,
     auth::DeviceAccessOperation,
     organization::{
         MAX_ORGANIZATION_CREATE_BYTES, MAX_ORGANIZATION_UPDATE_BYTES, OrganizationCreateRequest,
@@ -21,6 +22,7 @@ use scoplen_api::{
     },
 };
 use scoplen_store::{
+    account_browser_sessions::CurrentAccountBrowserSession,
     kms::LocalKeyFile,
     organizations::{OrganizationPrincipal as _, OrganizationStoreError},
 };
@@ -34,6 +36,7 @@ use crate::{
 
 mod access_requests;
 mod audit;
+mod auth_connection;
 mod auth_connection_draft;
 mod auth_draft_login;
 mod grants;
@@ -79,6 +82,7 @@ pub(crate) fn router(
         .route("/api/v1/orgs/{org}", get(read))
         .route("/api/v1/orgs/{org}", patch(update))
         .merge(team::routes())
+        .merge(auth_connection::routes())
         .merge(auth_connection_draft::routes())
         .merge(auth_draft_login::routes())
         .merge(inventory::routes())
@@ -104,6 +108,35 @@ pub(crate) fn router(
                     .expect("validated read limits"),
             },
         })
+}
+
+async fn browser_authority(
+    state: &OrganizationState,
+    operation: AccountBrowserAccessOperation,
+    parts: &Parts,
+    id: &Uuid,
+) -> Result<CurrentAccountBrowserSession, Box<Response>> {
+    state
+        .account_auth
+        .authenticate_browser_request(operation, &parts.method, &parts.uri, &parts.headers)
+        .await
+        .map_err(|error| {
+            Box::new(problem(
+                error.status,
+                match error.status {
+                    StatusCode::FORBIDDEN => "policy.denied",
+                    StatusCode::SERVICE_UNAVAILABLE => "organization.storage_unavailable",
+                    _ => "auth.authentication_required",
+                },
+                false,
+                id,
+            ))
+        })
+}
+
+fn valid_encoding(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(header::CONTENT_ENCODING).iter();
+    values.next().is_none_or(|value| value == "identity") && values.next().is_none()
 }
 
 async fn notify_organization(state: &OrganizationState, organization: Uuid) {

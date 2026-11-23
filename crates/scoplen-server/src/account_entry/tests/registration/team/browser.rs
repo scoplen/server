@@ -739,6 +739,7 @@ async fn postgres_account_browser_logout_lost_commit_requires_explicit_terminal_
 
 mod access_requests;
 mod audit;
+mod auth_connection;
 mod auth_draft;
 mod business;
 mod grants;
