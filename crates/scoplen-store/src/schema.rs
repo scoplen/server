@@ -668,7 +668,111 @@ const SYNC_VAULTS: TableSpec = TableSpec {
         },
     ],
     foreign_keys: &[],
+    indexes: &[IndexSpec { name: "sync_vaults_id_kind", columns: &["vault_id", "kind"] }],
+};
+
+const ORGANIZATION_SHARED_VAULTS: TableSpec = TableSpec {
+    name: "organization_shared_vaults",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "kind", kind: LogicalType::Text, nullable: false, primary_key: false },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organizations",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "sync_vaults",
+            target_column: "vault_id",
+        },
+        ForeignKey { source_column: "kind", target_table: "sync_vaults", target_column: "kind" },
+    ],
     indexes: &[],
+};
+
+const ORGANIZATION_SHARED_VAULT_RECIPIENTS: TableSpec = TableSpec {
+    name: "organization_shared_vault_recipients",
+    columns: &[
+        ColumnSpec {
+            name: "vault_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_shared_vaults",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "organization_shared_vaults",
+            target_column: "vault_id",
+        },
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "organization_memberships",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "vault_id",
+            target_table: "sync_vault_members",
+            target_column: "vault_id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "sync_vault_members",
+            target_column: "account_id",
+        },
+    ],
+    indexes: &[IndexSpec {
+        name: "organization_shared_vault_recipients_membership",
+        columns: &["organization_id", "membership_id"],
+    }],
 };
 
 const SYNC_PERSONAL_VAULTS: TableSpec = TableSpec {
@@ -4450,6 +4554,8 @@ const TABLES: &[TableSpec] = &[
     DEVICE_DPOP_REPLAYS,
     DEVICE_AUTH_ADMISSION,
     SYNC_VAULTS,
+    ORGANIZATION_SHARED_VAULTS,
+    ORGANIZATION_SHARED_VAULT_RECIPIENTS,
     SYNC_PERSONAL_VAULTS,
     SYNC_VAULT_MEMBERS,
     SYNC_VAULT_MEMBER_KEYS,
@@ -5100,6 +5206,7 @@ mod tests {
             include_str!(
                 "../migrations/sqlite/20261123070000_organization_auth_link_comparison_keys.sql"
             ),
+            include_str!("../migrations/sqlite/20261124000000_organization_shared_vaults.sql"),
         ]
         .join("\n")
     }
@@ -5154,6 +5261,7 @@ mod tests {
             include_str!(
                 "../migrations/postgres/20261123070000_organization_auth_link_comparison_keys.sql"
             ),
+            include_str!("../migrations/postgres/20261124000000_organization_shared_vaults.sql"),
         ]
         .join("\n")
     }
