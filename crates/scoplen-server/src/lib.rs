@@ -14,6 +14,7 @@ mod console;
 pub mod deployment_lease;
 mod device_auth;
 mod error;
+pub mod oidc;
 mod operator_auth;
 mod operator_logout;
 mod organizations;

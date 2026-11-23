@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Deployment-only trust configuration for Organization login tests.
 
-use std::{
-    collections::HashSet,
-    fmt,
-    fs::File,
-    io::BufReader,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashSet, fmt, fs, net::IpAddr, path::PathBuf};
 
 use ipnet::IpNet;
 use scoplen_api::auth_connection_draft::validate_issuer;
@@ -55,37 +49,62 @@ impl EnterpriseIdentitySettings {
             if !issuers.insert(&entry.issuer) {
                 return Err(invalid("issuer", "duplicates another trusted issuer"));
             }
-            if entry.addresses.is_empty()
-                || entry.addresses.iter().any(|address| address.parse::<IpNet>().is_err())
-            {
-                return Err(invalid("addresses", "must contain valid IPv4 or IPv6 CIDRs"));
-            }
-            if let Some(path) = &entry.ca_certificate {
-                validate_ca_file(path).map_err(|()| {
-                    invalid("ca_certificate", "must be a readable PEM certificate bundle")
-                })?;
-            }
+            entry
+                .networks()
+                .map_err(|()| invalid("addresses", "must contain valid IPv4 or IPv6 CIDRs"))?;
+            entry.read_ca().map_err(|()| {
+                invalid("ca_certificate", "must be a readable PEM certificate bundle")
+            })?;
         }
         Ok(())
     }
 }
 
-fn validate_ca_file(path: &Path) -> Result<(), ()> {
-    if !path.metadata().map_err(|_| ())?.is_file() {
-        return Err(());
-    }
-    let mut file = BufReader::new(File::open(path).map_err(|_| ())?);
-    let mut roots = rustls::RootCertStore::empty();
-    for item in rustls_pemfile::read_all(&mut file) {
-        let rustls_pemfile::Item::X509Certificate(certificate) = item.map_err(|_| ())? else {
+pub(crate) struct IssuerCa {
+    pub(crate) pem: Vec<u8>,
+    pub(crate) certificates: Vec<rustls::pki_types::CertificateDer<'static>>,
+}
+
+impl TrustedIssuerSettings {
+    pub(crate) fn networks(&self) -> Result<Vec<IpNet>, ()> {
+        let mut networks = Vec::new();
+        for value in &self.addresses {
+            let mut network = value.parse::<IpNet>().map_err(|_| ())?.trunc();
+            if let IpNet::V6(v6) = network
+                && let Some(ip) = v6.addr().to_ipv4_mapped()
+            {
+                network = IpNet::new(IpAddr::V4(ip), v6.prefix_len() - 96).map_err(|_| ())?;
+            }
+            networks.push(network);
+        }
+        if networks.is_empty() {
             return Err(());
-        };
-        roots.add(certificate).map_err(|_| ())?;
+        }
+        networks.sort_unstable();
+        networks.dedup();
+        Ok(networks)
     }
-    if roots.is_empty() {
-        return Err(());
+
+    pub(crate) fn read_ca(&self) -> Result<Option<IssuerCa>, ()> {
+        let Some(path) = &self.ca_certificate else { return Ok(None) };
+        if !path.metadata().map_err(|_| ())?.is_file() {
+            return Err(());
+        }
+        let pem = fs::read(path).map_err(|_| ())?;
+        let mut roots = rustls::RootCertStore::empty();
+        let mut certificates = Vec::new();
+        for item in rustls_pemfile::read_all(&mut pem.as_slice()) {
+            let rustls_pemfile::Item::X509Certificate(certificate) = item.map_err(|_| ())? else {
+                return Err(());
+            };
+            roots.add(certificate.clone()).map_err(|_| ())?;
+            certificates.push(certificate);
+        }
+        if certificates.is_empty() {
+            return Err(());
+        }
+        Ok(Some(IssuerCa { pem, certificates }))
     }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -471,7 +471,8 @@ Deployment operators can prepare `[[enterprise_identity.trusted_issuers]]` entri
 the exact issuer, the approved IPv4 or IPv6 CIDRs, and an optional `ca_certificate` PEM
 bundle. Use identical entries on all API replicas. Run `spl-server --validate-config`
 to check these settings locally. The browser test still requires the server-side provider
-exchange and callback.
+exchange and callback. Server application logs omit HTTP and TLS wire traces, including
+when trace-level logging is enabled.
 
 API clients use `/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
 `auth-drafts:manage` and a fresh DPoP proof. Current Organization policy must permit the

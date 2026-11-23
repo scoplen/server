@@ -24,6 +24,7 @@ http-body-util = "0.1.3"
 hyper-util.workspace = true
 ipnet = "2.12.2"
 rcgen.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
@@ -40,9 +41,11 @@ tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
+tracing-log = "0.2.0"
 tracing-subscriber.workspace = true
 rustls-acme.workspace = true
 tokio-stream.workspace = true
+url = "2.5.8"
 uuid.workspace = true
 scoplen-audit = { path = "../scoplen-audit" }
 zeroize.workspace = true
@@ -67,6 +70,5 @@ ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["ed2
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 time = { version = "0.3.55", features = ["parsing"] }
 tokio-tungstenite = "0.26.2"
-url = "2.5.8"
 webauthn-authenticator-rs = { version = "=0.5.5", features = ["softpasskey"] }
 webauthn-rs-core = "=0.5.5"

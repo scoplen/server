@@ -26,9 +26,12 @@ pub async fn start(
     root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let root = root_params.self_signed(&root_key).expect("fixture CA");
     let key = KeyPair::generate().expect("fixture server key");
-    let name = if wrong_hostname { "wrong.example.test" } else { "127.0.0.1" };
-    let mut params =
-        CertificateParams::new(vec![name.into()]).expect("fixture certificate parameters");
+    let names = if wrong_hostname {
+        vec!["wrong.example.test".into()]
+    } else {
+        vec!["127.0.0.1".into(), "localhost".into()]
+    };
+    let mut params = CertificateParams::new(names).expect("fixture certificate parameters");
     params.distinguished_name.push(DnType::CommonName, "Doctor test HTTPS endpoint");
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];

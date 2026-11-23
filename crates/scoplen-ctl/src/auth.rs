@@ -4,8 +4,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::Subcommand;
-use reqwest::{StatusCode, Url, header};
-use serde::Deserialize;
+use reqwest::{StatusCode, header};
 use sha2::{Digest, Sha256};
 
 use crate::diagnostic_http::{diagnostic_client, read_body, request_failure};
@@ -68,24 +67,6 @@ fn registration_settings(config: &std::path::Path, issuer: &str) -> Result<Strin
     Ok(format!("{settings:#}"))
 }
 
-fn https_url(value: &str) -> Option<Url> {
-    if value.bytes().any(|b| b.is_ascii_control() || b == b' ' || b == b'\\') {
-        return None;
-    }
-    let (_, tail) = value.split_once("://")?;
-    let authority = tail.split(['/', '?', '#']).next()?;
-    if authority.is_empty() || authority.contains('@') {
-        return None;
-    }
-    let url = Url::parse(value).ok()?;
-    (url.scheme() == "https"
-        && url.has_host()
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none())
-    .then_some(url)
-}
-
 fn validate_issuer(issuer: &str) -> Result<(), &'static str> {
     scoplen_api::auth_connection_draft::validate_issuer(issuer).map_err(|_| {
         "provide an absolute HTTPS issuer of at most 2,048 bytes without credentials, query, fragment, backslashes, whitespace or control characters."
@@ -119,98 +100,5 @@ async fn check_instance(issuer: &str, ca: Option<&std::path::Path>) -> Result<()
         );
     }
     let body = read_body(response, 65_536, "discovery exceeds the 64 KiB limit.").await?;
-    let document: Discovery = serde_json::from_slice(&body).map_err(
-        |_| "invalid discovery document; check its JSON, field types and required endpoints.",
-    )?;
-    document.check(issuer)
-}
-
-#[derive(Deserialize)]
-struct Discovery {
-    issuer: String,
-    authorization_endpoint: String,
-    token_endpoint: String,
-    userinfo_endpoint: String,
-    jwks_uri: String,
-    #[serde(default)]
-    response_types_supported: Vec<String>,
-    grant_types_supported: Option<Vec<String>>,
-    #[serde(default = "default_token_auth_methods")]
-    token_endpoint_auth_methods_supported: Vec<String>,
-    #[serde(default)]
-    code_challenge_methods_supported: Vec<String>,
-    #[serde(default)]
-    scopes_supported: Vec<String>,
-    #[serde(default)]
-    subject_types_supported: Vec<String>,
-    #[serde(default)]
-    id_token_signing_alg_values_supported: Vec<String>,
-}
-
-fn default_token_auth_methods() -> Vec<String> {
-    vec!["client_secret_basic".to_owned()]
-}
-
-impl Discovery {
-    fn check(&self, expected_issuer: &str) -> Result<(), &'static str> {
-        if self.issuer != expected_issuer {
-            return Err("issuer mismatch; use the exact issuer configured by the instance.");
-        }
-        for endpoint in [
-            &self.authorization_endpoint,
-            &self.token_endpoint,
-            &self.userinfo_endpoint,
-            &self.jwks_uri,
-        ] {
-            if https_url(endpoint).is_none() {
-                return Err(
-                    "an advertised endpoint is invalid; require absolute HTTPS endpoints without credentials or fragments.",
-                );
-            }
-        }
-        if self
-            .grant_types_supported
-            .as_ref()
-            .is_some_and(|grants| !grants.iter().any(|g| g == "authorization_code"))
-        {
-            return Err("the instance does not advertise the authorization code grant.");
-        }
-        for (values, expected, reason) in [
-            (
-                &self.token_endpoint_auth_methods_supported,
-                "client_secret_basic",
-                "the instance must support client_secret_basic for confidential web clients.",
-            ),
-            (
-                &self.response_types_supported,
-                "code",
-                "the instance must advertise the code response type.",
-            ),
-            (
-                &self.code_challenge_methods_supported,
-                "S256",
-                "the instance must advertise S256 PKCE.",
-            ),
-            (
-                &self.scopes_supported,
-                "openid",
-                "the instance must advertise the openid scope for human login.",
-            ),
-            (
-                &self.subject_types_supported,
-                "public",
-                "the instance must advertise public human subjects.",
-            ),
-            (
-                &self.id_token_signing_alg_values_supported,
-                "ES256",
-                "the instance must advertise ES256 ID tokens.",
-            ),
-        ] {
-            if !values.iter().any(|v| v == expected) {
-                return Err(reason);
-            }
-        }
-        Ok(())
-    }
+    scoplen_server::oidc::check_discovery(&body, issuer)
 }
