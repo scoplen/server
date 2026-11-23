@@ -2,7 +2,9 @@
 //! Organization connection candidates, installed revisions and original-writer receipts.
 
 mod activation;
-pub use activation::ConnectionActivationStart;
+pub use activation::{
+    ACTIVATION_PREFLIGHT_LIFETIME, ActivationPreflight, ConnectionActivationStart,
+};
 mod activation_callback;
 pub use activation_callback::{ActivationClaim, ClaimedActivation};
 mod activation_confirm;

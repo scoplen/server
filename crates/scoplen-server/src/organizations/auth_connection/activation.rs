@@ -18,9 +18,13 @@ use scoplen_store::{
     account_browser_sessions::CurrentAccountBrowserSession,
     organizations::{
         OrganizationStoreError as StoreError,
-        auth_connection::{ActivationConfirmation, ConnectionActivationStart},
+        auth_connection::{
+            ACTIVATION_PREFLIGHT_LIFETIME, ActivationConfirmation, ActivationPreflight,
+            ConnectionActivationStart,
+        },
     },
 };
+use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
 use super::{
@@ -42,25 +46,59 @@ pub(super) async fn start(
     candidate: &ActivationCandidate,
     id: &Uuid,
 ) -> Response {
-    let issuer = match store_call!(
+    // Start the local deadline before acquisition, so it cannot outlive the database lease.
+    let deadline = Instant::now() + ACTIVATION_PREFLIGHT_LIFETIME;
+    let preflight = match store_call!(
         state,
-        organization_auth_activation_issuer(
+        reserve_organization_auth_activation(
             session,
             organization,
             expected,
             candidate.draft_generation
         )
     ) {
-        Ok(issuer) => issuer,
+        Ok(preflight) => preflight,
         Err(error) => return store_problem(error, id),
     };
-    let trusted = match TrustedIssuer::from_settings(&state.enterprise_identity, &issuer) {
+    let response = start_admitted(
+        state,
+        session,
+        (organization, expected),
+        candidate,
+        &preflight,
+        deadline,
+        id,
+    )
+    .await;
+    if response.status() != StatusCode::CREATED
+        && let Err(error) = store_call!(state, release_organization_auth_activation(&preflight))
+    {
+        tracing::warn!(%error, "connection activation preflight could not be released");
+    }
+    response
+}
+
+async fn start_admitted(
+    state: &OrganizationState,
+    session: &CurrentAccountBrowserSession,
+    (organization, expected): (Uuid, ExpectedRevision),
+    candidate: &ActivationCandidate,
+    preflight: &ActivationPreflight,
+    deadline: Instant,
+    id: &Uuid,
+) -> Response {
+    let issuer = preflight.issuer();
+    let trusted = match TrustedIssuer::from_settings(&state.enterprise_identity, issuer) {
         Ok(trusted) => trusted,
         Err(error) => return discovery_problem(error, id),
     };
-    let provider = match trusted.discover().await {
-        Ok(metadata) => login_provider(metadata),
-        Err(error) => return discovery_problem(error, id),
+    if Instant::now() >= deadline {
+        return discovery_problem(DiscoveryError::Unavailable, id);
+    }
+    let provider = match timeout_at(deadline, trusted.discover()).await {
+        Ok(Ok(metadata)) => login_provider(metadata),
+        Ok(Err(error)) => return discovery_problem(error, id),
+        Err(_) => return discovery_problem(DiscoveryError::Unavailable, id),
     };
     let [Ok(state_proof), Ok(nonce), Ok(verifier), Ok(browser_binding)] =
         std::array::from_fn(|_| random_key())
@@ -70,7 +108,7 @@ pub(super) async fn start(
     let client_id = &candidate.credentials.client_id;
     let Some(authorization_url) = authorization_url(
         &state.origin,
-        &issuer,
+        issuer,
         &provider.authorization_endpoint,
         client_id,
         &verifier,
@@ -90,7 +128,7 @@ pub(super) async fn start(
                 draft_generation: candidate.draft_generation,
                 expected_revision: expected,
                 target: ConnectionTarget {
-                    issuer: issuer.clone(),
+                    issuer: issuer.to_owned(),
                     client_id: client_id.to_owned(),
                     space_id: candidate.space_id.clone(),
                 },
@@ -104,10 +142,8 @@ pub(super) async fn start(
         return discovery_problem(DiscoveryError::Incompatible, id);
     }
     let start = ConnectionActivationStart {
-        organization,
-        expected,
+        preflight,
         candidate,
-        issuer: &issuer,
         provider: &provider,
         trust_fingerprint: trusted.fingerprint(),
         state: &state_proof,

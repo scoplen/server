@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Owner-reviewed, original-family-bound Organization connection activation candidates.
 
+use std::time::Duration;
+
 use scoplen_api::{
     auth_connection::{
         Activation, ActivationCandidate, ActivationContext, ConnectionTarget, ExpectedRevision,
@@ -22,12 +24,31 @@ use crate::{account_browser_sessions::CurrentAccountBrowserSession, kms::KeyMana
 
 const PASSWORD_FRESH_MS: i64 = 300_000;
 
+/// Upper bound on an admitted start before it becomes a durable activation.
+pub const ACTIVATION_PREFLIGHT_LIFETIME: Duration = Duration::from_secs(20);
+
+/// Database-backed admission for one family's discovery, on the reviewed draft and head.
+pub struct ActivationPreflight {
+    family: [u8; 16],
+    reservation: Uuid,
+    organization: Uuid,
+    expected: ExpectedRevision,
+    draft: Uuid,
+    issuer: String,
+}
+
+impl ActivationPreflight {
+    /// The authorized issuer from the exact currently saved draft.
+    #[must_use]
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+}
+
 /// Admitted discovery and one-time proofs for a candidate in the current native browser family.
 pub struct ConnectionActivationStart<'a> {
-    pub organization: Uuid,
-    pub expected: ExpectedRevision,
+    pub preflight: &'a ActivationPreflight,
     pub candidate: &'a ActivationCandidate,
-    pub issuer: &'a str,
     pub provider: &'a DraftLoginProvider,
     pub trust_fingerprint: [u8; 32],
     pub state: &'a SecretBytes<32>,
@@ -98,7 +119,8 @@ pub(super) fn require_fresh(created_at: i64, now: i64) -> Result<i64, Error> {
 }
 
 macro_rules! activations {
-    ($store:ty, $db:ty, $begin:literal, $actor:ident, $audit:ident, $cleanup_lock:literal) => {
+    ($store:ty, $db:ty, $begin:literal, $actor:ident, $audit:ident,
+     $cleanup_lock:literal, $db_clock:literal) => {
         impl $store {
             async fn activation_start_context(
                 tx: &mut Transaction<'_, $db>, session: &CurrentAccountBrowserSession,
@@ -128,21 +150,50 @@ macro_rules! activations {
                 Ok((issuer, created_at))
             }
 
-            /// Resolve the exact draft before making any provider request.
+            /// Check the exact draft and claim this family's discovery slot before any network work.
             ///
             /// # Errors
             /// Rejects insufficient live authority, stale native sign-in or head/draft, and family conflicts.
-            pub async fn organization_auth_activation_issuer(
+            pub async fn reserve_organization_auth_activation(
                 &self, session: &CurrentAccountBrowserSession, organization: Uuid,
-                expected: ExpectedRevision, draft_generation: Uuid,
-            ) -> Result<String, Error> {
+                expected: ExpectedRevision, draft: Uuid,
+            ) -> Result<ActivationPreflight, Error> {
                 let mut tx = self.pool.begin_with($begin).await?;
-                Self::check_auth_connection_management(&mut tx, session, organization, false).await?;
-                let (issuer, created_at) = Self::activation_start_context(&mut tx, session, organization, expected, draft_generation).await?;
+                // Lock the Account before checking the family's candidate and preflight, even across Organizations.
+                Self::check_auth_connection_management(&mut tx, session, organization, true).await?;
+                let (issuer, created_at) = Self::activation_start_context(&mut tx, session, organization, expected, draft).await?;
+                let family = session.family_id;
+                let reservation = Uuid::now_v7();
+                let now: i64 = sqlx::query_scalar($db_clock).fetch_one(&mut *tx).await?;
+                let duration = i64::try_from(ACTIVATION_PREFLIGHT_LIFETIME.as_millis())
+                    .map_err(|_| Error::StorageUnavailable)?;
+                let expires = now.checked_add(duration).ok_or(Error::StorageUnavailable)?;
+                let reserved = sqlx::query("INSERT INTO organization_auth_activation_preflights
+                    (family_id,reservation_id,expires_at_ms) VALUES ($1,$2,$3)
+                    ON CONFLICT (family_id) DO UPDATE SET reservation_id=excluded.reservation_id,expires_at_ms=excluded.expires_at_ms
+                    WHERE organization_auth_activation_preflights.expires_at_ms<=$4")
+                    .bind(family.as_slice()).bind(reservation.as_bytes().as_slice())
+                    .bind(expires).bind(now).execute(&mut *tx).await?;
+                if reserved.rows_affected() != 1 {
+                    return Err(Error::Conflict);
+                }
                 $actor(&mut tx, session, 0).await?;
                 require_fresh(created_at, now_ms()?)?;
                 tx.commit().await?;
-                Ok(issuer)
+                Ok(ActivationPreflight { family, reservation, organization, expected, draft, issuer })
+            }
+
+            /// End an uncompleted discovery without disturbing a successor's reservation.
+            ///
+            /// # Errors
+            /// Returns a fixed storage error if the guarded deletion cannot be confirmed.
+            pub async fn release_organization_auth_activation(
+                &self, preflight: &ActivationPreflight,
+            ) -> Result<(), Error> {
+                sqlx::query("DELETE FROM organization_auth_activation_preflights WHERE family_id=$1 AND reservation_id=$2")
+                    .bind(preflight.family.as_slice()).bind(preflight.reservation.as_bytes().as_slice())
+                    .execute(&self.pool).await?;
+                Ok(())
             }
 
             /// Persist one candidate and initiation audit after discovery, without changing the active revision.
@@ -153,17 +204,30 @@ macro_rules! activations {
                 &self, session: &CurrentAccountBrowserSession, start: &ConnectionActivationStart<'_>,
                 trust: impl FnOnce(&str) -> Option<[u8; 32]> + Send, kms: &dyn KeyManagementService,
             ) -> Result<Activation, Error> {
+                let preflight = start.preflight;
+                let organization = preflight.organization;
+                let expected_revision = preflight.expected;
+                let draft = preflight.draft;
+                if session.family_id != preflight.family || start.candidate.draft_generation != draft {
+                    return Err(Error::NotFound);
+                }
                 let mut tx = self.pool.begin_with($begin).await?;
-                Self::check_auth_connection_management(&mut tx, session, start.organization, true).await?;
-                let draft = start.candidate.draft_generation;
-                let (issuer, created_at) = Self::activation_start_context(&mut tx, session, start.organization, start.expected, draft).await?;
-                if issuer != start.issuer {
+                Self::check_auth_connection_management(&mut tx, session, organization, true).await?;
+                let (issuer, created_at) = Self::activation_start_context(&mut tx, session, organization, expected_revision, draft).await?;
+                if issuer != preflight.issuer {
                     return Err(Error::PreconditionFailed);
+                }
+                let consumed = sqlx::query(concat!("DELETE FROM organization_auth_activation_preflights
+                    WHERE family_id=$1 AND reservation_id=$2 AND expires_at_ms>(", $db_clock, ")"))
+                    .bind(preflight.family.as_slice()).bind(preflight.reservation.as_bytes().as_slice())
+                    .execute(&mut *tx).await?;
+                if consumed.rows_affected() != 1 {
+                    return Err(Error::Conflict);
                 }
                 start.candidate.to_json().map_err(|_| Error::InvalidRequest)?;
                 let client_id = std::str::from_utf8(start.candidate.credentials.client_id.as_bytes())
                     .map_err(|_| Error::InvalidRequest)?.to_owned();
-                let binding = CandidateBinding {attempt: Uuid::now_v7(), organization: start.organization, draft};
+                let binding = CandidateBinding {attempt: Uuid::now_v7(), organization, draft};
                 let credential = auth_envelope::seal(start.candidate.credentials.client_secret.as_bytes(),
                     |usage| binding.aad(CandidateField::Credential, usage), kms)?;
                 let verifier = auth_envelope::seal(start.verifier.as_bytes(),
@@ -171,7 +235,7 @@ macro_rules! activations {
                 let provider = serde_json::to_string(start.provider).map_err(|_| Error::InvalidRequest)?;
                 let now = now_ms()?;
                 let expires = require_fresh(created_at, now)?;
-                let expected = revision_id(start.expected);
+                let expected = revision_id(expected_revision);
                 let target = ConnectionTarget { issuer, client_id, space_id: start.candidate.space_id.clone() };
                 sqlx::query("DELETE FROM organization_auth_connection_activations WHERE family_id=$1 AND expires_at_ms<=$2")
                     .bind(session.family_id.as_slice()).bind(now).execute(&mut *tx).await?;
@@ -179,7 +243,7 @@ macro_rules! activations {
                     (id,organization_id,draft_generation,expected_revision,family_id,state_digest,browser_digest,nonce_digest,
                      trust_fingerprint,issuer,client_id,space_id,provider,phase,credential,verifier,created_at_ms,expires_at_ms)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending',$14,$15,$16,$17) ON CONFLICT (family_id) DO NOTHING")
-                    .bind(binding.attempt.as_bytes().as_slice()).bind(start.organization.as_bytes().as_slice())
+                    .bind(binding.attempt.as_bytes().as_slice()).bind(organization.as_bytes().as_slice())
                     .bind(draft.as_bytes().as_slice()).bind(expected.as_ref().map(|id|id.as_bytes().as_slice()))
                     .bind(session.family_id.as_slice()).bind(Sha256::digest(start.state.as_bytes()).as_slice())
                     .bind(Sha256::digest(start.browser_binding.as_bytes()).as_slice()).bind(Sha256::digest(start.nonce.as_bytes()).as_slice())
@@ -189,12 +253,12 @@ macro_rules! activations {
                     return Err(Error::Conflict);
                 }
                 let result = Activation { id: binding.attempt, status: DraftLoginStatus::Pending, expires_at: timestamp(expires)?,
-                    context: ActivationContext {organization_id: start.organization, draft_generation: draft, expected_revision: start.expected, target} };
+                    context: ActivationContext {organization_id: organization, draft_generation: draft, expected_revision, target} };
                 result.to_json().map_err(|_| Error::InvalidRequest)?;
                 let event = candidate_audit(session, &result, "organization.auth_activation_started")?;
-                $audit(&mut tx, start.organization.into_bytes(), &event, now).await.map_err(|_| Error::StorageUnavailable)?;
+                $audit(&mut tx, organization.into_bytes(), &event, now).await.map_err(|_| Error::StorageUnavailable)?;
                 $actor(&mut tx, session, 0).await?;
-                if trust(start.issuer) != Some(start.trust_fingerprint) {
+                if trust(&preflight.issuer) != Some(start.trust_fingerprint) {
                     return Err(Error::PermissionDenied);
                 }
                 require_fresh(created_at, now_ms()?)?;
@@ -279,13 +343,20 @@ macro_rules! activations {
                 tx.commit().await.map_err(|_| Error::CommitOutcomeUnknown)
             }
 
-            /// Erase retained candidate material for at most 100 expired attempts on one worker pass.
+            /// Erase up to 100 expired candidates and 100 expired preflights per worker pass.
+            /// Returns the number of expired candidates removed.
             ///
             /// # Errors
             /// Returns a fixed storage error when expiry cleanup cannot be confirmed.
             pub async fn cleanup_organization_auth_activations(&self) -> Result<u64, Error> {
-                Ok(sqlx::query(concat!("DELETE FROM organization_auth_connection_activations WHERE id IN (SELECT id FROM organization_auth_connection_activations WHERE expires_at_ms<=$1 ORDER BY expires_at_ms,id LIMIT 100", $cleanup_lock,") AND expires_at_ms<=$1"))
-                    .bind(now_ms()?).execute(&self.pool).await?.rows_affected())
+                let mut tx = self.pool.begin_with($begin).await?;
+                let deleted = sqlx::query(concat!("DELETE FROM organization_auth_connection_activations WHERE id IN (SELECT id FROM organization_auth_connection_activations WHERE expires_at_ms<=$1 ORDER BY expires_at_ms,id LIMIT 100", $cleanup_lock,") AND expires_at_ms<=$1"))
+                    .bind(now_ms()?).execute(&mut *tx).await?.rows_affected();
+                let now: i64 = sqlx::query_scalar($db_clock).fetch_one(&mut *tx).await?;
+                sqlx::query(concat!("DELETE FROM organization_auth_activation_preflights WHERE family_id IN (SELECT family_id FROM organization_auth_activation_preflights WHERE expires_at_ms<=$1 ORDER BY expires_at_ms,family_id LIMIT 100", $cleanup_lock,") AND expires_at_ms<=$1"))
+                    .bind(now).execute(&mut *tx).await?;
+                tx.commit().await?;
+                Ok(deleted)
             }
         }
     }
@@ -297,7 +368,8 @@ activations!(
     "BEGIN IMMEDIATE",
     sqlite_actor,
     append_audit_event_in_transaction,
-    ""
+    "",
+    "SELECT CAST(strftime('%s','now') AS INTEGER)*1000 + CAST(substr(strftime('%f','now'),4,3) AS INTEGER)"
 );
 activations!(
     PostgresStore,
@@ -305,7 +377,8 @@ activations!(
     "BEGIN",
     postgres_actor,
     append_audit_event_in_postgres_transaction,
-    " FOR UPDATE SKIP LOCKED"
+    " FOR UPDATE SKIP LOCKED",
+    "SELECT floor(extract(epoch FROM clock_timestamp())*1000)::bigint"
 );
 
 #[cfg(test)]

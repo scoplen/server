@@ -49,6 +49,12 @@ pub(crate) struct TokenResponseGate {
     pub(crate) release_response: Notify,
 }
 
+pub(crate) struct DiscoveryGate {
+    pub(crate) request_received: Notify,
+    pub(crate) release_response: Notify,
+    status: StatusCode,
+}
+
 pub(crate) struct Provider {
     directory: PathBuf,
     server: tokio::task::JoinHandle<()>,
@@ -68,6 +74,29 @@ impl Provider {
         origin: &'static str,
         token_gate: Option<Arc<TokenResponseGate>>,
     ) -> Self {
+        Self::start_with_gates(directory, origin, token_gate, None).await
+    }
+
+    pub(crate) async fn start_with_discovery_gate(
+        directory: PathBuf,
+        origin: &'static str,
+        status: StatusCode,
+    ) -> (Self, Arc<DiscoveryGate>) {
+        let gate = Arc::new(DiscoveryGate {
+            request_received: Notify::new(),
+            release_response: Notify::new(),
+            status,
+        });
+        let provider = Self::start_with_gates(directory, origin, None, Some(gate.clone())).await;
+        (provider, gate)
+    }
+
+    async fn start_with_gates(
+        directory: PathBuf,
+        origin: &'static str,
+        token_gate: Option<Arc<TokenResponseGate>>,
+        discovery_gate: Option<Arc<DiscoveryGate>>,
+    ) -> Self {
         std::fs::create_dir(&directory).unwrap();
         let requests = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
         let counts = Arc::clone(&requests);
@@ -82,7 +111,13 @@ impl Provider {
                 "x":URL_SAFE_NO_PAD.encode(&sec1[1..33]), "y":URL_SAFE_NO_PAD.encode(&sec1[33..]),
             }]});
             let browser = Arc::new(Mutex::new(None));
-            let routes = browser_routes(&issuer, origin, Arc::clone(&browser), Arc::clone(&counts));
+            let routes = browser_routes(
+                &issuer,
+                origin,
+                Arc::clone(&browser),
+                Arc::clone(&counts),
+                discovery_gate,
+            );
             let (token, jwks, unexpected) = (Arc::clone(&counts), Arc::clone(&counts), counts);
             routes
                 .route(
@@ -200,6 +235,7 @@ fn browser_routes(
     origin: &'static str,
     browser: Arc<Mutex<Option<BrowserProof>>>,
     requests: Arc<[AtomicUsize; 4]>,
+    discovery_gate: Option<Arc<DiscoveryGate>>,
 ) -> Router {
     let discovery = json!({
         "issuer":issuer, "authorization_endpoint":format!("{issuer}authorize"),
@@ -216,12 +252,20 @@ fn browser_routes(
         .route(
             "/tenant/.well-known/openid-configuration",
             get(move |headers: HeaderMap| {
-                requests[3].fetch_add(1, Ordering::SeqCst);
+                let first = requests[3].fetch_add(1, Ordering::SeqCst) == 0;
+                let gate = discovery_gate.clone();
                 let discovery = discovery.clone();
                 async move {
                     assert!(!has_session_headers(&headers));
                     assert!(!headers.contains_key(header::AUTHORIZATION));
-                    Json(discovery)
+                    if first && let Some(gate) = gate {
+                        gate.request_received.notify_one();
+                        gate.release_response.notified().await;
+                        if gate.status != StatusCode::OK {
+                            return gate.status.into_response();
+                        }
+                    }
+                    Json(discovery).into_response()
                 }
             }),
         )

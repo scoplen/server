@@ -512,6 +512,8 @@ stage a connection through `POST /api/v1/orgs/{org}/auth-connection/activations`
 Supply the draft generation, client credentials and selected Space in the JSON body.
 Use `If-None-Match: *` for an empty slot or the strong current `If-Match` tag for a
 replacement. The original password sign-in must still be within five minutes.
+Only one start per browser family can contact the issuer at a time, even when the
+requests reach different API instances. A failed discovery allows an explicit retry.
 Retain the response cookie in the original browser and open the one-time authorization
 URL in a second tab. Read the candidate on the initiating tab. Only an explicit empty
 `POST /activations/{attempt}/confirm` under the connection path installs a verified

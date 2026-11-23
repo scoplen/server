@@ -21,6 +21,7 @@ use super::{
 use crate::oidc::provider_test::Provider;
 
 mod callback;
+mod discovery_reservation;
 
 async fn save_draft(tls: &TlsFixture, browser: &Browser, org: Uuid, issuer: &str) -> DraftResource {
     let path = format!("/api/v1/orgs/{org}/auth-connection-draft");
