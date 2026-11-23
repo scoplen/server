@@ -3038,7 +3038,13 @@ const ORGANIZATION_AUTH_DRAFTS: TableSpec = TableSpec {
         target_table: "organizations",
         target_column: "id",
     }],
-    indexes: &[IndexSpec { name: "organization_auth_drafts_generation", columns: &["generation"] }],
+    indexes: &[
+        IndexSpec { name: "organization_auth_drafts_generation", columns: &["generation"] },
+        IndexSpec {
+            name: "organization_auth_drafts_owner_generation",
+            columns: &["organization_id", "generation"],
+        },
+    ],
 };
 
 const ORGANIZATION_AUTH_DRAFT_RECEIPTS: TableSpec = TableSpec {
@@ -3186,6 +3192,262 @@ const ORGANIZATION_AUTH_DRAFT_TESTS: TableSpec = TableSpec {
             columns: &["expires_at_ms", "id"],
         },
     ],
+};
+
+const ORGANIZATION_AUTH_CONNECTIONS: TableSpec = TableSpec {
+    name: "organization_auth_connections",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "revision",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "status", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec { name: "issuer", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "client_id",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "space_id",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "provider",
+            kind: LogicalType::Text,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trust_fingerprint",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "credential",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[IndexSpec {
+        name: "organization_auth_connections_revision",
+        columns: &["revision"],
+    }],
+};
+
+const ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS: TableSpec = TableSpec {
+    name: "organization_auth_connection_activations",
+    columns: &[
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "draft_generation",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expected_revision",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "state_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "browser_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "nonce_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "trust_fingerprint",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "issuer", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "client_id",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "space_id",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "provider",
+            kind: LogicalType::Text,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "phase", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "credential",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "verifier",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_auth_drafts",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "draft_generation",
+            target_table: "organization_auth_drafts",
+            target_column: "generation",
+        },
+        ForeignKey {
+            source_column: "family_id",
+            target_table: "account_browser_families",
+            target_column: "family_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec {
+            name: "organization_auth_connection_activations_state",
+            columns: &["state_digest"],
+        },
+        IndexSpec {
+            name: "organization_auth_connection_activations_family",
+            columns: &["family_id"],
+        },
+        IndexSpec {
+            name: "organization_auth_connection_activations_expiry",
+            columns: &["expires_at_ms", "id"],
+        },
+        IndexSpec {
+            name: "organization_auth_connection_activations_draft",
+            columns: &["organization_id", "draft_generation"],
+        },
+    ],
+};
+
+const ORGANIZATION_AUTH_CONNECTION_RECEIPTS: TableSpec = TableSpec {
+    name: "organization_auth_connection_receipts",
+    columns: &[
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "origin_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "idempotency_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "request_digest",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "response_json",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: true,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "account_id",
+        target_table: "identity_accounts",
+        target_column: "account_id",
+    }],
+    indexes: &[IndexSpec {
+        name: "organization_auth_connection_receipts_expiry",
+        columns: &["expires_at_ms"],
+    }],
 };
 
 const ORGANIZATION_INVENTORY_RECEIPTS: TableSpec = TableSpec {
@@ -3886,6 +4148,9 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_AUTH_DRAFTS,
     ORGANIZATION_AUTH_DRAFT_RECEIPTS,
     ORGANIZATION_AUTH_DRAFT_TESTS,
+    ORGANIZATION_AUTH_CONNECTIONS,
+    ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS,
+    ORGANIZATION_AUTH_CONNECTION_RECEIPTS,
     ORGANIZATION_INVENTORY_ACKS,
     ORGANIZATION_GROUPS,
     ORGANIZATION_GROUP_MEMBERS,
@@ -4493,6 +4758,10 @@ mod tests {
     const POSTGRES_AUTH_DRAFT_TEST_ADMISSION: &str = include_str!(
         "../migrations/postgres/20261123020000_organization_auth_draft_test_admission.sql"
     );
+    const SQLITE_AUTH_CONNECTIONS: &str =
+        include_str!("../migrations/sqlite/20261123030000_organization_auth_connections.sql");
+    const POSTGRES_AUTH_CONNECTIONS: &str =
+        include_str!("../migrations/postgres/20261123030000_organization_auth_connections.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4557,6 +4826,7 @@ mod tests {
             SQLITE_AUTH_DRAFTS,
             SQLITE_AUTH_DRAFT_TESTS,
             SQLITE_AUTH_DRAFT_TEST_ADMISSION,
+            SQLITE_AUTH_CONNECTIONS,
         ];
         let postgres = [
             POSTGRES_ORGANIZATIONS,
@@ -4600,6 +4870,7 @@ mod tests {
             POSTGRES_AUTH_DRAFTS,
             POSTGRES_AUTH_DRAFT_TESTS,
             POSTGRES_AUTH_DRAFT_TEST_ADMISSION,
+            POSTGRES_AUTH_CONNECTIONS,
         ];
         validate_migration_source(&sqlite.join("\n"), false)
             .expect("SQLite migration set matches schema");
