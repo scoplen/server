@@ -842,6 +842,20 @@ async fn visibility(f: &Fixture) {
     let retained =
         SyncOrganizationViewResponse::from_cbor(&retained.body).expect("retained tenant view");
     assert!(retained.objects.iter().any(|object| object.object_id == other_host.id));
+    // An account-only membership has no verified owning Organization.
+    let unscoped_vault = Uuid::now_v7();
+    let account = b.registration.payload.account_id.into_bytes();
+    match &f.backend {
+        AuthBackend::Sqlite(store) => {
+            store.create_shared_sync_vault(unscoped_vault.into_bytes(), account, &[1]).await
+        }
+        AuthBackend::Postgres(store) => {
+            store.create_shared_sync_vault(unscoped_vault.into_bytes(), account, &[1]).await
+        }
+    }
+    .expect("existing standalone Shared membership");
+    let unscoped_keys = format!("/sync/v1/vaults/{unscoped_vault}/keys");
+    sync_problem(&cbor_call(f, &b, "GET", &unscoped_keys, &[]).await, 404, "sync.object_not_found");
     let session_body = SyncSessionRequest {
         client_version: "0.1.0".into(),
         model_version: 1,
