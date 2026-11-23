@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Suspension commits authority, credential retirement, audit and its receipt together.
 
+mod candidates;
+
 use axum::body::Body;
 use scoplen_api::auth_connection::{ConnectionResource, ConnectionStatus};
 
