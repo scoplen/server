@@ -271,8 +271,8 @@ export function TeamWorkspace({
       issuerHandle.current?.hasLocalWork() &&
       !(await confirm(
         t(
-          "Leave these issuer settings? Unsaved input and any original confirmation will be cleared. An unconfirmed operation may already have completed.",
-          "要离开签发方设置吗？尚未保存的输入和原操作确认数据将被清除。尚未确认的操作可能已经完成。",
+          "Leave these issuer settings? This tab will lose unsaved input, original confirmation data and any pending sign-in test result.",
+          "要离开签发方设置吗？此标签页将丢失未保存的输入、原操作确认数据和待完成的登录测试结果。",
         ),
       ))
     )

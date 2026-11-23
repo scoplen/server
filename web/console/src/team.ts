@@ -163,7 +163,7 @@ export function strongEtag(value: unknown): string {
     throw new Error("Invalid resource version.");
   return result;
 }
-function resourceTimestamp(value: unknown): string {
+export function resourceTimestamp(value: unknown): string {
   const result = text(value);
   timestamp(result.replace(/\.\d+Z$/, "Z"));
   return result;

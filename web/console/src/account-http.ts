@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { AccountProofKey, targetUrl } from "./account-proof.ts";
+import { accountBrowserOperations } from "./generated/api.ts";
 import {
   RequestFailure,
   type ApiResponse,
@@ -10,6 +11,26 @@ import { jsonResponse, object } from "./wire.ts";
 
 export type AccountOperation =
   "options" | "login" | "refresh" | "logout" | "request";
+
+export function accountBrowserRoute(method: Method, pathname: string) {
+  const segments = pathname.split("/");
+  return accountBrowserOperations.find(
+    (route) =>
+      route.method === method &&
+      route.path
+        .split("/")
+        .every(
+          (part, index, parts) =>
+            parts.length === segments.length &&
+            (part.startsWith("{")
+              ? /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                  segments[index],
+                )
+              : part === segments[index]),
+        ),
+  );
+}
+
 export class AccountFailure extends RequestFailure {
   readonly operation: AccountOperation;
   constructor(
@@ -122,6 +143,13 @@ export async function accountFetch({
   const proof = await key.proof(origin, path, method, token);
   current();
   const changed = method !== "GET" && operation !== "options";
+  const acceptsCallbackCookie =
+    operation === "request" &&
+    token &&
+    method === "POST" &&
+    !url.search &&
+    accountBrowserRoute(method, url.pathname)?.path ===
+      "/api/v1/orgs/{org}/auth-connection-draft/test-login";
   let response: Response;
   try {
     response = await fetch(url.href, {
@@ -140,7 +168,9 @@ export async function accountFetch({
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
       credentials:
-        operation === "login" || operation === "refresh"
+        operation === "login" ||
+        operation === "refresh" ||
+        acceptsCallbackCookie
           ? "same-origin"
           : "omit",
       redirect: "error",

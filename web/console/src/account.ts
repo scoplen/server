@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { accountBrowserOperations } from "./generated/api.ts";
 import {
   AccountProofKey,
   canonicalOrigin,
@@ -8,6 +7,7 @@ import {
 } from "./account-proof.ts";
 import {
   AccountFailure,
+  accountBrowserRoute,
   accountFetch,
   type AccountOperation,
 } from "./account-http.ts";
@@ -222,23 +222,8 @@ export class AccountClient implements AccountTransport {
       if (this.#logoutAttempted)
         throw new AccountFailure("request", "sign_out_pending");
       const url = targetUrl(this.origin, path);
-      const segments = url.pathname.split("/");
-      const allowed = accountBrowserOperations.some(
-        (route) =>
-          route.method === method &&
-          route.path
-            .split("/")
-            .every(
-              (part, index, parts) =>
-                parts.length === segments.length &&
-                (part.startsWith("{")
-                  ? /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
-                      segments[index],
-                    )
-                  : part === segments[index]),
-            ),
-      );
-      if (!allowed) throw new AccountFailure("request", "route_not_available");
+      if (!accountBrowserRoute(method, url.pathname))
+        throw new AccountFailure("request", "route_not_available");
       const token = await this.#accessToken(generation, "request");
       return accountFetch({
         origin: this.origin,

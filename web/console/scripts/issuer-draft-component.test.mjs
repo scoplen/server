@@ -46,7 +46,7 @@ test("current draft renders the exact issuer as inert text and names its generat
     data: { issuer: "https://Issuer.example/Tenant<&>/" },
   };
   const html = renderToStaticMarkup(createElement(detail, { draft }));
-  assert.match(html, /Untested issuer draft/);
+  assert.match(html, /<h3>Issuer draft<\/h3>/);
   assert.match(html, /https:\/\/Issuer\.example\/Tenant&lt;&amp;&gt;\//);
   assert.ok(html.includes(draft.id));
   assert.doesNotMatch(html, /<a |href=|src=|<input/);

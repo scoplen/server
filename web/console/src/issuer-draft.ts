@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import type { AuthConnectionDraftResource } from "./generated/api.ts";
+import type {
+  AuthConnectionDraftResource,
+  DraftLoginAttempt,
+  DraftLoginCredentials,
+} from "./generated/api.ts";
 import { canonicalOrigin } from "./account-proof.ts";
 import {
   operationId,
   RequestFailure,
   resource,
+  resourceTimestamp,
   TeamApi,
   type ApiResponse,
 } from "./team.ts";
-import { uuid } from "./wire.ts";
+import { object, text, uuid } from "./wire.ts";
 
 export function draftIssuer(value: unknown): string {
   if (
@@ -76,6 +81,57 @@ function parseDraft(
 }
 
 const windowMs = 86_400_000;
+const testWindowMs = 300_000;
+type LoginTest =
+  | { kind: "attempt"; attempt: DraftLoginAttempt; until: number; url?: string }
+  | { kind: "wait"; until: number }
+  | { kind: "unavailable" | "expired" };
+
+function validCredential(value: string): boolean {
+  return (
+    Boolean(value) &&
+    value.isWellFormed() &&
+    !/\p{Cc}/u.test(value) &&
+    new TextEncoder().encode(value).length <= 512
+  );
+}
+
+function loginAttempt(
+  fields: Record<string, unknown>,
+  org: string,
+  draft: string,
+): DraftLoginAttempt {
+  const id = uuid(fields.id);
+  const expiry = resourceTimestamp(fields.expires_at);
+  const status = fields.status;
+  if (
+    uuid(fields.organization_id) !== org ||
+    uuid(fields.draft_generation) !== draft ||
+    (status !== "pending" && status !== "verified" && status !== "failed")
+  )
+    throw new Error("Mismatched login test.");
+  return {
+    id,
+    organization_id: org,
+    draft_generation: draft,
+    status,
+    expires_at: expiry,
+  };
+}
+
+function providerNavigation(value: unknown, issuer: string): string {
+  const location = text(value);
+  const authority = /^https:\/\/([^/?]+)/i.exec(location)?.[1];
+  if (
+    !authority ||
+    authority.includes("@") ||
+    /[\p{White_Space}\p{Cc}\\#]/u.test(location) ||
+    new URL(location).origin !== new URL(issuer).origin
+  )
+    throw new Error("Invalid provider navigation.");
+  return location;
+}
+
 type Original = Readonly<
   {
     key: string;
@@ -95,6 +151,7 @@ export class IssuerDraftActions {
   #disposed = false;
   #busy = false;
   #expiredKey?: string;
+  #login?: LoginTest;
 
   constructor(api: TeamApi, org: string) {
     this.api = api;
@@ -105,6 +162,17 @@ export class IssuerDraftActions {
   }
   get path() {
     return `/api/v1/orgs/${this.org}/auth-connection-draft`;
+  }
+  get login() {
+    if (this.#login && "until" in this.#login && this.loginRemaining === 0)
+      this.#login = { kind: "expired" };
+    return this.#login;
+  }
+  get loginRemaining() {
+    const login = this.#login;
+    return login && "until" in login
+      ? Math.max(0, login.until - performance.now())
+      : 0;
   }
   get canConfirm() {
     if (!this.pending || this.pending.key === this.#expiredKey) return false;
@@ -119,6 +187,7 @@ export class IssuerDraftActions {
     this.current = undefined;
     this.pending = undefined;
     this.#expiredKey = undefined;
+    this.#login = undefined;
   }
   dispose() {
     this.#disposed = true;
@@ -149,6 +218,7 @@ export class IssuerDraftActions {
   }
   async read() {
     return this.#run(async () => {
+      const previous = this.current?.id;
       this.current = undefined;
       let result: AuthConnectionDraftResource | null;
       try {
@@ -163,13 +233,147 @@ export class IssuerDraftActions {
           error.code === "organization.not_found" &&
           !error.changed &&
           !error.retryable
-        ))
+        )) {
+          if (this.#login?.kind === "attempt")
+            this.#login = { kind: "unavailable" };
           throw error;
+        }
         result = null;
       }
       this.#check();
+      if (
+        this.#login?.kind === "unavailable" ||
+        (result?.id !== previous && this.#login?.kind !== "wait")
+      )
+        this.#login = undefined;
       this.current = result;
       return result;
+    });
+  }
+  async startLogin(credentials: DraftLoginCredentials) {
+    return this.#run(async () => {
+      const draft = this.current;
+      const login = this.login;
+      if (
+        !draft ||
+        this.pending ||
+        login?.kind === "wait" ||
+        login?.kind === "unavailable" ||
+        (login?.kind === "attempt" && login.attempt.status === "pending")
+      )
+        throw new RequestFailure("draft_test_not_ready");
+      if (
+        !validCredential(credentials.client_id) ||
+        !validCredential(credentials.client_secret)
+      )
+        throw new RequestFailure("invalid_draft_client");
+
+      this.#login = undefined;
+      try {
+        const reply = await this.api.transport.request(
+          "POST",
+          `${this.path}/test-login`,
+          {
+            body: credentials,
+            etag: draft.etag,
+            success: 201,
+            maximum: 8192,
+          },
+        );
+        this.#check();
+        try {
+          const fields = object(reply.value);
+          const attempt = loginAttempt(fields, this.org, draft.id);
+          if (attempt.status !== "pending" || reply.etag !== null)
+            throw new Error("Invalid login test start.");
+          const url = providerNavigation(
+            fields.authorization_url,
+            draft.data.issuer,
+          );
+          const until =
+            performance.now() +
+            Math.min(testWindowMs, Date.parse(attempt.expires_at) - Date.now());
+          this.#login = { kind: "attempt", attempt, until, url };
+        } catch {
+          throw new RequestFailure("invalid_response", 201, true);
+        }
+      } catch (error) {
+        this.#check();
+        if (
+          !(error instanceof RequestFailure) ||
+          error.changed ||
+          (error.status === 409 && error.code === "organization.conflict")
+        )
+          this.#login = {
+            kind: "wait",
+            until: performance.now() + testWindowMs,
+          };
+        else if (
+          error.status === 412 &&
+          error.code === "organization.precondition_failed"
+        )
+          this.#login = { kind: "unavailable" };
+        throw error;
+      }
+    });
+  }
+  async readLogin() {
+    return this.#run(async () => {
+      const login = this.login;
+      if (login?.kind !== "attempt" || login.attempt.status !== "pending")
+        return;
+      const original = login.attempt;
+      try {
+        const reply = await this.api.transport.request(
+          "GET",
+          `${this.path}/test-login/${original.id}`,
+          {
+            maximum: 8192,
+          },
+        );
+        this.#check();
+        if (this.login !== login) return;
+        try {
+          const fields = object(reply.value);
+          const attempt = loginAttempt(
+            fields,
+            this.org,
+            original.draft_generation,
+          );
+          if (
+            reply.etag !== null ||
+            "authorization_url" in fields ||
+            attempt.id !== original.id ||
+            attempt.expires_at !== original.expires_at
+          )
+            throw new Error("Invalid login test status.");
+          this.#login = {
+            ...login,
+            attempt,
+            url: attempt.status === "pending" ? login.url : undefined,
+          };
+        } catch {
+          throw new RequestFailure("invalid_response", 200);
+        }
+      } catch (error) {
+        this.#check();
+        if (
+          error instanceof RequestFailure &&
+          error.status === 404 &&
+          error.code === "organization.not_found" &&
+          !error.changed &&
+          !error.retryable
+        ) {
+          this.#login = { kind: "unavailable" };
+          return;
+        }
+        if (
+          error instanceof RequestFailure &&
+          (error.status === 401 || error.status === 403)
+        )
+          this.#login = { kind: "unavailable" };
+        throw error;
+      }
     });
   }
   async create(issuer: string) {
@@ -210,6 +414,7 @@ export class IssuerDraftActions {
   async #attempt(confirmation = false) {
     const original = this.pending!;
     this.current = undefined;
+    if (this.#login?.kind !== "wait") this.#login = undefined;
     try {
       if (original.method === "POST") {
         const reply = await this.api.transport.request("POST", this.path, {

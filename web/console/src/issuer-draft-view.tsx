@@ -2,7 +2,10 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { Field } from "./editors.tsx";
 import { requestFeedback } from "./feedback.ts";
-import type { AuthConnectionDraftResource } from "./generated/api.ts";
+import type {
+  AuthConnectionDraftResource,
+  DraftLoginCredentials,
+} from "./generated/api.ts";
 import {
   draftRegistrationSettings,
   IssuerDraftActions,
@@ -18,7 +21,7 @@ export function DraftDetail({ draft }: { draft: AuthConnectionDraftResource }) {
   const { t } = useLocale();
   return (
     <div className="draft-detail">
-      <h3>{t("Untested issuer draft", "尚未验证的签发方草案")}</h3>
+      <h3>{t("Issuer draft", "签发方草案")}</h3>
       <p className="mono identifier" dir="ltr">
         {draft.data.issuer}
       </p>
@@ -123,6 +126,142 @@ export function DraftRegistration({
   );
 }
 
+function DraftLoginPanel({
+  login,
+  busy,
+  disabled,
+  onStart,
+  onRead,
+}: {
+  login: IssuerDraftActions["login"];
+  busy: boolean;
+  disabled: boolean;
+  onStart: (credentials: DraftLoginCredentials) => void;
+  onRead: () => void;
+}) {
+  const { t } = useLocale();
+  const pending =
+    login?.kind === "attempt" && login.attempt.status === "pending";
+  return (
+    <section aria-labelledby="issuer-test-heading" className="form-fields">
+      <h3 id="issuer-test-heading">{t("Test sign-in", "测试登录")}</h3>
+      {login?.kind === "wait" && (
+        <p className="notice" role="status">
+          {t(
+            "A test may still be active. Wait up to five minutes for it to expire, then start a new test here.",
+            "可能仍有测试在进行。请等待最多五分钟，待其过期后在此开始新测试。",
+          )}
+        </p>
+      )}
+      {login?.kind === "unavailable" && (
+        <p className="notice" role="status">
+          {t(
+            "This test is no longer available. Read the current draft before starting a new test.",
+            "此次测试已不可用。请先查看当前草案，再开始新测试。",
+          )}
+        </p>
+      )}
+      {login?.kind === "expired" && (
+        <p className="notice" role="status">
+          {t(
+            "The test window has ended. Start a fresh test.",
+            "测试时段已结束。请开始新测试。",
+          )}
+        </p>
+      )}
+      {login?.kind === "attempt" && (
+        <p className="notice" role="status">
+          {login.attempt.status === "verified"
+            ? t(
+                "Sign-in verified. This test leaves team access as it was. Review the test in the Audit timeline.",
+                "登录已验证。团队访问保持原状。可在审计时间线中查看此次测试。",
+              )
+            : login.attempt.status === "failed"
+              ? t(
+                  "Sign-in failed. Check the application registration and review the Audit timeline before starting a new test.",
+                  "登录失败。请核对应用注册参数并查看审计时间线，再开始新测试。",
+                )
+              : t(
+                  "Complete sign-in in the new tab, then return here and check the result. Keep this team tab open.",
+                  "在新标签页登录，然后返回此处查看结果。请保持此团队标签页打开。",
+                )}
+        </p>
+      )}
+      {pending && (
+        <div className="inline-actions">
+          {login.url && !disabled && !busy && (
+            <a href={login.url} target="_blank" rel="noopener noreferrer">
+              {t("Open Auth sign-in in a new tab", "在新标签页打开 Auth 登录")}
+            </a>
+          )}
+          <button
+            type="button"
+            className="secondary"
+            disabled={disabled || busy}
+            onClick={onRead}
+          >
+            {busy
+              ? t("Checking result…", "正在查看结果…")
+              : t("Check test result", "查看测试结果")}
+          </button>
+        </div>
+      )}
+      {!pending && login?.kind !== "wait" && login?.kind !== "unavailable" && (
+        <form
+          className="form-fields"
+          autoComplete="off"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (disabled || busy) return;
+            const form = new FormData(event.currentTarget);
+            event.currentTarget.reset();
+            onStart({
+              client_id: String(form.get("client_id")),
+              client_secret: String(form.get("client_secret")),
+            });
+          }}
+        >
+          <Field label={t("Client ID", "客户端 ID")}>
+            <input
+              name="client_id"
+              dir="ltr"
+              required
+              maxLength={512}
+              autoCapitalize="none"
+              spellCheck={false}
+              disabled={disabled || busy}
+            />
+          </Field>
+          <Field
+            label={t("Client secret", "客户端密钥")}
+            help={t(
+              "Use the secret from your application registration. You will enter it again for each test.",
+              "请使用应用注册时获得的密钥。每次测试都需要重新输入。",
+            )}
+          >
+            <input
+              name="client_secret"
+              type="password"
+              dir="ltr"
+              autoComplete="off"
+              required
+              maxLength={512}
+              disabled={disabled || busy}
+            />
+          </Field>
+          <div className="inline-actions">
+            <button className="secondary" disabled={disabled || busy}>
+              {busy
+                ? t("Starting test…", "正在开始测试…")
+                : t("Start sign-in test", "开始登录测试")}
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 export function IssuerDraftPanel({
   api,
   organization,
@@ -149,15 +288,24 @@ export function IssuerDraftPanel({
     { cancel: string } | { discard: true }
   >();
   const [failure, setFailure] = useState<unknown>();
+  const [testFailure, setTestFailure] = useState<{
+    error: unknown;
+    start: boolean;
+  }>();
   const [, tick] = useState(0);
   const current = workflow.current?.current,
-    pending = workflow.current?.pending;
+    pending = workflow.current?.pending,
+    login = workflow.current?.login;
   const blocked = disabled || busy;
   useEffect(() => {
     const actions = new IssuerDraftActions(api, organization);
     workflow.current = actions;
     handle.current = {
-      hasLocalWork: () => typed.current || Boolean(actions.pending),
+      hasLocalWork: () =>
+        typed.current ||
+        Boolean(actions.pending) ||
+        (actions.login?.kind === "attempt" &&
+          actions.login.attempt.status === "pending"),
     };
     running.current = true;
     setBusy(true);
@@ -186,6 +334,15 @@ export function IssuerDraftPanel({
     const timer = window.setInterval(() => tick((value) => value + 1), 30_000);
     return () => window.clearInterval(timer);
   }, [pending]);
+  useEffect(() => {
+    const delay = workflow.current?.loginRemaining;
+    if (!delay) return;
+    const timer = window.setTimeout(
+      () => tick((value) => value + 1),
+      Math.ceil(delay),
+    );
+    return () => window.clearTimeout(timer);
+  }, [login]);
 
   function updateIssuer(value: string) {
     typed.current = Boolean(value);
@@ -208,6 +365,7 @@ export function IssuerDraftPanel({
     setBusy(true);
     onBusy(true);
     setFailure(undefined);
+    setTestFailure(undefined);
     setReview(undefined);
     if (operation !== "read") setReceipt(undefined);
     try {
@@ -241,6 +399,59 @@ export function IssuerDraftPanel({
       }
     }
   }
+
+  async function runTest(credentials?: DraftLoginCredentials) {
+    const actions = workflow.current;
+    if (!actions || running.current || disabled || !actions.current || review)
+      return;
+    running.current = true;
+    setBusy(true);
+    onBusy(true);
+    setTestFailure(undefined);
+    try {
+      if (credentials) await actions.startLogin(credentials);
+      else await actions.readLogin();
+    } catch (error) {
+      if (workflow.current === actions && actions.login?.kind !== "wait")
+        setTestFailure({ error, start: Boolean(credentials) });
+    } finally {
+      if (workflow.current === actions) {
+        running.current = false;
+        setBusy(false);
+        onBusy(false);
+      }
+    }
+  }
+
+  function testFeedback({ error, start }: { error: unknown; start: boolean }) {
+    if (error instanceof RequestFailure) {
+      switch (error.code) {
+        case "invalid_draft_client":
+          return t(
+            "Enter a Client ID and secret of at most 512 UTF-8 bytes each, without control characters.",
+            "请输入客户端 ID 和密钥，每项最多 512 个 UTF-8 字节，且不能包含控制字符。",
+          );
+        case "organization.auth_provider_unavailable":
+          return t(
+            "Scoplen could not use this issuer’s discovery document. Check that the issuer is reachable and the application supports confidential OIDC sign-in.",
+            "Scoplen 无法使用此签发方的发现文档。请检查签发方是否可达，以及应用是否支持机密 OIDC 登录。",
+          );
+        case "policy.denied":
+          return t(
+            "This session or issuer cannot run the test. Ask your deployment operator to check issuer trust and sign in again to obtain current permissions.",
+            "当前会话或签发方无法运行测试。请联系部署运营人员检查签发方信任设置，并重新登录以取得当前权限。",
+          );
+        case "invalid_response":
+        case "response_lost":
+          if (!start)
+            return t(
+              "Could not verify the test result. Check it again from this tab.",
+              "无法验证测试结果。请在此标签页重新查看。",
+            );
+      }
+    }
+    return requestFeedback(error, t);
+  }
   const failureMessage =
     failure instanceof RequestFailure && failure.code === "invalid_draft_issuer"
       ? t(
@@ -271,8 +482,8 @@ export function IssuerDraftPanel({
       </h2>
       <p>
         {t(
-          "Save your Auth instance’s issuer URL as an untested draft. Enterprise sign-in requires separate setup.",
-          "将 Auth 实例的 issuer 地址保存为待验证的草案。启用企业登录需要另行配置。",
+          "Use your existing Auth instance to prepare and test an enterprise sign-in connection. Teams can keep using Scoplen accounts during setup.",
+          "使用已有的 Auth 实例准备并测试企业登录连接。设置期间，团队可以继续使用 Scoplen 账号。",
         )}
       </p>
       {receipt && (
@@ -297,6 +508,23 @@ export function IssuerDraftPanel({
           origin={api.transport.origin}
           issuer={current.data.issuer}
         />
+      )}
+      {current && !pending && !review && (
+        <>
+          {testFailure && (
+            <p role="alert" className="notice error">
+              {testFeedback(testFailure)}
+            </p>
+          )}
+          <DraftLoginPanel
+            key={current.id}
+            login={login}
+            busy={busy}
+            disabled={disabled}
+            onStart={(credentials) => void runTest(credentials)}
+            onRead={() => void runTest()}
+          />
+        </>
       )}
       {!busy && current === null && (
         <p>
