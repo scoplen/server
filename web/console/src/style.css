@@ -755,6 +755,25 @@ fieldset {
 .issuer-draft .notice > p {
   margin: 6px 0;
 }
+.draft-registration > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.draft-registration > p {
+  margin: 8px 0;
+}
+.draft-registration-fields {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.draft-registration-fields dt {
+  color: var(--muted-foreground);
+}
+.draft-registration-fields dd {
+  margin: 2px 0 0;
+}
 .danger-zone {
   margin-top: 40px;
   border-top: 1px solid var(--border);

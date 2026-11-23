@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { AuthConnectionDraftResource } from "./generated/api.ts";
+import { canonicalOrigin } from "./account-proof.ts";
 import {
   operationId,
   RequestFailure,
@@ -26,6 +27,26 @@ export function draftIssuer(value: unknown): string {
       return value;
   }
   throw new RequestFailure("invalid_draft_issuer");
+}
+
+export async function draftRegistrationSettings(
+  origin: string,
+  issuer: string,
+) {
+  const trustedOrigin = canonicalOrigin(origin);
+  const bytes = new TextEncoder().encode(draftIssuer(issuer));
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  const issuerHash = Array.from(hash, (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return {
+    redirect_uri: `${trustedOrigin}/api/v1/auth/enterprise/oidc/${issuerHash}/callback`,
+    response_type: "code",
+    grant_type: "authorization_code",
+    code_challenge_method: "S256",
+    scope: "openid",
+    token_endpoint_auth_method: "client_secret_basic",
+  };
 }
 
 function parseDraft(

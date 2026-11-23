@@ -462,6 +462,11 @@ Auth instance's issuer URL and choose **Save draft**. Return to the same team to
 the saved address. To replace it, review and cancel the current generation before saving
 another address. The Console labels the draft as untested.
 
+Open **Application registration details** below the saved draft and copy the callback and
+OIDC settings for your Auth administrator. The Console derives them from the verified team
+session's HTTPS origin and the issuer as saved, including its path and trailing slash.
+The same settings are available through `splctl auth registration-settings`.
+
 API clients use `/api/v1/orgs/{org}/auth-connection-draft`. Use a Device or Account-browser session with
 `auth-drafts:manage` and a fresh DPoP proof. Current Organization policy must permit the
 operation. A browser mutation also needs the deployment's trusted Origin.

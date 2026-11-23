@@ -3,7 +3,10 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import { Field } from "./editors.tsx";
 import { requestFeedback } from "./feedback.ts";
 import type { AuthConnectionDraftResource } from "./generated/api.ts";
-import { IssuerDraftActions } from "./issuer-draft.ts";
+import {
+  draftRegistrationSettings,
+  IssuerDraftActions,
+} from "./issuer-draft.ts";
 import { useLocale } from "./locale.tsx";
 import { RequestFailure, type TeamApi } from "./team.ts";
 
@@ -24,6 +27,99 @@ export function DraftDetail({ draft }: { draft: AuthConnectionDraftResource }) {
         <span className="mono identifier">{draft.id}</span>
       </p>
     </div>
+  );
+}
+
+export function DraftRegistration({
+  origin,
+  issuer,
+}: {
+  origin: string;
+  issuer: string;
+}) {
+  const { t } = useLocale();
+  const [settings, setSettings] =
+    useState<Awaited<ReturnType<typeof draftRegistrationSettings>>>();
+  const [failed, setFailed] = useState(false);
+  const [copy, setCopy] = useState<"copied" | "failed">();
+
+  useEffect(() => {
+    let active = true;
+    void draftRegistrationSettings(origin, issuer).then(
+      (value) => {
+        if (active) setSettings(value);
+      },
+      () => {
+        if (active) setFailed(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [origin, issuer]);
+
+  return (
+    <details className="draft-registration">
+      <summary>{t("Application registration details", "应用注册参数")}</summary>
+      <p>
+        {t(
+          "Give these settings to your Auth administrator to register a private, confidential application for human sign-in.",
+          "将这些参数交给 Auth 管理员，登记一个私有机密应用并启用人类登录。",
+        )}
+      </p>
+      {failed && (
+        <p role="alert">
+          {t(
+            "Registration details could not be generated. Reload this page or use the server CLI worksheet.",
+            "无法生成注册参数。请刷新页面或使用服务器 CLI 获取参数。",
+          )}
+        </p>
+      )}
+      {settings && (
+        <>
+          <dl className="draft-registration-fields">
+            {Object.entries(settings).map(([field, value]) => (
+              <div key={field}>
+                <dt>
+                  <code>{field}</code>
+                </dt>
+                <dd className="mono identifier" dir="ltr">
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <div className="inline-actions">
+            <button
+              className="secondary"
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(
+                    JSON.stringify(settings, null, 2),
+                  );
+                  setCopy("copied");
+                } catch {
+                  setCopy("failed");
+                }
+              }}
+            >
+              {t("Copy registration settings", "复制注册参数")}
+            </button>
+          </div>
+          {copy && (
+            <p role="status">
+              {copy === "copied"
+                ? t("Registration settings copied.", "已复制注册参数。")
+                : t(
+                    "Clipboard unavailable. You can select and copy the values above.",
+                    "无法访问剪贴板。可选中并复制上方参数。",
+                  )}
+            </p>
+          )}
+        </>
+      )}
+    </details>
   );
 }
 
@@ -195,6 +291,13 @@ export function IssuerDraftPanel({
         </p>
       )}
       {!busy && current && <DraftDetail draft={current} />}
+      {!busy && current && !pending && !review && !disabled && (
+        <DraftRegistration
+          key={`${organization}:${current.id}:${api.transport.origin}`}
+          origin={api.transport.origin}
+          issuer={current.data.issuer}
+        />
+      )}
       {!busy && current === null && (
         <p>
           {t(

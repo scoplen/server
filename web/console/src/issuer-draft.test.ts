@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mock, test } from "node:test";
 import { AccountProofKey } from "./account-proof.ts";
 import { accountFetch } from "./account-http.ts";
-import { IssuerDraftActions, draftIssuer } from "./issuer-draft.ts";
+import {
+  IssuerDraftActions,
+  draftIssuer,
+  draftRegistrationSettings,
+} from "./issuer-draft.ts";
 import {
   TeamApi,
   RequestFailure,
@@ -28,6 +33,43 @@ const item = (generation = id, proposed = issuer) => ({
   data: { organization_id: org, issuer: proposed },
 });
 const missing = () => new RequestFailure("organization.not_found", 404);
+
+test("the offline registration worksheet binds the exact saved issuer to the public HTTPS origin", async () => {
+  const publicOrigin = "https://console.example:9443";
+  const generate = (value: string) => {
+    const hash = createHash("sha256").update(value, "utf8").digest("hex");
+    return {
+      redirect_uri: `${publicOrigin}/api/v1/auth/enterprise/oidc/${hash}/callback`,
+      response_type: "code",
+      grant_type: "authorization_code",
+      code_challenge_method: "S256",
+      scope: "openid",
+      token_endpoint_auth_method: "client_secret_basic",
+    };
+  };
+  for (const value of [
+    issuer,
+    issuer.slice(0, -1),
+    issuer.replace("%2f", "%2F"),
+    "https://identity.example/租户/",
+  ])
+    assert.deepEqual(
+      await draftRegistrationSettings(publicOrigin, value),
+      generate(value),
+    );
+  await assert.rejects(
+    draftRegistrationSettings("http://console.example", issuer),
+  );
+  await assert.rejects(
+    draftRegistrationSettings(`${publicOrigin}/setup`, issuer),
+  );
+  await assert.rejects(
+    draftRegistrationSettings(
+      publicOrigin,
+      "https://identity.example/?unexpected",
+    ),
+  );
+});
 function fixture() {
   const calls: { method: Method; path: string; options: RequestOptions }[] = [];
   const transport: AccountTransport & {
