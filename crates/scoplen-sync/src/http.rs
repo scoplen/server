@@ -594,8 +594,9 @@ impl SyncBackend {
         ) -> Result<SyncWriteAdmissionDecision, SyncWriteAdmissionError>
     );
     backend_async!(
-        list_sync_vaults_for_account(
+        list_sync_session_vaults(
             account_id: key_storage::AccountId,
+            scope: storage::SessionVaultScope,
         ) -> Result<
             Vec<storage::AccountVaultDescriptor>,
             storage::SyncStoreError,
@@ -754,6 +755,7 @@ pub fn personal_router_with_notifications<A: SyncAuthenticator>(
 ) -> Router {
     let state = SyncHttpState {
         store: store.into(),
+        session_vault_scope: storage::SessionVaultScope::Personal,
         authenticator,
         notifications,
         write_rate_limits,
@@ -821,6 +823,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
 ) -> Router {
     let state = SyncHttpState {
         store: store.into(),
+        session_vault_scope: storage::SessionVaultScope::PersonalAndShared,
         authenticator,
         notifications,
         write_rate_limits,
@@ -849,6 +852,7 @@ pub fn router_with_limits<A: SyncAuthenticator>(
 #[derive(Clone)]
 struct SyncHttpState<A> {
     store: SyncBackend,
+    session_vault_scope: storage::SessionVaultScope,
     authenticator: A,
     notifications: NotificationHub,
     write_rate_limits: WriteRateLimits,
@@ -920,7 +924,7 @@ async fn session<A: SyncAuthenticator>(
         .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let mut vaults: Vec<_> = state
         .store
-        .list_sync_vaults_for_account(account_id)
+        .list_sync_session_vaults(account_id, state.session_vault_scope)
         .await
         .map_err(|error| SyncHttpError::from_store(error, &instance))?
         .into_iter()

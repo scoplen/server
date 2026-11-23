@@ -128,6 +128,15 @@ pub struct AccountVaultDescriptor {
     pub rotation_pending: bool,
 }
 
+/// Vaults discoverable through the router's supported membership model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionVaultScope {
+    /// Only the Account's own Personal vault. Organization descriptors are authorized separately.
+    Personal,
+    /// Include Shared vaults under the standalone router's account-membership contract.
+    PersonalAndShared,
+}
+
 /// The vault classes currently defined by the sync protocol.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum VaultKind {
@@ -400,6 +409,19 @@ impl SqliteStore {
         &self,
         account_id: AccountId,
     ) -> Result<Vec<AccountVaultDescriptor>, SyncStoreError> {
+        self.list_sync_session_vaults(account_id, SessionVaultScope::PersonalAndShared).await
+    }
+
+    /// Read only the vault metadata admitted by the selected session profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error if visible metadata cannot be read safely.
+    pub async fn list_sync_session_vaults(
+        &self,
+        account_id: AccountId,
+        scope: SessionVaultScope,
+    ) -> Result<Vec<AccountVaultDescriptor>, SyncStoreError> {
         let rows = sqlx::query(
             "SELECT v.vault_id, v.kind, v.current_seq, p.key_epoch, v.rotation_pending
              FROM sync_personal_vaults AS p
@@ -409,11 +431,12 @@ impl SqliteStore {
              SELECT v.vault_id, v.kind, v.current_seq, m.key_epoch, v.rotation_pending
              FROM sync_vault_members AS m
              JOIN sync_vaults AS v ON v.vault_id = m.vault_id
-             WHERE m.account_id = ? AND v.kind = 'shared'
+             WHERE m.account_id = ? AND v.kind = 'shared' AND ?
              ORDER BY 1 ASC",
         )
         .bind(account_id.as_slice())
         .bind(account_id.as_slice())
+        .bind(scope == SessionVaultScope::PersonalAndShared)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter()
@@ -1858,6 +1881,19 @@ impl PostgresStore {
         &self,
         account_id: AccountId,
     ) -> Result<Vec<AccountVaultDescriptor>, SyncStoreError> {
+        self.list_sync_session_vaults(account_id, SessionVaultScope::PersonalAndShared).await
+    }
+
+    /// Read only the vault metadata admitted by the selected session profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-row error if visible metadata cannot be read safely.
+    pub async fn list_sync_session_vaults(
+        &self,
+        account_id: AccountId,
+        scope: SessionVaultScope,
+    ) -> Result<Vec<AccountVaultDescriptor>, SyncStoreError> {
         let rows = sqlx::query(
             "SELECT v.vault_id, v.kind, v.current_seq, p.key_epoch, v.rotation_pending
              FROM sync_personal_vaults AS p
@@ -1867,11 +1903,12 @@ impl PostgresStore {
              SELECT v.vault_id, v.kind, v.current_seq, m.key_epoch, v.rotation_pending
              FROM sync_vault_members AS m
              JOIN sync_vaults AS v ON v.vault_id = m.vault_id
-             WHERE m.account_id = $2 AND v.kind = 'shared'
+             WHERE m.account_id = $2 AND v.kind = 'shared' AND $3
              ORDER BY 1 ASC",
         )
         .bind(account_id.as_slice())
         .bind(account_id.as_slice())
+        .bind(scope == SessionVaultScope::PersonalAndShared)
         .fetch_all(self.pool())
         .await?;
         rows.into_iter()
