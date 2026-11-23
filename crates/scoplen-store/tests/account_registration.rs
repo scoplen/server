@@ -690,8 +690,15 @@ macro_rules! authentication_bindings {
 
 macro_rules! confirmation_rate {
     ($store:expr) => {{
+        const NEXT_WINDOW_MS: i64 = 4_000_000_020_000;
         let store = &$store;
         store.initialize_account_id_retention(CEILING).await.expect("guard");
+        // The established-account debt and the provisional claim must be in the same window.
+        sqlx::query("UPDATE account_entry_state SET time_high_water_ms=$1 WHERE singleton=1")
+            .bind(NEXT_WINDOW_MS - 1)
+            .execute(store.pool())
+            .await
+            .expect("pin the last millisecond of an admission window");
         let fixture = fixture("registration-private-rate", 18);
         let submitted = request(
             &fixture,
@@ -716,7 +723,7 @@ macro_rules! confirmation_rate {
         );
         assert!(matches!(
             execute!(store, confirm, false),
-            Err(AccountRegistrationError::RateLimited(_))
+            Err(AccountRegistrationError::RateLimited(1))
         ));
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_request_challenges")
             .fetch_one(store.pool())
@@ -728,6 +735,15 @@ macro_rules! confirmation_rate {
             .await
             .expect("original receipt preserved");
         assert_eq!(receipts, 1);
+        sqlx::query("UPDATE account_entry_state SET time_high_water_ms=$1 WHERE singleton=1")
+            .bind(NEXT_WINDOW_MS)
+            .execute(store.pool())
+            .await
+            .expect("advance across the quota boundary");
+        assert!(matches!(
+            execute!(store, confirm, false),
+            Ok(AccountRegistrationResult::Confirmed(_))
+        ));
     }};
 }
 
