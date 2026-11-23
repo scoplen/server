@@ -488,6 +488,11 @@ fieldset {
   font-size: 12px;
   padding: 9px 12px;
 }
+.provider-sign-in {
+  color: var(--primary);
+  padding-block: 8px;
+  text-underline-offset: 0.2em;
+}
 .section-intro {
   font-size: 13px;
   max-width: 760px;

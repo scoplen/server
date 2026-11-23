@@ -9,6 +9,7 @@ use scoplen_crypto::{SecretBytes, SecretVec, validate_server_origin};
 use scoplen_store::organizations::{
     auth_connection::ClaimedActivation,
     auth_draft_login::{ClaimedDraftLogin, DraftLoginExchange, DraftLoginProvider},
+    member_link::ClaimedLink,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -104,13 +105,29 @@ pub async fn verify_claimed_draft_login(
         fingerprint: attempt.trust_fingerprint(),
         expires_at_ms: attempt.expires_at_ms(),
     };
-    verify_login(settings, &target, &exchange, |nonce| attempt.matches_nonce(nonce)).await
+    verify_login(settings, &target, &exchange, |nonce| attempt.matches_nonce(nonce)).await.map(drop)
 }
 
 pub(crate) async fn verify_claimed_activation(
     settings: &EnterpriseIdentitySettings,
     attempt: &mut ClaimedActivation,
 ) -> Result<(), DraftExchangeError> {
+    let exchange = attempt.take_exchange().ok_or(DraftExchangeError::Stale)?;
+    let (issuer, provider) = attempt.provider();
+    let target = LoginTarget {
+        origin: attempt.origin(),
+        issuer,
+        provider,
+        fingerprint: attempt.trust_fingerprint(),
+        expires_at_ms: attempt.expires_at_ms(),
+    };
+    verify_login(settings, &target, &exchange, |nonce| attempt.matches_nonce(nonce)).await.map(drop)
+}
+
+pub(crate) async fn verify_claimed_member_link(
+    settings: &EnterpriseIdentitySettings,
+    attempt: &mut ClaimedLink,
+) -> Result<SecretVec, DraftExchangeError> {
     let exchange = attempt.take_exchange().ok_or(DraftExchangeError::Stale)?;
     let (issuer, provider) = attempt.provider();
     let target = LoginTarget {
@@ -128,7 +145,7 @@ async fn verify_login(
     target: &LoginTarget<'_>,
     exchange: &DraftLoginExchange,
     matches_nonce: impl FnOnce(&SecretBytes<32>) -> bool + Send,
-) -> Result<(), DraftExchangeError> {
+) -> Result<SecretVec, DraftExchangeError> {
     let LoginTarget { origin, issuer, provider, expires_at_ms, .. } = *target;
     if !origin.starts_with("https://") || validate_server_origin(origin).is_err() {
         return Err(DraftExchangeError::Stale);

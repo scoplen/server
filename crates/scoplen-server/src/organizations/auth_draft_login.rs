@@ -18,6 +18,7 @@ use scoplen_api::{
         DraftRequestError,
         callback::{
             Callback, IssuerIdentification, activation_cookie_name_from_query, callback_path,
+            member_link_cookie_name_from_query,
         },
         test_login::{DraftLoginCredentials, DraftLoginRequest, DraftLoginStarted},
     },
@@ -45,8 +46,8 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    OrganizationState, browser_authority, invalid, problem, reply, specific_problem, store_problem,
-    team, valid_encoding,
+    OrganizationState, browser_authority, invalid, member_link, problem, reply, specific_problem,
+    store_problem, team, valid_encoding,
 };
 use crate::{
     device_auth::AuthBackend,
@@ -196,7 +197,7 @@ async fn start_attempt(
         &state.origin,
         &issuer,
         &provider.authorization_endpoint,
-        &material.credentials.client_id,
+        material.credentials.client_id.as_bytes(),
         &material.verifier,
         &state_proof,
         &nonce,
@@ -263,14 +264,14 @@ pub(super) fn authorization_url(
     origin: &str,
     issuer: &str,
     endpoint: &str,
-    client_id: &SecretVec,
+    client_id: &[u8],
     verifier: &SecretBytes<32>,
     state: &SecretBytes<32>,
     nonce: &SecretBytes<32>,
 ) -> Option<SecretVec> {
     let mut url = Url::parse(endpoint).ok()?;
     let callback = format!("{origin}{}", callback_path(issuer).ok()?);
-    let client = std::str::from_utf8(client_id.as_bytes()).ok()?;
+    let client = std::str::from_utf8(client_id).ok()?;
     let verifier = URL_SAFE_NO_PAD.encode(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     url.query_pairs_mut()
@@ -428,13 +429,20 @@ async fn callback(State(state): State<OrganizationState>, request: Request<Body>
     let Ok(activation_cookie) = activation_cookie_name_from_query(query) else {
         return callback_page(None, &id);
     };
-    let cookie = match callback_binding(&parts.headers, &activation_cookie, query.len()) {
-        Ok(Some(value)) => Some((activation_cookie.as_str(), value)),
-        Ok(None) => match callback_binding(&parts.headers, COOKIE, query.len()) {
+    let Ok(link_cookie) = member_link_cookie_name_from_query(query) else {
+        return callback_page(None, &id);
+    };
+    let cookie = match (
+        callback_binding(&parts.headers, &activation_cookie, query.len()),
+        callback_binding(&parts.headers, &link_cookie, query.len()),
+    ) {
+        (Ok(Some(value)), Ok(None)) => Some((activation_cookie.as_str(), value)),
+        (Ok(None), Ok(Some(value))) => Some((link_cookie.as_str(), value)),
+        (Ok(None), Ok(None)) => match callback_binding(&parts.headers, COOKIE, query.len()) {
             Ok(Some(value)) => Some((COOKIE, value)),
             _ => None,
         },
-        Err(()) => None,
+        _ => None,
     };
     let Some((name, binding)) = cookie else { return callback_page(None, &id) };
     let Ok(callback) =
@@ -442,10 +450,14 @@ async fn callback(State(state): State<OrganizationState>, request: Request<Body>
     else {
         return callback_page(None, &id);
     };
-    if name != COOKIE {
-        return activation_callback(&state, callback, name, &id).await;
+    if name == COOKIE {
+        return draft_callback(&state, callback, &id).await;
     }
-    draft_callback(&state, callback, &id).await
+    if name == link_cookie {
+        let claimed = member_link::finish_callback(&state, callback).await;
+        return callback_page(claimed.then_some(name), &id);
+    }
+    activation_callback(&state, callback, name, &id).await
 }
 
 async fn draft_callback(state: &OrganizationState, callback: Callback<'_>, id: &Uuid) -> Response {
@@ -521,6 +533,9 @@ async fn activation_callback(
 fn callback_page(cookie_name: Option<&str>, id: &Uuid) -> Response {
     let (status, title) = match cookie_name {
         Some(COOKIE) => (StatusCode::OK, "Draft login test"),
+        Some(name) if name.starts_with("__Host-spl-auth-link-") => {
+            (StatusCode::OK, "Team identity link")
+        }
         Some(_) => (StatusCode::OK, "Connection activation"),
         None => (StatusCode::BAD_REQUEST, "Draft login test"),
     };

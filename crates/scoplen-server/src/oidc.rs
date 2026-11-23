@@ -10,8 +10,8 @@ mod id_token;
 #[cfg(test)]
 pub(crate) mod provider_test;
 mod trust;
-pub(crate) use exchange::verify_claimed_activation;
 pub use exchange::{DraftExchangeError, verify_claimed_draft_login};
+pub(crate) use exchange::{verify_claimed_activation, verify_claimed_member_link};
 pub use trust::{DiscoveryError, TrustedIssuer};
 
 /// Endpoints and issuer identification accepted for a single draft login attempt.

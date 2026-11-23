@@ -146,6 +146,13 @@ fn classification(
         | "organization.auth_draft_test_finished" => {
             (Scoplen, "generation", Some(Kind::AuthConnectionDraft), ActorKind::Either)
         }
+        "organization.auth_link_started"
+        | "organization.auth_link_finished"
+        | "organization.auth_link_abandoned"
+        | "organization.auth_link_confirmed"
+        | "organization.auth_link_withdrawn" => {
+            (AccountChange, "target_id", Some(Kind::Membership), ActorKind::Browser)
+        }
         "organization.auth_activation_started"
         | "organization.auth_activation_finished"
         | "organization.auth_activation_abandoned"
@@ -410,6 +417,28 @@ mod tests {
             assert_eq!(
                 event.resource,
                 Some(AuditResource { kind: AuditResourceKind::Organization, id: id(1) })
+            );
+        }
+    }
+
+    #[test]
+    fn member_link_events_disclose_only_the_target_membership_and_original_browser_actor() {
+        for action in [
+            "organization.auth_link_started",
+            "organization.auth_link_finished",
+            "organization.auth_link_abandoned",
+            "organization.auth_link_confirmed",
+            "organization.auth_link_withdrawn",
+        ] {
+            let fields = json!({"action":action,"target_id":id(1),"account_id":id(2),"browser_family_id":id(3),"organization_id":id(4)});
+            let event = from_bytes(&serde_json::to_vec(&fields).unwrap());
+            assert_eq!(event.category, AuditCategory::AccountChange);
+            assert_eq!(event.actor_account_id, Some(id(2)));
+            assert_eq!(event.actor_browser_family_id, Some(id(3)));
+            assert!(event.actor_device_id.is_none());
+            assert_eq!(
+                event.resource,
+                Some(AuditResource { kind: AuditResourceKind::Membership, id: id(1) })
             );
         }
     }

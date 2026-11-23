@@ -1,4 +1,4 @@
-// Source: https://raw.githubusercontent.com/scoplen/proto/4a09dfb6e5665674a5fbcb5c7b135a155520ce64/crates/scoplen-api/openapi/types.ts
+// Source: https://raw.githubusercontent.com/scoplen/proto/2c4ff90a3685fa08aff8ae90d7cf0bc5b0ded224/crates/scoplen-api/openapi/types.ts
 // SPDX-License-Identifier: Apache-2.0
 // Generated from v1.yaml by the Scoplen OpenAPI generator.
 
@@ -320,6 +320,41 @@ export interface AuthConnectionActivationStarted extends ActivationFields {
   status: "pending"; authorization_url: string;
 }
 // END GENERATED AuthConnection
+// BEGIN GENERATED OrganizationMemberLink
+interface PublicLinkFields {
+  sub?: never; subject?: never; subject_digest?: never; subject_comparison?: never;
+  comparison_value?: never; claims?: never; client_secret?: never; access_token?: never;
+  refresh_token?: never; id_token?: never;
+  [extension: string]: unknown;
+}
+interface OrganizationLinkContext extends PublicLinkFields {
+  organization_id: string; membership_id: string;
+}
+export interface OrganizationMemberLink extends OrganizationLinkContext {
+  id: string; etag: string; created_at: string; authorization_url?: never;
+}
+export interface OrganizationLinkConnection extends PublicLinkFields {
+  id: string; etag: string; issuer: string; client_id: string; space_id: string; authorization_url?: never;
+}
+interface OrganizationLinkStatusFields extends OrganizationLinkContext {
+  link: OrganizationMemberLink | null; authorization_url?: never;
+}
+export interface OrganizationMemberLinkStatus extends OrganizationLinkStatusFields {
+  connection?: never;
+}
+export interface OrganizationSelfLinkStatus extends OrganizationLinkStatusFields {
+  connection: OrganizationLinkConnection | null;
+}
+interface OrganizationLinkAttemptFields extends OrganizationLinkContext {
+  id: string; connection_revision: string; expires_at: string;
+}
+export interface OrganizationLinkAttempt extends OrganizationLinkAttemptFields {
+  status: "pending" | "verified" | "failed"; authorization_url?: never;
+}
+export interface OrganizationLinkAttemptStarted extends OrganizationLinkAttemptFields {
+  status: "pending"; authorization_url: string;
+}
+// END GENERATED OrganizationMemberLink
 // BEGIN GENERATED AccessRequests
 export interface AccessRequestFields { host: string; remote_user: string; duration_seconds: number; reason: string; }
 export interface AccessRequestCheckRequest { data: AccessRequestFields; }
@@ -986,7 +1021,7 @@ export type AccountBrowserLogoutRequest = OperatorLogoutRequest;
 export type AccountBrowserLogoutResponse = OperatorLogoutResponse;
 export type AccountBrowserRefreshResponse = BrowserAuthTokenResponse & { access_token: `ab1_${string}`; expires_in: 600; admission_token?: never; snapshot?: never };
 export type AccountBrowserPasswordLoginResponse = AccountBrowserRefreshResponse & { refresh_expires_in: 2592000 };
-export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-connection:manage auth-drafts:manage auth-test:run inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
+export const initialAccountBrowserScope = "access-requests:decide access-requests:read access-requests:write account:read audit:read auth-connection:manage auth-drafts:manage auth-links:self auth-links:withdraw auth-test:run inventory:read inventory:write orgs:create orgs:read orgs:write policies:read policies:write teams:join teams:manage" as const;
 export const accountBrowserOperations = [
   {
     "method": "GET",
@@ -1589,6 +1624,70 @@ export const accountBrowserOperations = [
       "auth-connection:manage"
     ],
     "writerReceipt": true
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-link",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/auth-link",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-link/attempts",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/auth-link/attempts/{attempt}",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/auth-link/attempts/{attempt}",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/orgs/{org}/auth-link/attempts/{attempt}/confirm",
+    "scopes": [
+      "auth-links:self"
+    ],
+    "writerReceipt": true
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/orgs/{org}/members/{membership}/auth-link",
+    "scopes": [
+      "auth-links:withdraw"
+    ],
+    "writerReceipt": false
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/orgs/{org}/members/{membership}/auth-link",
+    "scopes": [
+      "auth-links:withdraw"
+    ],
+    "writerReceipt": false
   }
 ] as const;
 // END GENERATED AccountBrowser

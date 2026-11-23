@@ -330,7 +330,7 @@ test("Account public transport confines routes and omits cookies while signing e
   assert.equal(calls, 1);
 });
 
-test("only the two Auth connection starts accept callback cookies in Account transport", async () => {
+test("only the three provider ceremony starts accept callback cookies in Account transport", async () => {
   const client = new AccountClient(
     origin,
     loginBoundary(await AccountProofKey.create()),
@@ -340,7 +340,19 @@ test("only the two Auth connection starts accept callback cookies in Account tra
   const activations = `${root}/activations`;
   const attempt = `${activations}/019a0000-0000-7000-8000-000000000002`;
   const draftTest = `${root}-draft/test-login`;
+  const link = `/api/v1/orgs/${org}/auth-link`;
+  const linkAttempt = `${link}/attempts/019a0000-0000-7000-8000-000000000002`;
+  const named = `/api/v1/orgs/${org}/members/019a0000-0000-7000-8000-000000000003/auth-link`;
   const cases = [
+    ["GET", link, false],
+    ["DELETE", link, false],
+    ["POST", `${link}/attempts`, true],
+    ["POST", `${link}/attempts?`, false],
+    ["GET", linkAttempt, false],
+    ["DELETE", linkAttempt, false],
+    ["POST", `${linkAttempt}/confirm`, false],
+    ["GET", named, false],
+    ["DELETE", named, false],
     ["POST", draftTest, true],
     ["GET", root, false],
     ["POST", activations, true],
@@ -367,6 +379,8 @@ test("only the two Auth connection starts accept callback cookies in Account tra
     assert.equal(init?.redirect, "error");
     assert.equal(init?.referrerPolicy, "no-referrer");
     const headers = new Headers(init?.headers);
+    assert.equal(init?.body, undefined);
+    assert.equal(headers.get("Content-Type"), null);
     assert.equal(headers.get("Authorization"), `DPoP ${access(1)}`);
     const proof = headers.get("DPoP")!;
     proofs.add(proof);

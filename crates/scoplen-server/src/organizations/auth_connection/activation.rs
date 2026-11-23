@@ -110,7 +110,7 @@ async fn start_admitted(
         &state.origin,
         issuer,
         &provider.authorization_endpoint,
-        client_id,
+        client_id.as_bytes(),
         &verifier,
         &state_proof,
         &nonce,

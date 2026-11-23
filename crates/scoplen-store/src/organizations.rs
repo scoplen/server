@@ -36,6 +36,7 @@ mod auth_envelope;
 pub mod grants;
 pub mod group_policy;
 pub mod inventory;
+pub mod member_link;
 mod name;
 mod team;
 pub mod user_ca;

@@ -483,6 +483,20 @@ connection status** to see the current revision. A lost start response can leave
 candidate active for up to five minutes. Wait for expiry before starting again if its ID
 is unavailable.
 
+With an active connection, an existing member can link their own identity. Open
+**Team settings → Your team identity link**, check the current link, and start identity
+verification. Open the provider in a new tab and complete its sign-in. Return to the
+initiating tab, check verification, and choose **Confirm identity link**. Start and
+confirm within five minutes of the original Scoplen password sign-in. If confirmation
+is unconfirmed, keep the original tab open and choose **Recover original confirmation**
+while that sign-in remains eligible.
+
+Members can remove their association with **Unlink identity → Confirm removal**.
+A current Owner can open the active member in **Members**, check the named identity
+link, then choose **Withdraw member link → Confirm removal**. Removal leaves native
+membership and its access policy in place. Linked sign-in, externally governed access,
+and provider-driven offboarding require separate support.
+
 Deployment operators can prepare `[[enterprise_identity.trusted_issuers]]` entries with
 the exact issuer, the approved IPv4 or IPv6 CIDRs, and an optional `ca_certificate` PEM
 bundle. Use identical entries on all API replicas. Run `spl-server --validate-config`

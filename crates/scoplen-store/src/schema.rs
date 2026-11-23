@@ -113,6 +113,12 @@ const ORGANIZATION_MEMBERSHIPS: TableSpec = TableSpec {
             nullable: false,
             primary_key: false,
         },
+        ColumnSpec {
+            name: "auth_link_generation",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
     ],
     foreign_keys: &[
         ForeignKey {
@@ -134,6 +140,10 @@ const ORGANIZATION_MEMBERSHIPS: TableSpec = TableSpec {
         IndexSpec {
             name: "organization_memberships_owner_id",
             columns: &["organization_id", "id"],
+        },
+        IndexSpec {
+            name: "organization_memberships_link_writer",
+            columns: &["organization_id", "id", "account_id"],
         },
     ],
 };
@@ -2674,6 +2684,10 @@ const ACCOUNT_BROWSER_FAMILIES: TableSpec = TableSpec {
             name: "account_browser_families_account",
             columns: &["account_id", "expires_at_ms"],
         },
+        IndexSpec {
+            name: "account_browser_families_link_writer",
+            columns: &["family_id", "account_id"],
+        },
     ],
 };
 
@@ -3391,6 +3405,208 @@ const ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS: TableSpec = TableSpec {
             columns: &["organization_id", "draft_generation"],
         },
     ],
+};
+
+const ORGANIZATION_AUTH_LINKS: TableSpec = TableSpec {
+    name: "organization_auth_links",
+    columns: &[
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "subject_comparison",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+    ],
+    indexes: &[
+        IndexSpec {
+            name: "organization_auth_links_membership",
+            columns: &["organization_id", "membership_id"],
+        },
+        IndexSpec {
+            name: "organization_auth_links_subject",
+            columns: &["organization_id", "subject_comparison"],
+        },
+    ],
+};
+
+const ORGANIZATION_AUTH_LINK_ATTEMPTS: TableSpec = TableSpec {
+    name: "organization_auth_link_attempts",
+    columns: &[
+        ColumnSpec { name: "id", kind: LogicalType::Bytes, nullable: false, primary_key: true },
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "membership_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "account_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "family_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "connection_revision",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "link_generation",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "state_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "browser_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "nonce_digest",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec { name: "phase", kind: LogicalType::Text, nullable: false, primary_key: false },
+        ColumnSpec {
+            name: "verifier",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "subject_comparison",
+            kind: LogicalType::Bytes,
+            nullable: true,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "created_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+        ColumnSpec {
+            name: "expires_at_ms",
+            kind: LogicalType::Integer,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[
+        ForeignKey {
+            source_column: "organization_id",
+            target_table: "organization_memberships",
+            target_column: "organization_id",
+        },
+        ForeignKey {
+            source_column: "membership_id",
+            target_table: "organization_memberships",
+            target_column: "id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "organization_memberships",
+            target_column: "account_id",
+        },
+        ForeignKey {
+            source_column: "family_id",
+            target_table: "account_browser_families",
+            target_column: "family_id",
+        },
+        ForeignKey {
+            source_column: "account_id",
+            target_table: "account_browser_families",
+            target_column: "account_id",
+        },
+    ],
+    indexes: &[
+        IndexSpec { name: "organization_auth_link_attempts_state", columns: &["state_digest"] },
+        IndexSpec { name: "organization_auth_link_attempts_family", columns: &["family_id"] },
+        IndexSpec {
+            name: "organization_auth_link_attempts_expiry",
+            columns: &["expires_at_ms", "id"],
+        },
+        IndexSpec {
+            name: "organization_auth_link_attempts_membership",
+            columns: &["organization_id", "membership_id"],
+        },
+    ],
+};
+
+const ORGANIZATION_AUTH_LINK_COMPARISON_KEYS: TableSpec = TableSpec {
+    name: "organization_auth_link_comparison_keys",
+    columns: &[
+        ColumnSpec {
+            name: "organization_id",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: true,
+        },
+        ColumnSpec {
+            name: "encrypted_key",
+            kind: LogicalType::Bytes,
+            nullable: false,
+            primary_key: false,
+        },
+    ],
+    foreign_keys: &[ForeignKey {
+        source_column: "organization_id",
+        target_table: "organizations",
+        target_column: "id",
+    }],
+    indexes: &[],
 };
 
 const ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS: TableSpec = TableSpec {
@@ -4184,6 +4400,9 @@ const TABLES: &[TableSpec] = &[
     ORGANIZATION_AUTH_CONNECTIONS,
     ORGANIZATION_AUTH_CONNECTION_ACTIVATIONS,
     ORGANIZATION_AUTH_ACTIVATION_PREFLIGHTS,
+    ORGANIZATION_AUTH_LINK_COMPARISON_KEYS,
+    ORGANIZATION_AUTH_LINKS,
+    ORGANIZATION_AUTH_LINK_ATTEMPTS,
     ORGANIZATION_AUTH_CONNECTION_RECEIPTS,
     ORGANIZATION_INVENTORY_ACKS,
     ORGANIZATION_GROUPS,
@@ -4802,6 +5021,15 @@ mod tests {
     const POSTGRES_AUTH_ACTIVATION_PREFLIGHTS: &str = include_str!(
         "../migrations/postgres/20261123040000_organization_auth_activation_preflights.sql"
     );
+    const SQLITE_AUTH_MEMBER_LINKS: &str =
+        include_str!("../migrations/sqlite/20261123050000_organization_auth_member_links.sql");
+    const POSTGRES_AUTH_MEMBER_LINKS: &str =
+        include_str!("../migrations/postgres/20261123050000_organization_auth_member_links.sql");
+
+    const SQLITE_AUTH_LINK_ADMISSION: &str =
+        include_str!("../migrations/sqlite/20261123060000_organization_auth_link_admission.sql");
+    const POSTGRES_AUTH_LINK_ADMISSION: &str =
+        include_str!("../migrations/postgres/20261123060000_organization_auth_link_admission.sql");
 
     fn test_directory() -> PathBuf {
         let path = std::env::temp_dir().join(format!("scoplen-schema-{}", uuid::Uuid::new_v4()));
@@ -4821,9 +5049,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn migration_pairs_match_the_logical_schema() {
-        let sqlite = [
+    fn sqlite_migration_source() -> String {
+        [
             SQLITE_ORGANIZATIONS,
             SQLITE_AUDIT,
             SQLITE_DEPLOYMENT_AUDIT,
@@ -4868,8 +5095,17 @@ mod tests {
             SQLITE_AUTH_DRAFT_TEST_ADMISSION,
             SQLITE_AUTH_CONNECTIONS,
             SQLITE_AUTH_ACTIVATION_PREFLIGHTS,
-        ];
-        let postgres = [
+            SQLITE_AUTH_MEMBER_LINKS,
+            SQLITE_AUTH_LINK_ADMISSION,
+            include_str!(
+                "../migrations/sqlite/20261123070000_organization_auth_link_comparison_keys.sql"
+            ),
+        ]
+        .join("\n")
+    }
+
+    fn postgres_migration_source() -> String {
+        [
             POSTGRES_ORGANIZATIONS,
             POSTGRES_AUDIT,
             POSTGRES_DEPLOYMENT_AUDIT,
@@ -4913,10 +5149,20 @@ mod tests {
             POSTGRES_AUTH_DRAFT_TEST_ADMISSION,
             POSTGRES_AUTH_CONNECTIONS,
             POSTGRES_AUTH_ACTIVATION_PREFLIGHTS,
-        ];
-        validate_migration_source(&sqlite.join("\n"), false)
+            POSTGRES_AUTH_MEMBER_LINKS,
+            POSTGRES_AUTH_LINK_ADMISSION,
+            include_str!(
+                "../migrations/postgres/20261123070000_organization_auth_link_comparison_keys.sql"
+            ),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn migration_pairs_match_the_logical_schema() {
+        validate_migration_source(&sqlite_migration_source(), false)
             .expect("SQLite migration set matches schema");
-        let postgres = postgres.join("\n");
+        let postgres = postgres_migration_source();
         validate_migration_source(&postgres, true)
             .expect("PostgreSQL migration set matches schema");
         assert_invalid_postgres_generation_type_is_rejected(&postgres);

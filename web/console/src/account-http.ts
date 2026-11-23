@@ -151,7 +151,8 @@ export async function accountFetch({
     method === "POST" &&
     !path.includes("?") &&
     (route === "/api/v1/orgs/{org}/auth-connection-draft/test-login" ||
-      route === "/api/v1/orgs/{org}/auth-connection/activations");
+      route === "/api/v1/orgs/{org}/auth-connection/activations" ||
+      route === "/api/v1/orgs/{org}/auth-link/attempts");
   let response: Response;
   try {
     response = await fetch(url.href, {

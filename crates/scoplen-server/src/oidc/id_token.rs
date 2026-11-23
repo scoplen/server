@@ -148,7 +148,7 @@ impl<'a> IdToken<'a> {
         jwks: &[u8],
         expected: &ExpectedClaims<'_>,
         matches_nonce: impl FnOnce(&SecretBytes<32>) -> bool,
-    ) -> Result<(), Error> {
+    ) -> Result<SecretVec, Error> {
         let invalid = Error::InvalidIdentity;
         let set: JwkSet = serde_json::from_slice(jwks).map_err(|_| invalid)?;
         let mut keys = set.keys.iter().filter(|key| key.eligible(self.header.kid.as_deref()));
@@ -185,7 +185,9 @@ impl<'a> IdToken<'a> {
             return Err(invalid);
         }
         match decode_fixed(&claims.nonce).map(SecretBytes::new) {
-            Some(nonce) if matches_nonce(&nonce) => Ok(()),
+            Some(nonce) if matches_nonce(&nonce) => {
+                Ok(SecretVec::new(claims.sub.into_owned().into_bytes()))
+            }
             _ => Err(invalid),
         }
     }
@@ -233,11 +235,9 @@ mod tests {
         });
         let verify = |header: &Value, claims: &Value, signer, jwks: &Value| {
             let compact = sign(signer, header, claims);
-            IdToken::parse(&compact)?.verify(
-                &serde_json::to_vec(jwks).unwrap(),
-                &expected,
-                |actual| actual == &nonce,
-            )
+            IdToken::parse(&compact)?
+                .verify(&serde_json::to_vec(jwks).unwrap(), &expected, |actual| actual == &nonce)
+                .map(|subject| assert_eq!(subject.as_bytes(), b"opaque-human-subject"))
         };
         assert_eq!(verify(&header, &claims, &key, &jwks), Ok(()));
         assert_eq!(verify(&header, &claims, &wrong, &jwks), Err(Error::InvalidIdentity));

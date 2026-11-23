@@ -42,6 +42,7 @@ mod auth_draft_login;
 mod grants;
 mod group_policy;
 mod inventory;
+mod member_link;
 mod team;
 mod user_ca;
 
@@ -85,6 +86,7 @@ pub(crate) fn router(
         .merge(auth_connection::routes())
         .merge(auth_connection_draft::routes())
         .merge(auth_draft_login::routes())
+        .merge(member_link::routes())
         .merge(inventory::routes())
         .merge(group_policy::routes())
         .merge(grants::routes())
