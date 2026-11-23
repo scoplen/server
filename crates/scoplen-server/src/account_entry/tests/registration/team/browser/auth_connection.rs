@@ -229,7 +229,7 @@ async fn lifecycle(f: &Fixture) {
     assert_eq!(send(&tls, &browser, "GET", &root, &[], &[]).await.status, 200);
 }
 
-async fn native_member_removal(f: &Fixture) {
+async fn native_team_withdrawal(f: &Fixture) {
     use super::super::inventory::enroll_member;
 
     let owner = actor(f, "link-fence-owner").await;
@@ -267,12 +267,32 @@ async fn native_member_removal(f: &Fixture) {
     assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 1);
     assert_eq!(f.count("SELECT count(*) FROM organization_memberships WHERE status='deprovisioned' AND auth_link_generation=2").await, 1);
     assert_eq!(current_team(f, &member, other).await.membership.id, retained);
+
+    let reviewed = current_team(f, &owner, other).await;
+    let dissolve =
+        scoplen_api::team::TeamDissolveRequest { organization_id: other }.to_json().unwrap();
+    let key = Uuid::now_v7().to_string();
+    let headers = [
+        ("Origin", ORIGIN),
+        ("Content-Type", "application/json"),
+        ("If-Match", reviewed.etag.as_str()),
+        ("Idempotency-Key", key.as_str()),
+    ];
+    let dissolve_path = format!("/api/v1/orgs/{other}/dissolve");
+    let dissolved = send(&tls, &browser, "POST", &dissolve_path, &headers, &dissolve).await;
+    assert_eq!(dissolved.status, 200);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_links").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_auth_link_attempts").await, 0);
+    assert_eq!(f.count("SELECT count(*) FROM organization_memberships WHERE status='deprovisioned' AND auth_link_generation=2").await, 2);
+    let recovered = send(&tls, &browser, "POST", &dissolve_path, &headers, &dissolve).await;
+    assert_eq!(recovered.status, 200);
+    assert_eq!(recovered.body, dissolved.body);
 }
 
 browser_tests!(
-    sqlite_native_member_removal_fences_link_state_in_only_one_organization,
-    postgres_native_member_removal_fences_link_state_in_only_one_organization,
-    native_member_removal
+    sqlite_native_team_withdrawal_fences_link_state_in_only_one_organization,
+    postgres_native_team_withdrawal_fences_link_state_in_only_one_organization,
+    native_team_withdrawal
 );
 
 browser_tests!(
