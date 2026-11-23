@@ -715,6 +715,9 @@ pub(crate) trait WorkerStoreBackend: Send + Sync {
     fn cleanup_organization_auth_activations(
         &self,
     ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
+    fn cleanup_member_link_attempts(
+        &self,
+    ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
     fn expire_organization_access_requests(
         &self,
     ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send;
@@ -823,6 +826,11 @@ macro_rules! impl_worker_store_backend {
                 &self,
             ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send {
                 <$store>::cleanup_organization_auth_activations(self)
+            }
+            fn cleanup_member_link_attempts(
+                &self,
+            ) -> impl Future<Output = Result<u64, OrganizationStoreError>> + Send {
+                <$store>::cleanup_member_link_attempts(self)
             }
 
             fn expire_organization_access_requests(
@@ -1043,6 +1051,14 @@ async fn run_worker_role<S: WorkerStoreBackend + 'static>(
         };
         if let Err(error) = activation_cleanup {
             error!(%error, role = "worker", "organization activation retention pass failed");
+        }
+        let link_cleanup = tokio::select! {
+            biased;
+            () = shutdown_requested(&mut shutdown) => return Ok(()),
+            result = store.cleanup_member_link_attempts() => result,
+        };
+        if let Err(error) = link_cleanup {
+            error!(%error, role = "worker", "organization member link retention pass failed");
         }
         let request_expiry = tokio::select! {
             biased;
