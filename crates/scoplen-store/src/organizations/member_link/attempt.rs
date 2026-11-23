@@ -93,7 +93,12 @@ macro_rules! attempts {
                 let org = start.organization;
                 let writer = Self::member_link_writer(&mut tx, session, org, None, true).await?;
                 let expires = Self::link_fresh_deadline(&mut tx, writer).await?;
-                let active = Self::link_active_revision(&mut tx, org, start.revision).await?;
+                let active = Self::link_active_revision(&mut tx, org, start.revision)
+                    .await
+                    .map_err(|error| match error {
+                        Error::NotFound => Error::Conflict,
+                        other => other,
+                    })?;
                 if Self::current_member_link(&mut tx, writer.member).await?.link.is_some() {
                     return Err(Error::Conflict);
                 }

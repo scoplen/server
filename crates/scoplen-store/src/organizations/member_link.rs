@@ -174,7 +174,7 @@ macro_rules! members {
                 valid_id(revision)?;
                 let row = sqlx::query("SELECT revision,issuer,client_id,space_id,provider,trust_fingerprint
                             FROM organization_auth_connections WHERE organization_id=$1 AND status='active'")
-                            .bind(org.as_bytes().as_slice()).fetch_optional(&mut **tx).await?.ok_or(Error::Conflict)?;
+                            .bind(org.as_bytes().as_slice()).fetch_optional(&mut **tx).await?.ok_or(Error::NotFound)?;
                 if row_uuid(&row, "revision")? != revision {
                     return Err(Error::PreconditionFailed);
                 }
