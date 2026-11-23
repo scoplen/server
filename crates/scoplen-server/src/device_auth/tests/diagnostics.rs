@@ -81,6 +81,16 @@ struct Fixture {
     logs: CapturedLogs,
 }
 
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
+struct SourceAdmission {
+    window_start_ms: i64,
+    attempts: i64,
+    failure_streak: i64,
+    last_failure_ms: Option<i64>,
+    cooldown_until_ms: Option<i64>,
+    retain_until_ms: i64,
+}
+
 impl Fixture {
     async fn new() -> Self {
         let directory = directory();
@@ -144,6 +154,11 @@ impl Fixture {
         response
     }
 
+    async fn source_admission(&self) -> SourceAdmission {
+        sqlx::query_as("SELECT window_start_ms, attempts, failure_streak, last_failure_ms, cooldown_until_ms, retain_until_ms FROM device_auth_admission WHERE endpoint=3 AND kind=1")
+            .fetch_one(self.store.pool()).await.expect("refresh source admission")
+    }
+
     async fn close(self) {
         self.server.abort();
         let _ = self.server.await;
@@ -156,16 +171,18 @@ impl Fixture {
 #[tokio::test]
 async fn sqlite_refresh_writer_timeout_preserves_admission_and_credentials() {
     let mut fixture = Fixture::new().await;
-    for _ in 0..2 {
-        assert_eq!(fixture.rotate().await.status, 200);
-    }
-    let attempts: i64 = sqlx::query_scalar(
-        "SELECT attempts FROM device_auth_admission WHERE endpoint=3 AND kind=1",
-    )
-    .fetch_one(fixture.store.pool())
-    .await
-    .expect("source attempts");
-    assert_eq!(attempts, 2);
+    assert_eq!(fixture.rotate().await.status, 200);
+    let first = fixture.source_admission().await;
+    assert_eq!(first.attempts, 1);
+    assert_eq!(fixture.rotate().await.status, 200);
+    let admission = fixture.source_admission().await;
+    assert!(admission.window_start_ms >= first.window_start_ms);
+    // A successful request charges the current window even if CI crossed a minute boundary.
+    let expected = if admission.window_start_ms == first.window_start_ms { 2 } else { 1 };
+    assert_eq!(admission.attempts, expected);
+    assert_eq!(admission.failure_streak, 0);
+    assert_eq!(admission.last_failure_ms, None);
+    assert_eq!(admission.cooldown_until_ms, None);
     let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
         .fetch_one(fixture.store.pool())
         .await
@@ -209,13 +226,7 @@ async fn sqlite_refresh_writer_timeout_preserves_admission_and_credentials() {
         let logs = fixture.logs.0.lock().expect("captured log lock");
         assert!(!String::from_utf8_lossy(&logs).contains(&fixture.token.refresh_token));
     }
-    let unchanged: (i64, i64, i64) = sqlx::query_as(
-        "SELECT attempts, failure_streak, COALESCE(cooldown_until_ms, 0) FROM device_auth_admission WHERE endpoint=3 AND kind=1",
-    )
-    .fetch_one(fixture.store.pool())
-    .await
-    .expect("admission state");
-    assert_eq!(unchanged, (2, 0, 0));
+    assert_eq!(fixture.source_admission().await, admission);
     let retained_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_audit_events")
         .fetch_one(fixture.store.pool())
         .await
