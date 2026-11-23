@@ -191,7 +191,7 @@ async fn sqlite_challenge_is_real_bounded_digest_only_and_survives_restart() {
     assert!(exact_digest, "only the attempt digest is retained");
     assert!(!raw_attempt_retained, "the raw attempt is never retained");
     stop(server).await;
-    store.pool().close().await;
+    crate::test_pool_close::close(store.pool()).await;
     let reopened = SqliteStore::open(&path).await.expect("reopened store");
     let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM account_request_challenges")
         .fetch_one(reopened.pool())
@@ -225,7 +225,7 @@ async fn sqlite_challenge_is_real_bounded_digest_only_and_survives_restart() {
         .expect("no account side effect");
     assert_eq!(accounts, 0);
     stop(server).await;
-    reopened.pool().close().await;
+    crate::test_pool_close::close(reopened.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
@@ -333,7 +333,7 @@ async fn sqlite_metadata_and_structural_denials_are_audited_without_challenges()
         denials
     );
     stop(server).await;
-    store.pool().close().await;
+    crate::test_pool_close::close(store.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
@@ -369,7 +369,7 @@ async fn sqlite_source_rate_rejects_before_body_and_ignores_forwarded_source() {
     assert_eq!(reply.header("ratelimit-policy"), Some(expected.rate_limit_policy()));
     assert_eq!(reply.header("ratelimit"), Some(expected.rate_limit().as_str()));
     stop(server).await;
-    store.pool().close().await;
+    crate::test_pool_close::close(store.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
@@ -406,8 +406,8 @@ async fn sqlite_decoded_device_rate_is_shared_between_real_http_instances() {
     assert_eq!(count, 10);
     stop(first_server).await;
     stop(second_server).await;
-    first.pool().close().await;
-    second.pool().close().await;
+    crate::test_pool_close::close(first.pool()).await;
+    crate::test_pool_close::close(second.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
@@ -426,7 +426,7 @@ async fn sqlite_mandatory_audit_failure_overrides_metadata_denial() {
         .expect("remove owned fault");
     drop(fault);
     stop(server).await;
-    store.pool().close().await;
+    crate::test_pool_close::close(store.pool()).await;
     crate::test_support::remove_test_directory(directory).await;
 }
 
