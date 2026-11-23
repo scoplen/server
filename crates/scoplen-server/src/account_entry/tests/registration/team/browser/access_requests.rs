@@ -394,7 +394,18 @@ async fn lifecycle(f: &Fixture, use_browser: bool) {
             false,
         );
     }
-    f.execute("UPDATE account_entry_admission SET attempts=30 WHERE endpoint=46 AND kind=1").await;
+    // Start the next window on the fixture's durable clock so the filled window
+    // stays current even when the wall clock crossed a minute during the journey.
+    f.execute(
+        "UPDATE account_entry_state SET time_high_water_ms=(time_high_water_ms/60000+1)*60000
+         WHERE singleton=1;
+         UPDATE account_entry_admission SET attempts=30,
+           window_start_ms=(SELECT time_high_water_ms FROM account_entry_state WHERE singleton=1),
+           last_admitted_ms=(SELECT time_high_water_ms FROM account_entry_state WHERE singleton=1),
+           retire_at_ms=(SELECT time_high_water_ms FROM account_entry_state WHERE singleton=1)+600000
+         WHERE endpoint=46 AND kind=1",
+    )
+    .await;
     http(f.address, "POST", &check_path, &vec![b' '; 4097], &[]).await.problem(
         429,
         "auth.rate_limited",
