@@ -60,7 +60,7 @@ if (invoked) {
 }
 
 const oldMigration = 20261024030000;
-const newMigration = 20261123020000;
+const newMigration = 20261123030000;
 const vaultId = Buffer.alloc(16, 0x11);
 const objectId = Buffer.alloc(16, 0x22);
 const organizationId = Buffer.alloc(16, 0x33);
@@ -240,7 +240,7 @@ export function inspectDatabase(path, current) {
     );
     const accessTables = database
       .prepare(
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_access_requests', 'organization_auth_draft_receipts', 'organization_auth_draft_tests', 'organization_auth_drafts', 'organization_grants') ORDER BY name",
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('organization_access_requests', 'organization_auth_connection_activations', 'organization_auth_connection_receipts', 'organization_auth_connections', 'organization_auth_draft_receipts', 'organization_auth_draft_tests', 'organization_auth_drafts', 'organization_grants') ORDER BY name",
       )
       .all()
       .map((row) => row.name);
@@ -249,6 +249,9 @@ export function inspectDatabase(path, current) {
       current
         ? [
             "organization_access_requests",
+            "organization_auth_connection_activations",
+            "organization_auth_connection_receipts",
+            "organization_auth_connections",
             "organization_auth_draft_receipts",
             "organization_auth_draft_tests",
             "organization_auth_drafts",
@@ -262,7 +265,7 @@ export function inspectDatabase(path, current) {
           database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()
             .count,
           0,
-          "upgrade must preserve an empty Grant, access request and issuer draft history",
+          "upgrade must preserve an empty Grant, access request and Organization identity history",
         );
       }
     }

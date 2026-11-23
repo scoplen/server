@@ -2,6 +2,8 @@
 
 #[path = "support/admission_migrations.rs"]
 mod admission_migrations;
+#[path = "support/auth_connection_migration.rs"]
+mod auth_connection_migration;
 mod support;
 
 use admission_migrations::{apply_admission_migration, assert_retained_admission};
@@ -107,6 +109,7 @@ macro_rules! constraints {
 const PASSWORD_CHANGE: i64 = 20_261_117_020_000;
 const AUTH_DRAFTS: i64 = 20_261_123_000_000;
 const AUTH_DRAFT_TEST_ADMISSION: i64 = 20_261_123_020_000;
+const AUTH_CONNECTIONS: i64 = 20_261_123_030_000;
 
 macro_rules! upgrade_admission {
     ($pool:expr, $directory:literal) => {{
@@ -120,6 +123,7 @@ macro_rules! upgrade_admission {
             [53_i64],
             [0_i64, 54]
         );
+        apply_admission_migration!($pool, $directory, AUTH_CONNECTIONS, 54_i64..=57, [0_i64, 58]);
     }};
 }
 
@@ -151,7 +155,8 @@ async fn sqlite_request_upgrade_preserves_populated_state_constraints_and_reopen
     store.pool().close().await;
     let store = SqliteStore::open(&path).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=53);
+    assert_retained_admission!(store.pool(), 46_i64..=57);
+    auth_connection_migration::sqlite::check(store.pool(), ids.0, ids.3).await;
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )
@@ -187,7 +192,8 @@ async fn postgres_request_upgrade_preserves_populated_state_constraints_and_reop
     store.pool().close().await;
     let store = PostgresStore::connect(url.as_str()).await.unwrap();
     preserved!(store.pool(), ids.0);
-    assert_retained_admission!(store.pool(), 46_i64..=53);
+    assert_retained_admission!(store.pool(), 46_i64..=57);
+    auth_connection_migration::postgres::check(store.pool(), ids.0, ids.3).await;
     let retained: (String, Vec<u8>, i64) = sqlx::query_as(
         "SELECT status,response_json,expires_at_ms FROM organization_access_requests WHERE id=$1",
     )
